@@ -18,7 +18,6 @@ use crate::commands::{perform_later, problem_line};
 use crate::extensions::Then as Asked;
 use crate::project_settings::field_frame;
 use crate::session::said_at;
-use crate::shell::Shell;
 
 /// A finding as the window lists it: its occurrences stay in the export.
 #[derive(Clone, Debug, PartialEq)]
@@ -134,7 +133,7 @@ pub fn menu(id: u64, filing: WeakEntity<Filing>, cx: &mut App) -> Entity<Menu> {
 
 /// The dialog that marks a finding filed: the address of the issue it became.
 pub struct Filing {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The finding the dialog is open on.
     finding: Option<u64>,
     open: bool,
@@ -145,7 +144,11 @@ pub struct Filing {
 }
 
 impl Filing {
-    pub fn new(shell: WeakEntity<Shell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        shell: crate::commands::ShellOf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let address = cx.new(|cx| {
             crate::project_settings::styled_input(
                 "https://example.com/acme/app/issues/12",

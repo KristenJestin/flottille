@@ -193,7 +193,7 @@ fn open_rail<'a>(user: &User, lead: &str, cx: &'a mut TestAppContext) -> &'a mut
             let _ = session_page(&shell, cx);
             present(cx, "rail-ticket")
                 && present(cx, "rail-pull-api")
-                && present(cx, "rail-fact-Machine")
+                && present(cx, "rail-workspace-read")
         },
     );
     settle(cx);
@@ -215,6 +215,15 @@ fn the_session_rail_lists_the_ticket_above_the_pull_request(cx: &mut TestAppCont
     );
 }
 
+/// A fact of the Workspace drawn besides the ticket and the pull request: where the workspace
+/// was made from.
+fn other_fact(cx: &mut VisualTestContext) -> &'static str {
+    ["rail-fact-From"]
+        .into_iter()
+        .find(|id| present(cx, id))
+        .expect("a fact of the Workspace is drawn")
+}
+
 #[gpui_kit::test]
 fn the_workspace_section_does_not_show_prepared(cx: &mut TestAppContext) {
     let user = user();
@@ -222,10 +231,8 @@ fn the_workspace_section_does_not_show_prepared(cx: &mut TestAppContext) {
     with_ticket_and_pull(&user);
     let cx = open_rail(&user, &lead, cx);
 
-    assert!(
-        present(cx, "rail-fact-Machine"),
-        "the other facts are still there"
-    );
+    let other = other_fact(cx);
+    assert!(present(cx, other), "the other facts are still there");
     for id in [
         "rail-fact-Prepared",
         "rail-fact-Prepared-label",
@@ -247,11 +254,12 @@ fn the_icons_of_the_repository_the_ticket_and_the_pull_request_share_one_x_and_s
     with_ticket_and_pull(&user);
     let cx = open_rail(&user, &lead, cx);
 
+    let other = format!("{}-icon", other_fact(cx));
     let icons = [
         "rail-repository-api-icon",
         "rail-line-ticket-icon",
         "rail-line-pull-api-icon",
-        "rail-fact-Machine-icon",
+        other.as_str(),
     ];
     let at: Vec<_> = icons.iter().map(|id| rect(cx, id).origin.x).collect();
     assert!(
@@ -259,11 +267,12 @@ fn the_icons_of_the_repository_the_ticket_and_the_pull_request_share_one_x_and_s
         "one column for the icons: {icons:?} {at:?}"
     );
     // A fact with no icon keeps its place in the column, so its label starts where the others do.
+    let other = format!("{}-label", other_fact(cx));
     let labels = [
         "rail-repository-api-label",
         "rail-line-ticket-label",
         "rail-line-pull-api-label",
-        "rail-fact-Machine-label",
+        other.as_str(),
     ];
     let at: Vec<_> = labels.iter().map(|id| rect(cx, id).origin.x).collect();
     assert!(
@@ -281,11 +290,12 @@ fn every_fact_s_value_ends_at_the_same_right_edge_and_truncates_before_its_label
     with_ticket_and_pull(&user);
     let cx = open_rail(&user, &lead, cx);
 
+    let other = format!("{}-value", other_fact(cx));
     let values = [
         "rail-repository-api-value",
         "rail-ticket",
         "rail-pull-api",
-        "rail-fact-Machine-value",
+        other.as_str(),
     ];
     let right: Vec<_> = values.iter().map(|id| rect(cx, id).right()).collect();
     assert!(
@@ -310,7 +320,8 @@ fn the_values_of_the_ticket_and_the_pull_request_are_drawn_at_the_size_of_the_ot
     let cx = open_rail(&user, &lead, cx);
 
     // The line height follows the text size (`mono(size)` is 1.4 times it): one height, one size.
-    let others = rect(cx, "rail-fact-Machine-value").size.height;
+    let other = format!("{}-value", other_fact(cx));
+    let others = rect(cx, &other).size.height;
     for id in ["rail-ticket", "rail-pull-api"] {
         assert_eq!(rect(cx, id).size.height, others, "{id}");
     }
@@ -367,7 +378,7 @@ fn open_session<'a>(
     cx.update(|window, cx| window.click(session_id(id), cx));
     until(&shell, cx, "the rail's facts", |cx| {
         let _ = session_page(&shell, cx);
-        present(cx, "rail-fact-Machine")
+        present(cx, "rail-workspace-read")
     });
     settle(cx);
     (shell, cx)
@@ -471,7 +482,7 @@ fn every_row_of_a_workspace_menu_has_an_icon_of_its_own(cx: &mut TestAppContext)
     let (shell, cx) = {
         let (shell, cx) = window(&user, cx);
         until(&shell, cx, "the ticket in the rail", |cx| {
-            present(cx, &session_id(&lead).to_string())
+            cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
         });
         cx.update(|window, cx| window.click(session_id(&lead), cx));
         until(&shell, cx, "the ticket in the rail", |cx| {
@@ -761,5 +772,99 @@ fn a_file_not_committed_disables_the_rail_s_removal_with_its_reason(cx: &mut Tes
         workspaces_of_app(&user),
         1,
         "the disabled button does nothing"
+    );
+}
+
+// ── Where a session works, said by its icon (#1287) ──────────────────────────────────────────
+
+#[gpui_kit::test]
+fn the_side_panel_says_where_a_session_works_by_its_icon(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let in_folder = another_session(&user, None, "work in the project folder");
+    let folder = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap()["folder"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    // In a workspace: the branch icon says it, with the workspace's folder.
+    assert_eq!(
+        labelled(cx, "rail-repository-api-icon").as_deref(),
+        Some(format!("Works in a workspace of its own: {folder}").as_str()),
+    );
+    for row in ["rail-fact-Place", "rail-fact-Machine"] {
+        assert!(!present(cx, row), "{row} is not a row of the side panel");
+    }
+
+    // In the project folder: the folder icon says it.
+    cx.update(|window, cx| window.click(session_id(&in_folder), cx));
+    until(&shell, cx, "the project folder's side panel", |cx| {
+        labelled(cx, "rail-repository-api-icon").as_deref()
+            == Some("Works in the project folder itself")
+    });
+    settle(cx);
+    for row in ["rail-fact-Place", "rail-fact-Machine"] {
+        assert!(!present(cx, row), "{row} is not a row of the side panel");
+    }
+}
+
+/// #1285: a session in the project's folder, whose repository `api` is on a long branch.
+#[gpui_kit::test]
+fn a_repository_s_name_stays_whole_beside_a_long_branch(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = user.path("work/app");
+    let dir = folder.join("api");
+    user.git_init(&dir);
+    std::fs::write(dir.join("README.md"), "api\n").unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &dir,
+        &[
+            "checkout",
+            "--quiet",
+            "-b",
+            "fix/a-long-branch-name-of-a-fix",
+        ],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its first turn", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the rail names the repository", |cx| {
+        let _ = session_page(&shell, cx);
+        present(cx, "rail-repository-api-value")
+    });
+    settle(cx);
+
+    let name = rect(cx, "rail-repository-api-label");
+    let branch = rect(cx, "rail-repository-api-value");
+    let line = rect(cx, "rail-line-repository-api");
+    assert!(
+        f32::from(name.size.height) <= 24.,
+        "the name is one line, not a letter a line: {name:?}"
+    );
+    assert!(
+        name.right() <= branch.origin.x,
+        "{name:?} before {branch:?}"
+    );
+    assert!(
+        branch.right() <= line.right(),
+        "the branch is cut, it never leaves the rail: {branch:?} in {line:?}"
     );
 }

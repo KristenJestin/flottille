@@ -785,7 +785,7 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     assert_eq!(pending(&user), held, "Full held a call");
     assert_eq!(judged(&user), 1, "Full reached the judge");
     claim(
-        "In Full, code you run (an interpreter's inline code, a script you wrote) acts with the user's rights and the gate does not see what it touches: only a sandbox would close that",
+        "In Full, code you run (an interpreter's inline code, a script you wrote) runs as the user, confined in no way, and the gate does not see what it touches: nothing is held back from it",
     );
 
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");

@@ -20,8 +20,8 @@ use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
 use flottille_window::session_link::SessionUpdate;
-use flottille_window::shell::{Selection, bell_group_title_id};
-use flottille_window::tree::{session_id, session_machine_id};
+use flottille_window::shell::Selection;
+use flottille_window::tree::{session_id, session_machine_id, session_mark_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::tie_id;
 use gpui_kit::test::TestWindowExt;
@@ -199,12 +199,16 @@ fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Opti
     Some(format!("tree-row-{}", row.as_u64()))
 }
 
-/// The height of `frame`, `None` once it is gone.
-fn height(cx: &mut VisualTestContext, frame: &str) -> Option<f32> {
+/// The heights of `frame`: none once it is gone, two while a row that moves between two projects
+/// of the tree (the one its pilot has and the one its machine lists) is in both, the one it
+/// leaves folding away.
+fn heights(cx: &mut VisualTestContext, frame: &str) -> Vec<f32> {
     cx.update(|window, _| {
         window
-            .try_find(frame.to_owned())
+            .find_all(frame.to_owned())
+            .iter()
             .map(|found| f32::from(found.bounds().size.height))
+            .collect()
     })
 }
 
@@ -262,18 +266,86 @@ fn a_session_on_another_machine_shows_under_its_pilot_with_the_machine(cx: &mut 
         label(cx, session_id(&row)).as_deref(),
         Some("Finish the export")
     );
-    // Its machine's name and its state as last known.
+    // Its machine's name and its state, as that machine lists it or as last known.
     let said = label(cx, session_machine_id(&row)).unwrap_or_default();
     assert!(said.starts_with("server · "), "{said}");
     let state = said.trim_start_matches("server · ");
     assert!(
-        ["running", "waiting", "reported"].contains(&state),
+        ["running", "idle", "waiting", "reported"].contains(&state),
         "{said}"
     );
 }
 
+/// A hub, `pc` its first member with the project `app` on `feat/export`, `more` the more lines of
+/// its file, and `server` a runner paired with it that has no project: the launch makes it there.
+fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
+    let server = runner().with_judge(json!([
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (hub, pc, server) = pc_and_server_on(Machine::of(runner()), server);
+    let repo = pc.user.path("work/app");
+    pc.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    pc.user.git(&repo, &["add", "."]);
+    pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
+    pc.user
+        .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    // No branch convention of its own: one would make the launch the user's to decide there.
+    let text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n{more}\n\
+         [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
+        pc.user.path("work/app").display(),
+        pc.user.path("work/app-work").display()
+    );
+    pc.user.write_project_file("app", &text);
+    pc.user.call("project.list", json!({})).unwrap();
+    eventually("server offers Claude", || {
+        pc.remote()["machines"].as_array().unwrap().iter().any(|m| {
+            m["name"] == "server"
+                && m["offers"]["agents"]
+                    .as_array()
+                    .is_some_and(|agents| agents.iter().any(|a| a == "claude"))
+        })
+    });
+    (hub, pc, server)
+}
+
 #[gpui_kit::test]
-fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
+fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
+    // The project is made there, and its session says nothing back for a while.
+    let (_hub, pc, server) = pc_and_bare_server("");
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export", "do": [{"wait": 60000}, {"say": "done"}]}
+    ]}));
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session made on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_machine_id(&row));
+        if said.as_deref() == Some("server · preparing app") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[gpui_kit::test]
+fn opening_it_shows_that_machine_s_page_of_it(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let (_pilot, mcp) = root(&pc, "auto");
     let agent = led_on_server(&mcp);
@@ -287,29 +359,23 @@ fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
 
-    until(
-        &shell,
-        cx,
-        "the window shows server on that session",
-        |cx| {
-            shell.read_with(cx, |s, cx| {
-                s.machine_shown().as_deref() == Some("server")
-                    && s.main()
-                        .read(cx)
-                        .session_page()
-                        .is_some_and(|page| page.read(cx).id() == agent)
-            })
-        },
-    );
-    // The page arrived by the switch: its header and its composer enter, one after the other.
+    until(&shell, cx, "the page of that session, server's", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main()
+                    .read(cx)
+                    .session_page()
+                    .is_some_and(|page| page.read(cx).id() == agent)
+        })
+    });
+    // The page arrives: its header and its composer enter, one after the other.
     for section in ["0", "2"] {
         let id = gpui_kit::ElementId::Name(format!("session-section-{agent}-{section}").into());
         assert!(present(cx, id), "section {section} enters");
     }
-    // Its own row now: the session as server lists it.
-    until(&shell, cx, "its row on server", |cx| {
-        present(cx, session_id(&agent))
-    });
+    // Its row stays under its pilot: the list is this machine's, nothing switched (#1271).
+    settle(&shell, cx);
+    assert!(present(cx, session_id(&row)), "its row left the list");
     assert!(server.log().contains("asked by pc"), "{}", server.log());
 }
 
@@ -354,12 +420,12 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
     let agent = led_on_server(&mcp);
     let row = elsewhere_id("server", &agent);
     until(&shell, cx, "the row comes", |cx| {
-        frame_of(&shell, &row, cx).is_some_and(|frame| height(cx, &frame).is_some())
+        frame_of(&shell, &row, cx).is_some_and(|frame| !heights(cx, &frame).is_empty())
     });
     let frame = frame_of(&shell, &row, cx).unwrap();
-    let coming = height(cx, &frame).unwrap();
+    let coming = heights(cx, &frame).into_iter().fold(f32::MAX, f32::min);
     settle(&shell, cx);
-    let full = height(cx, &frame).unwrap();
+    let full = heights(cx, &frame).into_iter().fold(0., f32::max);
     assert!(full > 0., "{full}");
     assert!(
         coming < full,
@@ -376,11 +442,11 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
             == "ended"
     });
     until(&shell, cx, "the row starts folding away", |cx| {
-        height(cx, &frame).is_none_or(|height| height < full)
+        heights(cx, &frame).into_iter().all(|height| height < full)
     });
-    let going = height(cx, &frame);
+    let going = heights(cx, &frame);
     assert!(
-        going.is_some_and(|height| height > 0.),
+        going.iter().any(|height| *height > 0.),
         "the row folds away, it does not vanish: {going:?}"
     );
     settle(&shell, cx);
@@ -550,7 +616,7 @@ fn the_project_page_neither_lists_nor_ends_a_session_of_another_machine(cx: &mut
 }
 
 #[gpui_kit::test]
-fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) {
+fn the_question_cards_of_another_machine_name_it(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     server.user.fake_script(json!({"turns": [
         {"when": "ask me", "do": [
@@ -591,24 +657,9 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
     let (shell, cx) = window(&pc, cx);
     settle(&shell, cx);
 
-    shell.update(cx, |s, cx| s.choose_machine(Some("server".to_owned()), cx));
-    until(&shell, cx, "server's question in the inbox", |cx| {
-        shell.read_with(cx, |s, _| {
-            s.machine_shown().as_deref() == Some("server")
-                && s.snapshot().bell.iter().any(|item| {
-                    item.session.as_deref() == Some(id.as_str()) && item.kind == "question"
-                })
-        })
-    });
-    cx.update(|window, cx| window.click("bell", cx));
-    settle(&shell, cx);
-    // The panel groups a session's rows under its title, which says the machine.
-    let said = label(cx, bell_group_title_id(&id)).unwrap_or_default();
-    assert!(said.ends_with(" · on server"), "{said:?}");
-    cx.update(|window, cx| window.click("bell", cx));
-    settle(&shell, cx);
-
-    let page = open_page(&shell, &id, cx);
+    // Its page is the server's, from its row of the one list.
+    let row = flottille_window::model::elsewhere_id("server", &id);
+    let page = open_page(&shell, &row, cx);
     until(&shell, cx, "the question's card", |cx| {
         page.read_with(cx, |p, cx| p.ask_dock().read(cx).shown().is_some())
     });
@@ -843,4 +894,798 @@ fn a_child_on_another_machine_is_in_the_sub_agents_list_with_its_machine_icon(
         "it folds before it is gone: {drawn:?}"
     );
     assert!(!present(cx, row.clone().into()), "gone once the fold ended");
+}
+
+/// A session led by `pc`'s root, in Ask, started on `server` and held there for its user: its id
+/// there, once its request waits.
+fn held_on_server(mcp: &Mcp, server: &Machine) -> String {
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "You build the export of the report.\nStart with the totals."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let requests = server.user.call("approval.list", json!({})).unwrap();
+        if let Some(agent) = requests["requests"][0]["agent"].as_str() {
+            return agent.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the launch was never held on server"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The state `machine` lists its session `agent` in, for the other machines.
+fn listed_state(machine: &Machine, agent: &str) -> Option<String> {
+    let lists = machine.user.call("remote.sessions", json!({})).ok()?;
+    lists["this"]
+        .as_array()?
+        .iter()
+        .find(|session| session["id"] == agent)
+        .and_then(|session| session["state"].as_str())
+        .map(str::to_owned)
+}
+
+#[gpui_kit::test]
+fn a_launch_held_on_another_machine_shows_it_waits_for_the_user(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+
+    // Its machine lists it as needing the user, as its own window shows it.
+    eventually("server lists the held session as needing the user", || {
+        listed_state(&server, &agent).as_deref() == Some("needs you")
+    });
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    // From the moment it is held, and for as long as it is, never running: the lists the
+    // machines send each other meanwhile say the same.
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&row)).unwrap_or_default();
+        assert_eq!(said, "Needs you on server");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        label(cx, session_machine_id(&row)).as_deref(),
+        Some("server · needs you")
+    );
+    let mark = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .elsewhere(&row)
+            .and_then(|session| session.mark)
+    });
+    assert_eq!(mark, Some(flottille_window::state::AgentState::NeedsYou));
+}
+
+#[gpui_kit::test]
+fn a_launch_held_on_another_machine_is_titled_with_its_title(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+
+    // On the window of the machine it is held on: its title, never its brief's first line.
+    let (shell, cx) = window(&server, cx);
+    until(&shell, cx, "the held session is in the tree", |cx| {
+        present(cx, session_id(&agent))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, session_id(&agent)).as_deref(),
+        Some("Finish the export")
+    );
+    // Its machine lists it so for the others.
+    let lists = server.user.call("remote.sessions", json!({})).unwrap();
+    let listed = lists["this"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == agent.as_str())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(listed["title"], "Finish the export", "{lists}");
+}
+
+#[gpui_kit::test]
+fn the_page_of_a_held_launch_says_it_waits_for_the_user_s_decision(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+
+    let (shell, cx) = window(&server, cx);
+    let page = open_page(&shell, &agent, cx);
+    settle(&shell, cx);
+    let lines: Vec<String> = page.read_with(cx, |page, cx| {
+        let conversation = page.conversation().read(cx);
+        conversation
+            .groups()
+            .iter()
+            .filter_map(|group| conversation.group_id(group))
+            .collect()
+    });
+    let said: Vec<Option<String>> = lines
+        .iter()
+        .map(|line| label(cx, line.clone().into()))
+        .collect();
+    // No step was run: the line over its request says what it waits for, not `0 steps · 0.0s`.
+    assert_eq!(
+        said,
+        [Some("Waits for your decision".to_owned())],
+        "{lines:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_running_root_of_another_machine_with_a_question_shows_needs_you(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    // Its own repository on server, for a session started there.
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    // It runs, then asks the user and goes on working: an ask does not hold the turn.
+    server.user.fake_script(json!({"turns": [
+        {"when": "Export the totals", "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "ask", "arguments": {"question": "CSV or JSON first?"}}},
+            {"wait": 60000},
+            {"say": "done"}
+        ]}
+    ]}));
+    let started = server
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Export the totals of the year"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+
+    // Its row in the server's group of the tree, running, the window open before it asks.
+    let (shell, cx) = window(&pc, cx);
+    let row = elsewhere_id("server", &id);
+    until(&shell, cx, "the running root of server", |cx| {
+        label(cx, session_mark_id(&row)).as_deref() == Some("Running")
+    });
+
+    std::fs::write(server.user.path("fake/release"), "").unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let agent = server
+            .user
+            .call("agent.show", json!({"agent": id}))
+            .unwrap()["agent"]
+            .clone();
+        if agent["waiting_on_answer"] == true && agent["state"] == "working" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "it never asked while its turn ran: {agent}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Needs you wins over running, as on its machine.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&row));
+        if said.as_deref() == Some("Needs you") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}, server lists it {:?}",
+            listed_state(&server, &id)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let mark = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .elsewhere(&row)
+            .and_then(|session| session.mark)
+    });
+    assert_eq!(mark, Some(flottille_window::state::AgentState::NeedsYou));
+
+    let agent = server
+        .user
+        .call("agent.show", json!({"agent": id}))
+        .unwrap()["agent"]
+        .clone();
+    assert_eq!(agent["state"], "working", "its turn still runs");
+}
+
+#[gpui_kit::test]
+fn a_led_session_of_another_machine_that_asks_the_user_needs_you_under_its_pilot(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server();
+    // It asks once its pilot's machine is off: the question goes to the user there.
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export of the report.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "ask", "arguments": {"question": "CSV or JSON first?"}}}
+        ]}
+    ]}));
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "working")
+    });
+    let stopped = pc.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", pc.log());
+    eventually("server sees pc offline", || {
+        server.remote()["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "pc" && m["state"] != "online")
+    });
+    std::fs::write(server.user.path("fake/release"), "").unwrap();
+    eventually("the session waits on the user of server", || {
+        server
+            .user
+            .call("agent.tree", json!({"agent": agent}))
+            .unwrap()["agents"][0]["waiting_on"]
+            == "user"
+    });
+    // pc back, its link to server up again.
+    pc.user.status();
+    eventually("pc sees server online", || {
+        pc.remote()["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "server" && m["state"] == "online")
+    });
+
+    // Under its pilot, its row says what server says of it: it needs the user there.
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&row));
+        if said.as_deref() == Some("Needs you on server") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}, server lists it {:?}",
+            listed_state(&server, &agent)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        label(cx, session_machine_id(&row)).as_deref(),
+        Some("server · needs you")
+    );
+}
+
+#[gpui_kit::test]
+fn a_child_launched_from_another_machine_is_not_a_root_in_the_window(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer
+        .text
+        .find("(agent ")
+        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
+    let child = answer.text[at + 7..at + 19].to_owned();
+    eventually("the child runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": child}))
+            .is_ok()
+    });
+    let (shell, cx) = window(&server, cx);
+
+    open_page(&shell, &child, cx);
+
+    // Its parent writes to it: a bar naming that agent stands where the composer would, with
+    // nothing to go back to.
+    until(&shell, cx, "the bar in place of the composer", |cx| {
+        present(cx, "read-only".into())
+    });
+    let said = label(cx, "read-only".into()).unwrap_or_default();
+    assert!(
+        said.contains(&format!("a child of agent {pilot} of pc")),
+        "{said}"
+    );
+    assert!(!present(cx, "composer-field".into()), "no composer");
+    assert!(!present(cx, "back-to-root".into()));
+}
+
+/// The address of the one repository of `app`, on both machines: one project row on either window.
+const APP: &str = "https://git.example/acme/app.git";
+
+/// [`pc_and_server`], `app` over the same repository on both machines, each machine told the
+/// other's: the sidebar of either window holds one row of `app`, with both machines' sessions.
+fn pc_and_server_on_one_repository() -> (TestHub, Machine, Machine) {
+    let (hub, pc, server) = pc_and_server();
+    pc.user
+        .git(&pc.user.path("work/app"), &["remote", "add", "origin", APP]);
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    server.user.git(&repo, &["remote", "add", "origin", APP]);
+    register(&pc);
+    register(&server);
+    let told = |machine: &Machine| {
+        machine.user.call("remote.sessions", json!({})).unwrap()["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|m| m["projects"].as_array().cloned().unwrap_or_default())
+            .any(|p| p["name"] == "app" && p["remotes"] == json!(["git.example/acme/app"]))
+    };
+    eventually("each machine is told the other's app", || {
+        told(&pc) && told(&server)
+    });
+    (hub, pc, server)
+}
+
+/// Another window, on `machine`'s daemon, in the application of the first one.
+fn open<'a>(
+    machine: &Machine,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let connect: Connect = Arc::new(machine.user.connector());
+    let device = Some(Device::in_folder(
+        machine.user.path("state/flottille/remote"),
+    ));
+    let (shell, cx) =
+        cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    (shell, cx)
+}
+
+/// The ids of the rows of the project `app`, in the order the tree draws them.
+fn rows_of_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.project("app")
+            .map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Whether `row` is drawn right under `pilot` in `app`, tied to it.
+fn right_under(shell: &Entity<Shell>, pilot: &str, row: &str, cx: &mut VisualTestContext) -> bool {
+    let rows = rows_of_app(shell, cx);
+    rows.iter()
+        .position(|id| id == pilot)
+        .is_some_and(|at| rows.get(at + 1).map(String::as_str) == Some(row))
+        && label(cx, tie_id(session_id(row))).is_some()
+}
+
+#[gpui_kit::test]
+fn a_led_session_of_another_machine_is_under_its_pilot(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server_on_one_repository();
+    // In Full, its end is let through as a session's it leads on this machine would be.
+    let (pilot, mcp) = root(&pc, "full");
+
+    // On the machine it runs on: under the row of its pilot, which that machine's list holds.
+    let agent = {
+        let (shell, cx) = window(&server, cx);
+        let pilot_row = elsewhere_id("pc", &pilot);
+        until(&shell, cx, "the pilot's row on server", |cx| {
+            present(cx, session_id(&pilot_row))
+        });
+        settle(&shell, cx);
+
+        let agent = led_on_server(&mcp);
+        until(&shell, cx, "its row comes", |cx| {
+            frame_of(&shell, &agent, cx).is_some_and(|frame| !heights(cx, &frame).is_empty())
+        });
+        let frame = frame_of(&shell, &agent, cx).unwrap();
+        let coming = heights(cx, &frame).into_iter().fold(f32::MAX, f32::min);
+        until(&shell, cx, "the session under its pilot on server", |cx| {
+            right_under(&shell, &pilot_row, &agent, cx)
+        });
+        settle(&shell, cx);
+        let full = heights(cx, &frame).into_iter().fold(0., f32::max);
+        assert!(
+            coming < full,
+            "the row unfolds from nothing: {coming} of {full}"
+        );
+        assert!(
+            right_under(&shell, &pilot_row, &agent, cx),
+            "{:?}",
+            rows_of_app(&shell, cx)
+        );
+        // Its machine's mark, as it sits among another machine's rows.
+        let said = label(cx, session_machine_id(&agent)).unwrap_or_default();
+        assert!(said.starts_with("server"), "{said}");
+        assert!(present(
+            cx,
+            gpui_kit::ElementId::Name(format!("session-machine-icon-{agent}").into())
+        ));
+
+        // It ends: its row folds away from under its pilot.
+        let stopped = mcp.call("agent_stop", json!({"agent_id": agent}));
+        assert!(!stopped.error, "{}", stopped.text);
+        until(&shell, cx, "the row starts folding away", |cx| {
+            heights(cx, &frame).into_iter().all(|height| height < full)
+        });
+        let going = heights(cx, &frame);
+        assert!(
+            going.iter().any(|height| *height > 0.),
+            "the row folds away, it does not vanish: {going:?}"
+        );
+        settle(&shell, cx);
+        assert!(!rows_of_app(&shell, cx).contains(&agent));
+        agent
+    };
+
+    // On the pilot's machine, a led session of server that lives: under its pilot, with server's
+    // mark.
+    let other = led_on_server(&mcp);
+    assert_ne!(other, agent);
+    let (shell, cx) = open(&pc, cx);
+    let row = elsewhere_id("server", &other);
+    until(&shell, cx, "the session under its pilot on pc", |cx| {
+        right_under(&shell, &pilot, &row, cx)
+    });
+    let said = label(cx, session_machine_id(&row)).unwrap_or_default();
+    assert!(said.starts_with("server · "), "{said}");
+    assert!(present(
+        cx,
+        gpui_kit::ElementId::Name(format!("session-machine-icon-{row}").into())
+    ));
+}
+
+/// The notification `machine` keeps of a request held for its session `agent`: its number there,
+/// once it is kept.
+fn request_noted(machine: &Machine, agent: &str) -> u64 {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let listed = machine
+            .user
+            .call("notifications.list", json!({"limit": 100}))
+            .unwrap();
+        let found = listed["notifications"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["kind"] == "request" && row["session"] == agent)
+            .and_then(|row| row["id"].as_u64());
+        if let Some(id) = found {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the request was never noted: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whether `machine` says its notification `id` was read.
+fn noted_read(machine: &Machine, id: u64) -> bool {
+    let listed = machine
+        .user
+        .call("notifications.list", json!({"limit": 100}))
+        .unwrap();
+    listed["notifications"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["id"] == id && !row["read_at"].is_null())
+}
+
+#[gpui_kit::test]
+fn the_bell_holds_a_request_of_another_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+
+    // On pc's window, the bell holds what waits on server, said of server.
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    // Its row unfolds into the open panel, from nothing.
+    let item = format!("bell-item-{key}");
+    let coming = heights(cx, &item).into_iter().fold(f32::MAX, f32::min);
+    settle(&shell, cx);
+    let full = heights(cx, &item).into_iter().fold(0., f32::max);
+    assert!(coming < full, "the row unfolds: {coming} of {full}");
+    let titles = shell.read_with(cx, |s, cx| s.bell_sessions(cx));
+    assert!(
+        titles
+            .iter()
+            .any(|title| title == "Finish the export · on server"),
+        "{titles:?}"
+    );
+    let counts = label(cx, gpui_kit::ElementId::Name("bell-counts".into())).unwrap_or_default();
+    assert!(counts.contains("need you"), "{counts}");
+
+    // Chosen, it opens server's page of its session, and it is read there.
+    shell.update_in(cx, |shell, window, cx| shell.choose(&key, window, cx));
+    until(&shell, cx, "server's page of the session", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.selected() == Some(&Selection::Session(row.clone()))
+        })
+    });
+    eventually("server says its notification was read", || {
+        noted_read(&server, id)
+    });
+}
+
+/// A session the user starts on `server` in `app`, its first turn ended, then ended: its id.
+fn ended_on_server(server: &Machine) -> String {
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    let started = server
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Fix the export of the report"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let state = || {
+        server
+            .user
+            .call("agent.show", json!({"agent": id}))
+            .unwrap()["agent"]["state"]
+            .clone()
+    };
+    eventually("its first turn on server", || state() == "idle");
+    server
+        .user
+        .call("agent.stop", json!({"agent": id}))
+        .unwrap();
+    eventually("it ended on server", || state() == "ended");
+    id
+}
+
+/// The ids of the rows of the "Ended" group.
+fn ended_rows(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.ended()
+            .map(|group| {
+                group
+                    .read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Opens the "Ended" group, or closes it.
+fn toggle_ended(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let group = shell.read_with(cx, |s, _| s.ended().cloned()).unwrap();
+    group.update(cx, |group, cx| group.toggle(cx));
+}
+
+#[gpui_kit::test]
+fn an_ended_session_of_another_machine_is_in_ended(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = ended_on_server(&server);
+    let row = elsewhere_id("server", &agent);
+
+    // Opened on pc, the "Ended" group asks server for its ended sessions: there with its title
+    // and its machine.
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the Ended group", |cx| {
+        shell.read_with(cx, |s, _| s.ended().is_some())
+    });
+    if !shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()) {
+        toggle_ended(&shell, cx);
+    }
+    until(&shell, cx, "server's ended session is in Ended", |cx| {
+        ended_rows(&shell, cx).contains(&row) && present(cx, session_id(&row))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, session_id(&row)).as_deref(),
+        Some("Fix the export of the report")
+    );
+    let scope = shell.read_with(cx, |s, cx| {
+        s.session(&row)
+            .and_then(|found| found.read(cx).scope().map(str::to_owned))
+    });
+    assert_eq!(scope.as_deref(), Some("app on server"));
+
+    // Off, it says so once when the group is opened again, and its sessions are not listed.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the window sees server off", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| !server.online())
+        })
+    });
+    toggle_ended(&shell, cx);
+    settle(&shell, cx);
+    toggle_ended(&shell, cx);
+    let unlisted = gpui_kit::ElementId::Name("ended-unlisted".into());
+    until(&shell, cx, "the group says server is off", |cx| {
+        label(cx, unlisted.clone()).is_some_and(|said| {
+            said.starts_with("server is offline since ")
+                && said.ends_with(": its ended sessions are not listed")
+        })
+    });
+    settle(&shell, cx);
+    assert!(!ended_rows(&shell, cx).contains(&row));
+}
+
+/// Stops `server`'s daemon and waits until `pc` and its window see it off.
+fn server_off(pc: &Machine, server: &Machine, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(shell, cx, "the window sees server off", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| !server.online())
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn an_off_machine_s_bell_is_not_asked_again_and_again(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
+
+    // Off, server is not dialled again and again while it stays off.
+    server_off(&pc, &server, &shell, cx);
+    settle(&shell, cx);
+    let before = shell.read_with(cx, |s, _| s.bell_dials("server"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        step(&shell, Duration::from_millis(16), cx);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let after = shell.read_with(cx, |s, _| s.bell_dials("server"));
+    assert!(
+        after <= before + 1,
+        "server was dialled {} times in 3 seconds off",
+        after - before
+    );
+}
+
+#[gpui_kit::test]
+fn an_off_machine_s_notifications_leave_the_bell(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+    let (shell, cx, _row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    settle(&shell, cx);
+    let counts = shell.read_with(cx, |s, cx| s.bell_list().read(cx).counts());
+
+    // Off, its request leaves the bell, folding away, and is no longer counted.
+    server_off(&pc, &server, &shell, cx);
+    until(&shell, cx, "server's request leaves the bell", |cx| {
+        !shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    let item = format!("bell-item-{key}");
+    let going = heights(cx, &item);
+    assert!(
+        going.iter().any(|height| *height > 0.),
+        "the row folds away, it does not vanish: {going:?}"
+    );
+    settle(&shell, cx);
+    assert!(heights(cx, &item).is_empty(), "gone once folded");
+    let now = shell.read_with(cx, |s, cx| s.bell_list().read(cx).counts());
+    assert!(now.0 < counts.0, "{counts:?} then {now:?}");
+}
+
+#[gpui_kit::test]
+fn opening_ended_twice_reads_each_machine_once(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    ended_on_server(&server);
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
+    settle(&shell, cx);
+    let before = shell.read_with(cx, |s, _| s.ended_reads("server"));
+
+    // Opened twice before server answers, "Ended" reads it once.
+    shell.update(cx, |s, cx| {
+        s.ended_opened(cx);
+        s.ended_opened(cx);
+    });
+    settle(&shell, cx);
+    let after = shell.read_with(cx, |s, _| s.ended_reads("server"));
+    assert_eq!(after, before + 1, "reads of server's ended sessions");
+}
+
+#[gpui_kit::test]
+fn an_ended_row_of_another_machine_opens_that_machine_s_page(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = ended_on_server(&server);
+    let row = elsewhere_id("server", &agent);
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the Ended group", |cx| {
+        shell.read_with(cx, |s, _| s.ended().is_some())
+    });
+    if !shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()) {
+        toggle_ended(&shell, cx);
+    }
+    until(&shell, cx, "server's ended session is in Ended", |cx| {
+        ended_rows(&shell, cx).contains(&row) && present(cx, session_id(&row))
+    });
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "server's page of the ended session", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.selected() == Some(&Selection::Session(row.clone()))
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn mark_all_read_marks_read_on_the_other_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+    let (shell, cx, _row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click("bell-mark-all", cx));
+    eventually("server says its notification was read", || {
+        noted_read(&server, id)
+    });
 }

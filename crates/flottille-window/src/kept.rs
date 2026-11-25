@@ -17,23 +17,41 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 /// The composer a draft belongs to, as the daemon names it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DraftKey {
-    /// A session's composer, by its root agent's id.
-    Session(String),
+    /// A session's composer, by its root agent's id on its machine.
+    Session {
+        machine: Option<String>,
+        agent: String,
+    },
     /// A project's first message of a new session.
-    Project(String),
+    Project {
+        machine: Option<String>,
+        name: String,
+    },
 }
 
 impl DraftKey {
     pub fn kind(&self) -> &'static str {
         match self {
-            DraftKey::Session(_) => "session",
-            DraftKey::Project(_) => "project",
+            DraftKey::Session { .. } => "session",
+            DraftKey::Project { .. } => "project",
         }
     }
 
     pub fn target(&self) -> &str {
         match self {
-            DraftKey::Session(target) | DraftKey::Project(target) => target,
+            DraftKey::Session { agent: target, .. } | DraftKey::Project { name: target, .. } => {
+                target
+            }
+        }
+    }
+
+    /// The machine the session or the project is of (`None`: this one). Its draft is kept by this
+    /// machine's daemon all the same, under that machine's name, and never travels.
+    pub fn machine(&self) -> Option<&str> {
+        match self {
+            DraftKey::Session { machine, .. } | DraftKey::Project { machine, .. } => {
+                machine.as_deref()
+            }
         }
     }
 }
@@ -114,6 +132,11 @@ impl Keeping {
     /// How many times the draft was written to the daemon.
     pub fn sent(&self) -> usize {
         self.sent
+    }
+
+    /// How many writes were asked and not answered yet.
+    pub fn unanswered(&self) -> usize {
+        self.writing.len()
     }
 
     /// Whether a write waits for its 500 ms.
@@ -239,6 +262,19 @@ pub struct Folds {
     pub leads: HashMap<String, bool>,
     /// The "Ended" group: whether it is unfolded.
     pub ended: Option<bool>,
+    /// The projects are shown by machine, one section each, instead of in one list.
+    pub by_machine: bool,
+    /// Each machine's section, by its name: whether it is unfolded.
+    pub machines: HashMap<String, bool>,
+    /// Each project of a machine's section, by [`machine_key`]: whether it is unfolded.
+    pub on_machines: HashMap<String, bool>,
+    /// Each shared project, by name: the machine the user chose its sessions start on (#1266).
+    pub starts: HashMap<String, String>,
+}
+
+/// What the state keeps a project of a machine's section under.
+pub fn machine_key(machine: &str, project: &str) -> String {
+    format!("{machine}\u{1f}{project}")
 }
 
 impl Folds {
@@ -258,6 +294,17 @@ impl Folds {
             projects: flags("projects"),
             leads: flags("leads"),
             ended: state["sidebar"]["ended"].as_bool(),
+            by_machine: state["sidebar"]["by_machine"].as_bool().unwrap_or(false),
+            machines: flags("machines"),
+            on_machines: flags("on_machines"),
+            starts: state["sidebar"]["starts"]
+                .as_object()
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(name, on)| Some((name.clone(), on.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -265,6 +312,18 @@ impl Folds {
         let mut json = json!({"projects": self.projects, "leads": self.leads});
         if let Some(ended) = self.ended {
             json["ended"] = json!(ended);
+        }
+        if self.by_machine {
+            json["by_machine"] = json!(true);
+        }
+        if !self.machines.is_empty() {
+            json["machines"] = json!(self.machines);
+        }
+        if !self.on_machines.is_empty() {
+            json["on_machines"] = json!(self.on_machines);
+        }
+        if !self.starts.is_empty() {
+            json["starts"] = json!(self.starts);
         }
         json
     }

@@ -13,13 +13,12 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::perform_later;
-use crate::shell::Shell;
 
 /// What the section says of which workspaces a change reaches.
 pub const REACH: &str = "A change applies to the workspaces made from now on. The ones that exist \
@@ -93,7 +92,7 @@ impl Shown {
 }
 
 pub struct WorkspacesFolder {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The project it sets the folder of; the default for every project when none.
     project: Option<String>,
     /// Made when first drawn, since a text field needs a window.
@@ -113,7 +112,7 @@ pub struct WorkspacesFolder {
 }
 
 impl WorkspacesFolder {
-    pub fn new(shell: WeakEntity<Shell>, project: Option<String>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: Option<String>) -> Self {
         Self {
             shell,
             project,

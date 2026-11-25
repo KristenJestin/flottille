@@ -17,7 +17,7 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   back as if that machine's daemon were here. A path typed is that machine's
   (`flottille --machine server project add ~/code/app`). A machine that is off is refused at once,
   `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
-  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
+  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide`, `read-page` and `browser-network` are this
   machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
   the commands it aims, and the daemon a command starts never reads it. `vault share` is this
   machine's too, and takes the flag as the machine the entry is shared with.
@@ -26,7 +26,7 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
 - **Each command has its place in the window**, except the few a script alone has a use for
-  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `browser-network`, `mcp`): the
   screen, dialog or menu entry that calls the same daemon method. The table is
   `crates/flottille/tests/window_parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
   refuses a command heading of this file that is in neither list.
@@ -60,7 +60,9 @@ the lock taken and refuses to start.
 
 ### `flottille daemon stop`
 
-Stops the running daemon, and its agents with it. A daemon that does not answer within 30
+Stops the running daemon, and its agents with it. The next command starts another, which reads
+the user's files again: that is the restart a refusal of a push names (`docs/vault.md`, "The
+gaps"); there is no `flottille daemon restart`. A daemon that does not answer within 30
 seconds, or does not end in the time its agents take to stop, is ended: it and the processes it
 ran are killed (a helper they left detached in a session of its own is spared), and the command
 says it had to (`docs/reference/daemon.md`).
@@ -128,7 +130,9 @@ nothing is wrong), the warnings also being in `"warnings"`.
 The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
 is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
 (`docs/protocol.md`), and each gap it says (no private mount namespace, or a probe of it that
-concluded nothing, the SSH agent lent to no push and why, with how to fix it) is a warning. With no daemon running, doctor's own process probes what one would find, and
+concluded nothing, the SSH agent lent to no push and why, with how to fix it, a connection's
+browser that cannot run in a network of its own and what to install) is a warning; `"browser_network"`
+says whether it can (`docs/vault.md`, "The browser's network"). With no daemon running, doctor's own process probes what one would find, and
 `"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
 
 ```
@@ -158,22 +162,29 @@ claude: enabled, its agents can run
 codex: enabled, its agents cannot run: codex is not on PATH
 opencode: disabled
 Auto judge: claude (haiku), picked by Flottille: change it in Settings, or choose no judge there.
+New session mode: Auto.
 New sessions: what the provider proposes.
 ```
 
-### `flottille provider new-session <provider> [--model <model>] [--effort <effort>]`
+### `flottille provider new-session [<provider>] [--model <model>] [--effort <effort>] [--mode ask|auto|full]`
 
 Chooses the provider, model and effort a new session starts on (`docs/agents.md`, "Providers"),
 as the window's settings page does ("New sessions"): `[new_session]` in `providers.toml`, the rest
 of the file kept as you wrote it. What is left out is the provider's to propose. `--clear` goes back
 to what the provider proposes. `provider list` says it on its last line, and `--json` gives it as
-`"new_session"`.
+`"new_session"`. `--mode` chooses the mode a session you start is in (the window's "Mode",
+`new_session_mode`, Auto until you choose; `docs/design.md` §7.1), alone or with a provider: a
+session an agent starts and a child keep their own rules, and `agent start --mode` still names a
+session's own. It is kept for this machine, and `provider list` says it, and `--json` gives it as
+`"new_session_mode"`.
 
 ```
 $ flottille provider new-session claude --model opus --effort high
 New sessions start on claude, opus, high.
 $ flottille provider new-session --clear
 New sessions start on what the provider proposes.
+$ flottille provider new-session --mode full
+New sessions start in Full.
 ```
 
 ### `flottille provider enable <name>`
@@ -332,8 +343,9 @@ history would see. The code holds the hub's address and key: nothing else is typ
 answers with another key is refused. The command uses this user session's device key, made once
 (in the session's keyring, or `remote/device.key` when there is no Secret Service; any other
 failure of the keyring is said, and stops it), and proposes this device's card, which the options
-change: its name (the host's), its role (`runner` with an agent signed in, `controller` without),
-its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
+change: its name (the host's), its role (`runner` with an agent signed in or with no screen, a server, `controller`
+otherwise), said on the standard error before the hub is asked (with `--role`, the way to choose
+another, when it was not given), its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
 a screen, a server without either) and its colour (`grey`, `red`, `orange`, `yellow`, `green`,
 `teal`, `blue`, `purple`: one of its key's). The daemon proves the code without sending it; once
 the hub paired the device, the command signs the declaration of this machine, which the daemon
@@ -344,6 +356,7 @@ keeps its entry and its card. A machine paired already is refused unless `--repl
 ```
 $ flottille remote pair --role runner
 The pair code: 0ZJ7X3K2M9QH4V…
+pairing as a runner
 server is paired with the hub at https://hub.example.net as a runner
 ```
 
@@ -461,19 +474,18 @@ Declares a connection under `[[connections.server]]` of `extensions.toml`: a com
 without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
 machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
 values of an argument, `--except` leaves a project out, `--client-id` is the OAuth client id you
-registered with the server's authorization server, when it registers none by itself (`connection
-login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
+registered with the server's authorization server, when it takes neither Flottille's client
+metadata document nor a registration by itself (`connection login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
 once, every action judged: the connection is given to agents as `add` returns (`state` is `ready`),
 and `connection review` is there to turn actions off or set them. A server that does not start
 leaves it waiting for its first review, `failing` saying why; one added while Connections or the
 connection is off is given when it is turned on (`flottille connection edit <name> --on`, or the
 extension's switch).
 
-### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--headed | --headless] [--on | --off]`
+### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--on | --off]`
 
 Replaces what is given. A change of the command, the URL, the variables, the headers, the
-limits or whether the browser is shown (`--headed` gives an adapter's browser the
-daemon's display, `--headless` takes it away) is another server as far as trust goes: the daemon lists what it announces
+limits is another server as far as trust goes: the daemon lists what it announces
 and pins it again at once, the settings of its actions kept. A connection that was cut off is not
 pinned by an edit, nor one whose server now announces more than another version (changed
 instructions or actions): its diff is read first.
@@ -710,7 +722,9 @@ NAME  FOLDER      REPOSITORIES
 shop  /work/shop  1
 ```
 
-`--json` prints `project.list`: `{"projects": [...], "errors": [...]}`.
+`--json` prints `project.list`: `{"projects": [...], "errors": [...], "unconfigured": [...]}`. A
+project whose file is gone but whose sessions or workspaces are still there is listed under the
+table, with how many it holds: `flottille project remove <name>` removes them.
 
 ### `flottille project show <name>`
 
@@ -881,8 +895,8 @@ Removed skill react from shop. The project's files were not touched.
 
 ## The vault
 
-The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
-(`docs/vault.md`). A secret is never printed, by these commands or any other.
+The user's secrets, kept by the keyring, that agents use through Flottille's tools without seeing
+them in Ask and Auto; in Full a command they run can read them (`docs/vault.md`). A secret is never printed, by these commands or any other.
 
 ### `flottille vault list [--project <project>]`
 
@@ -947,9 +961,11 @@ Shared jira with server: its keyring holds it now.
 Not a command for the user: the credential plugin agent-browser starts during a `login` of its
 connection's adapter (`docs/extensions.md`, "Adapters"), named in the configuration Flottille
 writes for it. It reads one `agent-browser.plugin.v1` request on its standard input, asks the
-daemon's login that runs, at `<socket>`, with the one-time token of that run
-(`FLOTTILLE_VAULT_TOKEN`), and writes the answer on its standard output. Without that token, it
-is refused before anything is asked. Hidden from `--help`.
+daemon's login that runs, at `<socket>`, with the one-time token of that run (the file
+`vault.token` beside the socket, in the connection's vault folder under the runtime folder,
+out of every run's reach), and writes the answer on its standard output; why it failed is
+also written beside the socket, in `vault.why`, for the login to say. Without that token, it is
+refused before anything is asked. Hidden from `--help`.
 
 ## Workspaces
 
@@ -1135,8 +1151,8 @@ own. `--workspace <name>` runs it in a ready workspace (the project folder other
 `--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
 <model>` asks for a model (the project's otherwise; never replaced by another), `--effort
 <effort>` for an effort of the model, `--role lead|worker` (`lead` by default), `--mode
-ask|auto|full` for the session's mode, its gate's from its first message (`auto` by default,
-design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+ask|auto|full` for the session's mode, its gate's from its first message (the default mode of
+new sessions by default: Auto unless set, design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
 what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
@@ -1412,8 +1428,8 @@ judge and every base call passes at once, recorded as allowed by Full mode, and 
 refuses (shell syntax, a malformed call, `flottille` run as a command, a login's place, a write
 of Flottille's own folders or of a startup file, a launcher such as `systemd-run` or `tmux`…)
 stays refused. In `full`, code the agent runs (an interpreter's inline code, a script it wrote)
-acts with your rights, and the gate does not see what it touches: only a sandbox would close
-that. A session
+runs as you, as in your terminal: confined in no way (no sandbox, your keys, sign-ins and
+keyring), and the gate does not see what it touches. A session
 never starts in `full`. A tree has one mode, its root's: naming a
 child switches its root, and every agent of the tree follows at once. A new session starts in
 `auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.
@@ -1777,6 +1793,12 @@ Not for you either: the program the daemon starts to read a page for the `web` t
 `--help`. It reads the page on its standard input and writes its text, title and links as JSON,
 under the limits of memory and time the daemon set, so that a page that blows it up never takes
 the daemon with it (`docs/tools.md`, "The web").
+
+### `flottille browser-network`
+
+Not for you either: the process the daemon starts in a network namespace it makes for a
+connection's browser, hidden from `--help`. It holds the namespace, which passt's `pasta` gives a
+way out, until the daemon ends it with the browser (`docs/vault.md`, "The browser's network").
 
 ### `flottille mcp`
 

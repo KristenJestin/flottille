@@ -436,7 +436,18 @@ async fn performed(
         Ok(agent) => agent,
         Err(why) => return not_executed(why),
     };
-    let grant = match mcp::grant_of(daemon, &agent) {
+    // A caller of another machine removes only the workspace made for the launch it asked the
+    // removal for, in that workspace's project: the grant its removal was asked with.
+    let grant = match crate::across::is_stand_in(&agent.id) && tool == "workspace" {
+        true => crate::across::removal_grant(
+            daemon,
+            &agent,
+            &request.arguments,
+            crate::across::removal_launch(request.call_key.as_deref()),
+        ),
+        false => mcp::grant_of(daemon, &agent),
+    };
+    let grant = match grant {
         Ok(grant) => Arc::new(grant),
         Err(why) => return not_executed(format!("{why}.")),
     };
@@ -618,6 +629,10 @@ fn store_answer_with(
             "flottille daemon: request #{}: its answer cannot be stored: {error}",
             request.number
         );
+        return;
+    }
+    // A caller of another machine is told on its machine, as it would be here.
+    if crate::across::answer_back(daemon, request, body) {
         return;
     }
     deliveries::ring(daemon, &request.agent);

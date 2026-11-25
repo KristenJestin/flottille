@@ -13,18 +13,17 @@ use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    Window, div, px,
 };
 use serde_json::Value;
 
 use super::tab::Then;
 use super::{DAYS, Event, Routine, hour_of, mode_line, mode_said, next_run, next_said};
 use crate::actions::Command;
-use crate::commands::{perform_later, spaced, stack};
+use crate::commands::{ShellOf, perform_later, spaced, stack};
 use crate::extensions::Then as Extension;
 use crate::project::input_frame;
 use crate::project_settings::styled_input;
-use crate::shell::Shell;
 
 const KINDS: [(&str, &str); 4] = [
     ("workflow_run", "A workflow run ends"),
@@ -78,7 +77,7 @@ struct Texts {
 }
 
 pub struct RoutineForm {
-    shell: WeakEntity<Shell>,
+    shell: ShellOf,
     project: String,
     open: bool,
     /// The routine edited, by its id; none for a new one.
@@ -102,7 +101,7 @@ pub struct RoutineForm {
 }
 
 impl RoutineForm {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: ShellOf, project: String) -> Self {
         Self {
             shell,
             chosen_project: project.clone(),

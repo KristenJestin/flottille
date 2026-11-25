@@ -114,6 +114,30 @@ fn refused(answer: Answer) -> String {
     answer.text
 }
 
+#[test]
+fn a_default_of_full_lends_nothing_to_the_session_an_extension_starts_for_a_spec() {
+    let user = with_specs(User::with_fake_agent());
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+
+    let (spec, _) = new_spec(&user);
+
+    // The spec's writer is no session the user started with `agent.start`: it stays in Auto.
+    let listed = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+    let writer = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"].as_str().is_some_and(|t| t.starts_with("Spec ")))
+        .unwrap_or_else(|| panic!("no writer for spec {}: {listed}", spec_id(&spec)))
+        .clone();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": writer["id"]}))
+            .unwrap()["agent"]["gate_mode"],
+        "auto"
+    );
+}
+
 /// A question as the writing session asks it: two options, the second recommended.
 fn good_question() -> Value {
     json!({

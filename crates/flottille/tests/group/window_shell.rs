@@ -11,6 +11,8 @@ mod guard;
 #[path = "../remote/mod.rs"]
 mod remote;
 
+#[path = "../window_allow_files.rs"]
+mod window_allow_files;
 #[path = "../window_any_machine.rs"]
 mod window_any_machine;
 #[path = "../window_appearance.rs"]
@@ -35,8 +37,12 @@ mod window_desktop_notifications;
 mod window_developer_reports;
 #[path = "../window_drafts.rs"]
 mod window_drafts;
+#[path = "../window_every_machine.rs"]
+mod window_every_machine;
 #[path = "../window_first_frame.rs"]
 mod window_first_frame;
+#[path = "../window_folds.rs"]
+mod window_folds;
 #[path = "../window_health_check.rs"]
 mod window_health_check;
 #[path = "../window_instance.rs"]
@@ -59,6 +65,10 @@ mod window_pictures;
 mod window_programs;
 #[path = "../window_project_images.rs"]
 mod window_project_images;
+#[path = "../window_project_machines.rs"]
+mod window_project_machines;
+#[path = "../window_project_order.rs"]
+mod window_project_order;
 #[path = "../window_project_page.rs"]
 mod window_project_page;
 #[path = "../window_project_sessions.rs"]
@@ -91,6 +101,8 @@ mod window_sign_in;
 mod window_switcher;
 #[path = "../window_tunnels.rs"]
 mod window_tunnels;
+#[path = "../window_unconfigured.rs"]
+mod window_unconfigured;
 #[path = "../window_update.rs"]
 mod window_update;
 #[path = "../window_vault.rs"]
@@ -101,5 +113,7 @@ mod window_vault_ask;
 mod window_vault_share;
 #[path = "../window_whats_new.rs"]
 mod window_whats_new;
+#[path = "../window_words_whole.rs"]
+mod window_words_whole;
 #[path = "../windows.rs"]
 mod windows;

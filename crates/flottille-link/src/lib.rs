@@ -33,15 +33,15 @@ use zeroize::Zeroizing;
 
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
-    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
-    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Transcript,
-    arrive, relays_in_memory,
+    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, Notice, NoticeId, NoticeKind, PairProof,
+    Paired, Pairing, PresenceOf, Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream,
+    Tls, ToDevice, Transcript, arrive, relays_in_memory,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
     GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
-    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic,
+    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic, UNKNOWN_MESSAGE,
 };
 pub use members::{
     Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,
@@ -55,7 +55,10 @@ pub use request::{
     runs_agents,
 };
 pub use serial::hidden;
-pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
+pub use sessions::{
+    LightPilot, LightProject, LightSession, MOST_SESSIONS, PilotList, ProjectList, STATES,
+    SessionList, TITLE_LIMIT,
+};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
 pub use upload::{Attached, UPLOAD_CHUNK, fits, fits_with, upload_chunks, upload_name};

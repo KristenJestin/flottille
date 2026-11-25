@@ -21,16 +21,16 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    Window, div, px,
 };
 use serde_json::{Value, json};
 
 use super::{Item, Routine, RoutineForm, Run, Status, mode_line, mode_said};
 use crate::actions::Command;
-use crate::commands::{perform_later, spaced, stack};
+use crate::commands::{ShellOf, perform_later, spaced, stack};
 use crate::extensions::Then as Extension;
 use crate::session::{MarkdownText, said_at};
-use crate::shell::{Selection, Shell};
+use crate::shell::Selection;
 
 /// What a link of the path line does.
 type Go = Box<dyn Fn(&mut Window, &mut App)>;
@@ -95,7 +95,7 @@ fn now_ms() -> u64 {
 }
 
 pub struct RoutinesTab {
-    shell: WeakEntity<Shell>,
+    shell: ShellOf,
     project: String,
     /// The reads numbered, so that an answer older than one applied is dropped.
     asked: u64,
@@ -125,7 +125,7 @@ pub struct RoutinesTab {
 }
 
 impl RoutinesTab {
-    pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: ShellOf, project: String, cx: &mut Context<Self>) -> Self {
         let form = {
             let (shell, project) = (shell.clone(), project.clone());
             cx.new(|_| RoutineForm::new(shell, project))
@@ -1084,7 +1084,7 @@ impl RoutinesTab {
         let mut column = stack(space::MD);
         let mut at = 0;
         for (n, (group, items)) in run.sections().into_iter().enumerate() {
-            let mut rows = div().w_full().flex().flex_col().gap(px(2.));
+            let mut rows = div().w_full().flex().flex_col().gap(space::XS);
             let count = items.len();
             for item in items {
                 rows = rows.child(self.item_row(run.id, item, at, cx));

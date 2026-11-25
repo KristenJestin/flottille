@@ -147,3 +147,80 @@ fn the_health_check_is_a_page_of_settings(cx: &mut TestAppContext) {
         !present(cx, "check-flottille-provider-codex-fix")
     });
 }
+
+fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().size.height))
+}
+
+/// Opens Settings, General, with the checks listed and the sandbox read.
+fn open_checks(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("settings", cx));
+    until(shell, cx, "the settings page is shown", |cx| {
+        present(cx, "settings-tabs-general")
+    });
+    click(cx, "settings-tabs-general");
+    until(shell, cx, "the checks are listed", |cx| {
+        label(cx, "check-flottille-sandbox-state").is_some_and(|state| state != "Reading…")
+            && present(cx, "check-flottille-provider-codex-fix")
+    });
+    settle(cx);
+}
+
+const STATES: [&str; 3] = [
+    "check-flottille-provider-codex-state",
+    "check-flottille-provider-claude-state",
+    "check-flottille-sandbox-state",
+];
+
+/// #1285: `Off` was drawn "O" over "ff" beside its `Turn on` button, in a narrow window.
+fn a_state_word_stays_on_one_line(shade: &str, cx: &mut TestAppContext) {
+    let user = user();
+    user.call(
+        "appearance.set",
+        json!({"theme": "flottille", "shade": shade}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_checks(&shell, cx);
+    // A line of this text is about 20 px high; "O" over "ff" is 40.
+    let one_line = 24.;
+    for width in [1280., 420., 320., 240.] {
+        cx.simulate_resize(size(px(width), px(2400.)));
+        settle(cx);
+        for id in STATES {
+            let high = height(cx, id);
+            assert!(
+                high > 0. && high <= one_line,
+                "{id} is {high} px high at {width} px: it wraps"
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn a_state_word_beside_a_button_stays_on_one_line(cx: &mut TestAppContext) {
+    a_state_word_stays_on_one_line("dark", cx);
+}
+
+#[gpui_kit::test]
+fn a_state_word_beside_a_button_stays_on_one_line_in_the_light_theme(cx: &mut TestAppContext) {
+    a_state_word_stays_on_one_line("light", cx);
+}
+
+#[gpui_kit::test]
+fn every_row_of_the_check_has_its_leading_mark(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    open_checks(&shell, cx);
+    for id in [
+        "check-flottille-provider-claude-mark",
+        "check-flottille-provider-codex-mark",
+        "check-flottille-sandbox-mark",
+    ] {
+        assert!(
+            present(cx, id),
+            "{id} is drawn: no empty slot before a title"
+        );
+    }
+}

@@ -16,6 +16,8 @@ pub struct LedEnd {
     pub id: String,
     pub title: String,
     pub project: String,
+    /// The machine it runs on when it is not this one: it ends there with its pilot.
+    pub machine: Option<String>,
     /// What its workspace holds that is not saved, in words (`uncommitted changes`); `None` for
     /// a session with nothing to lose.
     pub unsaved: Option<String>,
@@ -40,6 +42,7 @@ impl LedEnd {
                         .as_str()
                         .map_or_else(|| text(&session["id"]), str::to_owned),
                     project: text(&session["project"]),
+                    machine: session["machine"].as_str().map(str::to_owned),
                     unsaved: lost.unsaved().then(|| lost.state_said().to_owned()),
                 }
             })
@@ -48,9 +51,18 @@ impl LedEnd {
 
     /// The line in words, for its label.
     fn said(&self) -> String {
+        let place = self.place();
         match &self.unsaved {
-            Some(unsaved) => format!("{} in {}, {unsaved}", self.title, self.project),
-            None => format!("{} in {}", self.title, self.project),
+            Some(unsaved) => format!("{} in {place}, {unsaved}", self.title),
+            None => format!("{} in {place}", self.title),
+        }
+    }
+
+    /// Its project, and its machine when it runs on another one.
+    fn place(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("{} on {machine}", self.project),
+            None => self.project.clone(),
         }
     }
 }
@@ -79,7 +91,8 @@ pub fn block(prefix: &str, led: &[LedEnd], cx: &App) -> impl IntoElement {
                 .gap(space::SM)
                 .child(SharedString::from(format!(
                     "{} · {}",
-                    session.title, session.project
+                    session.title,
+                    session.place()
                 )))
                 .children(session.unsaved.clone().map(|unsaved| {
                     div()
@@ -115,4 +128,25 @@ pub fn block(prefix: &str, led: &[LedEnd], cx: &App) -> impl IntoElement {
             .children(lines),
     )
     .space(space::MD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_led_session_on_another_machine_is_listed_with_its_machine() {
+        let led = LedEnd::read(&json!({"sessions": [
+            {"id": "a1", "title": "Write the docs", "project": "app", "state": "clean"},
+            {"id": "b2", "title": "Finish the export", "project": "app", "machine": "server",
+                "state": "unknown"}
+        ]}));
+
+        assert_eq!(led[0].said(), "Write the docs in app");
+        assert_eq!(
+            led[1].said(),
+            "Finish the export in app on server, cannot be checked"
+        );
+    }
 }

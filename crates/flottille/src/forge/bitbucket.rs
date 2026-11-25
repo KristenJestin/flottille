@@ -131,7 +131,10 @@ impl Contexts {
     /// missing or has none.
     pub(super) async fn of(&mut self, forge: &Forge) -> Result<String, String> {
         if self.0.is_none() {
-            self.0 = Some(list().await);
+            self.0 = Some(list().await.map_err(|error| match error == missing() {
+                true => error,
+                false => super::unchecked("bkt", &error, false),
+            }));
         }
         let all = self.0.as_ref().unwrap().as_ref().map_err(Clone::clone)?;
         let Forge::Bitbucket { host, .. } = forge else {
@@ -191,12 +194,8 @@ fn hostname(key: &str) -> String {
 
 /// `bkt context list --json`: names, hosts and defaults, no secret.
 async fn list() -> Result<Vec<Context>, String> {
-    let listed = json(&["context", "list", "--json"])
-        .await
-        .map_err(|error| match error == missing() {
-            true => error,
-            false => format!("{error}: run `bkt auth login <url>` to sign in"),
-        })?;
+    // A failure of the listing says nothing of who is signed in: never advice to sign in.
+    let listed = json(&["context", "list", "--json"]).await?;
     Ok(listed["contexts"]
         .as_array()
         .into_iter()
@@ -989,14 +988,34 @@ async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value
             ));
         }
     };
-    if statuses
+    let statuses = if statuses
         .iter()
         .any(|s| build_of(forge, s["url"].as_str()).is_some())
         && let Some(pipelines) = recent_pipelines(forge, context).await
     {
-        return Ok(counted(forge, statuses, &pipelines));
-    }
-    Ok(statuses)
+        counted(forge, statuses, &pipelines)
+    } else {
+        statuses
+    };
+    Ok(latest(forge, statuses))
+}
+
+/// Each check of the head once, its latest status (`super::latest`, by when it was made): another
+/// CI that posts a status per run of the same check. A pipeline's step is a check of that build
+/// alone: `counted` already keeps the latest build of each pipeline, and two pipelines that both
+/// count (a branch's and a pull request's, two destinations) are two checks.
+fn latest(forge: &Forge, statuses: Vec<Value>) -> Vec<Value> {
+    let check = |status: &Value| {
+        let build = build_of(forge, status["url"].as_str());
+        // By its key, which Bitbucket keeps one status of: two jobs showing one name are two checks.
+        let key = status["key"].as_str().or(status["name"].as_str());
+        format!("{}\0{build:?}", key.unwrap_or("check"))
+    };
+    let made = |status: &Value| match &status["created_on"] {
+        Value::String(at) => crate::session_read::form(at),
+        _ => status["dateAdded"].as_u64(),
+    };
+    super::latest(statuses, check, made)
 }
 
 /// The newest 50 pipelines of a Cloud repository, as the API gives them; none on Data Center and
@@ -1741,6 +1760,16 @@ pub(super) async fn branch_exists(forge: &Forge, name: &str) -> Result<(), Strin
     json(&["api", &path, "--context", &context])
         .await
         .map(|_| ())
+}
+
+/// The base of the merged pull request of `branch`, from the repository itself.
+pub(super) async fn merged_into(forge: &Forge, branch: &str) -> Result<Option<String>, String> {
+    let context = Contexts::default().of(forge).await?;
+    Ok(pulls(forge, &context, "MERGED")
+        .await?
+        .into_iter()
+        .find(|pull| pull.own && pull.branch == branch)
+        .map(|pull| pull.base))
 }
 
 /// `forge` `create`, `merge` and `checks` for a Bitbucket repository, once the gate let it

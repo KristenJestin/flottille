@@ -72,6 +72,23 @@ impl TestHub {
             .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 
+    /// What the device `name` says of itself to the hub, as the phone's app does at each
+    /// session (`Ask::About`): the facts the hub keeps on its card.
+    fn says_it_is(&self, name: &str, members: &[Value], kind: &str, system: &str) {
+        let key: flottille_link::PublicKey = serde_json::from_value(
+            members
+                .iter()
+                .find(|member| member["name"] == name)
+                .expect("the member")["key"]
+                .clone(),
+        )
+        .unwrap();
+        self.served
+            .as_ref()
+            .unwrap()
+            .with_hub(|hub| hub.about(&key, kind, system).unwrap());
+    }
+
     /// The hub stops: down, as a host that is off.
     fn down(&mut self) {
         let served = self.served.take().unwrap();
@@ -132,6 +149,27 @@ impl Machine {
             .as_array()
             .unwrap()
             .clone()
+    }
+
+    /// Waits until the hub's card of `name` says what the device is, as its daemon told it.
+    fn wait_until_member_says(&self, name: &str) {
+        self.wait_until_member(name, |member| member["kind"].is_string());
+    }
+
+    /// Waits until the hub's card of `name` says the device is `kind`.
+    fn wait_until_member_is(&self, name: &str, kind: &str) {
+        self.wait_until_member(name, |member| member["kind"] == kind);
+    }
+
+    fn wait_until_member(&self, name: &str, check: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if self.member(name).is_some_and(|member| check(&member)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{name}: {:?}", self.members());
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     fn member(&self, name: &str) -> Option<Value> {
@@ -341,7 +379,9 @@ fn the_machines_and_their_state_are_in_settings_not_in_the_sidebar(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
+fn opening_a_session_of_another_machine_shows_it_signed_and_the_list_stays(
+    cx: &mut TestAppContext,
+) {
     let server_user = User::with_fake_agent();
     server_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let (_hub, pc, server) = pc_and_server(server_user);
@@ -370,25 +410,30 @@ fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
         knows(&shell, cx, "server")
     });
     settle(&shell, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    // Its row of the one list opens its page: that machine's, nothing else switching (#1271).
+    let row = flottille_window::model::elsewhere_id("server", &id);
+    until(&shell, cx, "the server's session is in the list", |cx| {
+        present(cx, &format!("session-{row}"))
     });
-    until(&shell, cx, "the server's session is in the tree", |cx| {
-        present(cx, &format!("session-{id}"))
+    click(&shell, cx, &format!("session-{row}"));
+    until(&shell, cx, "the server's session is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| page.read(cx).id() == id)
+        })
     });
     assert_eq!(
         shell.read_with(cx, |s, _| s.machine_shown()),
         Some("server".to_owned())
     );
     // Served for pc's device, signed.
-    assert!(server.log().contains("asked by pc"), "{}", server.log());
-
-    // This machine again: the server's session is its light row of the one list.
-    shell.update(cx, |shell, cx| shell.choose_machine(None, cx));
-    until(&shell, cx, "this machine is in front again", |cx| {
-        !present(cx, &format!("session-{id}"))
+    until(&shell, cx, "the server serves pc's device", |_| {
+        server.log().contains("asked by pc")
     });
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
+    // Its row stays where it was: the list is this machine's.
+    assert!(present(cx, &format!("session-{row}")));
 }
 
 /// Settings, Machines: Connect to your hub opened, the code of `hub`'s pair mode pasted,
@@ -660,8 +705,8 @@ fn a_machine_that_needs_an_update_says_so_not_offline(cx: &mut TestAppContext) {
     assert!(!said.contains("offline"), "{said}");
 
     // Brought in front, it is not: a failure toast says why.
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine(Some("server".to_owned()), window, cx)
     });
     settle(&shell, cx);
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
@@ -960,164 +1005,6 @@ fn the_link_change_of_a_row_fades(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_millis(500));
     let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(rest.is_some(), "the page came to rest after the change");
-}
-
-#[gpui_kit::test]
-fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    // This machine's daemon knows the server is gone; the window, which has not polled, still
-    // takes it for online.
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    pc.wait_for("server", "offline");
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-
-    // No first read comes: it waits for the limit the window gives a daemon that does not answer.
-    for _ in 0..40 {
-        step(&shell, Duration::from_millis(16), cx);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(visible(cx, "sidebar-loading"), "the tree waits");
-    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned()),
-        "still within the limit"
-    );
-
-    // Past it, the window is on this machine again, and says why.
-    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-    until(&shell, cx, "this machine's tree is read", |cx| {
-        !visible(cx, "sidebar-loading")
-    });
-    let failed = shell.read_with(cx, |s, cx| {
-        s.toasts()
-            .read(cx)
-            .toasts()
-            .find(|t| t.is_failure())
-            .map(|t| (t.title().to_owned(), t.second_line().map(str::to_owned)))
-    });
-    let (title, why) = failed.expect("a failure toast");
-    assert_eq!(title, "server cannot be shown");
-    assert!(
-        why.as_deref()
-            .is_some_and(|why| why.starts_with("server is offline since ")),
-        "{why:?}"
-    );
-}
-
-/// The project `name` on `user`'s machine, a throwaway repository.
-fn project(user: &User, name: &str) {
-    let folder = user.path(&format!("work/{name}"));
-    user.git_init(&folder);
-    std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
-    user.git(&folder, &["add", "README.md"]);
-    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    user.call("project.add", json!({"folder": folder, "name": name}))
-        .unwrap();
-}
-
-/// Waits until the link has sent more reads of the shell than `before`, without the window
-/// taking them: they wait in its queue.
-fn queued(shell: &Entity<Shell>, before: u64, cx: &mut VisualTestContext) {
-    let deadline = Instant::now() + WAIT;
-    while snapshots(shell, cx) <= before {
-        assert!(Instant::now() < deadline, "no read was sent");
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn snapshots(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
-    shell.read_with(cx, |s, _| {
-        s.seen().snapshots.load(std::sync::atomic::Ordering::SeqCst)
-    })
-}
-
-#[gpui_kit::test]
-fn a_read_of_this_machine_queued_before_the_switch_does_not_end_the_wait(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    pc.wait_for("server", "offline");
-    // A read of this machine, sent and not yet taken, when the server is chosen.
-    let before = snapshots(&shell, cx);
-    project(&pc.user, "anchor");
-    queued(&shell, before, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-
-    // That read is this machine's, not the server's: the wait goes on, and ends in a toast.
-    step(&shell, Duration::from_millis(16), cx);
-    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
-    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-    assert!(
-        toasts(&shell, cx).contains(&"server cannot be shown".to_owned()),
-        "{:?}",
-        toasts(&shell, cx)
-    );
-}
-
-#[gpui_kit::test]
-fn a_read_of_the_machine_given_up_is_not_shown(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    project(&server.user, "harbor");
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    // The server's first read is sent, and the limit passes before the window takes it.
-    let before = snapshots(&shell, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-    queued(&shell, before, cx);
-    cx.executor()
-        .advance_clock(flottille_window::link::NOT_ANSWERING + Duration::from_secs(1));
-    cx.run_until_parked();
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-
-    // Back on this machine, the server's late read is not drawn as this machine's.
-    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
-    assert!(
-        shell.read_with(cx, |s, _| s
-            .snapshot()
-            .projects
-            .iter()
-            .all(|project| project.name != "harbor")),
-        "the server's project is in this machine's tree"
-    );
 }
 
 #[test]
@@ -1683,6 +1570,112 @@ fn a_device_row_shows_its_icon_in_its_colour(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui_kit::test]
+fn a_phone_controller_is_not_offered_to_become_a_runner(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let (pc, phone) = (Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &phone, "phone", "controller");
+    // The phone's app says what it is to the hub, once a session; the harness's phone is a
+    // computer's daemon, which told "computer" first: the phone's word comes after.
+    pc.wait_until_member_says("phone");
+    hub.says_it_is("phone", &pc.members(), "phone", "android");
+    pc.wait_until_member_is("phone", "phone");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    // Its role is said in words, with nothing of what it does not run nor a command to run.
+    assert!(!present(cx, "member-role-phone-command"));
+    assert!(!present(cx, "member-role-phone-said"));
+    // It is still not offered where a machine is chosen.
+    let offered: Vec<_> = shell.read_with(cx, |s, cx| {
+        let read = s.machines().read(cx).machines().expect("read");
+        flottille_window::machines::choices(read)
+            .into_iter()
+            .filter_map(|choice| choice.name)
+            .collect()
+    });
+    assert!(!offered.iter().any(|name| name == "phone"), "{offered:?}");
+}
+
+#[gpui_kit::test]
+fn a_server_paired_as_a_controller_still_shows_the_command_to_make_it_a_runner(
+    cx: &mut TestAppContext,
+) {
+    let hub = TestHub::new();
+    let (pc, server, phone) = (Machine::new(), Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &server, "server", "controller");
+    pair(&hub, &phone, "phone", "controller");
+    pc.wait_until_member_says("server");
+    pc.wait_until_member_says("phone");
+    hub.says_it_is("phone", &pc.members(), "phone", "android");
+    pc.wait_until_member_is("phone", "phone");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server") && present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, "member-role-server-command").as_deref(),
+        Some("flottille-hub role server runner")
+    );
+    assert!(label(cx, "member-role-server-said").is_some_and(|said| said.contains("runs nothing")));
+    // Beside it, the phone has neither.
+    assert!(!present(cx, "member-role-phone-command"));
+}
+
+#[gpui_kit::test]
+fn a_controller_is_in_the_machines_tab_with_its_role_and_the_hub_command(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let (pc, laptop, phone) = (Machine::new(), Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &laptop, "laptop", "controller");
+    pair(&hub, &phone, "phone", "viewer");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-laptop") && present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    // Its role is said, and that it runs nothing, with the command of the hub's host, copyable.
+    assert_eq!(
+        label(cx, "member-role-laptop-command").as_deref(),
+        Some("flottille-hub role laptop runner")
+    );
+    assert_eq!(
+        label(cx, "member-role-phone-command").as_deref(),
+        Some("flottille-hub role phone runner")
+    );
+    assert!(label(cx, "member-role-laptop-said").is_some_and(|said| said.contains("runs nothing")));
+    // A runner has nothing to explain: it is in the Settings picker.
+    assert!(!present(cx, "member-role-pc-command"));
+    // The window offers no button that changes a role: only the copy.
+    click(&shell, cx, "member-role-laptop-command-copy");
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+        Some("flottille-hub role laptop runner".to_owned())
+    );
+    // Neither is offered where a machine is chosen: they run nothing.
+    let offered: Vec<_> = shell.read_with(cx, |s, cx| {
+        let read = s.machines().read(cx).machines().expect("read");
+        flottille_window::machines::choices(read)
+            .into_iter()
+            .filter_map(|choice| choice.name)
+            .collect()
+    });
+    assert!(
+        !offered
+            .iter()
+            .any(|name| name == "laptop" || name == "phone"),
+        "{offered:?}"
+    );
+}
+
 #[test]
 fn a_member_with_no_look_gets_the_defaults_of_its_key() {
     // A member added before pair mode has no icon nor colour (`remote.members`: null).
@@ -1697,6 +1690,7 @@ fn a_member_with_no_look_gets_the_defaults_of_its_key() {
         machine: None,
         icon: None,
         colour: None,
+        kind: None,
     };
     let (icon, colour) = member.look();
     assert_eq!(icon, "desktop");
@@ -1813,4 +1807,116 @@ fn the_machines_page_shows_no_addresses(cx: &mut TestAppContext) {
     ] {
         assert!(!present(cx, id), "{id} is on the page");
     }
+}
+
+/// Whether the window's read of the machines says the phone is notified `always` or `away`.
+fn notify_read(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .map(|read| read.notify.clone())
+    })
+}
+
+#[gpui_kit::test]
+fn notify_the_phone_is_chosen_in_settings_machines(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the phone's section", |cx| {
+        present(cx, "phone-title")
+    });
+    settle(&shell, cx);
+    for choice in ["notify-phone-away", "notify-phone-always"] {
+        assert!(visible(cx, choice), "{choice}");
+    }
+    assert_eq!(notify_read(&shell, cx).as_deref(), Some("away"));
+
+    click(&shell, cx, "notify-phone-always");
+    until(&shell, cx, "the daemon says always", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["notify"] == "always"
+            && notify_read(&shell, cx).as_deref() == Some("always")
+    });
+    let file = std::fs::read_to_string(pc.user.path("config/flottille/daemon.toml")).unwrap();
+    assert!(file.contains("notify = \"always\""), "{file}");
+    assert!(file.contains("on = true"), "remote stays on: {file}");
+
+    click(&shell, cx, "notify-phone-away");
+    until(&shell, cx, "the daemon says away", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["notify"] == "away"
+            && notify_read(&shell, cx).as_deref() == Some("away")
+    });
+    // Each result is a toast.
+    settle(&shell, cx);
+    for toast in [
+        "Your phone is told always",
+        "Your phone is told when you are away",
+    ] {
+        assert!(toasts(&shell, cx).iter().any(|t| t == toast), "{toast}");
+    }
+}
+
+#[gpui_kit::test]
+fn the_window_tells_the_hub_its_presence_on_input(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let member: flottille_link::PublicKey =
+        serde_json::from_value(pc.member("pc").unwrap()["key"].clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while pc.remote()["hub"]["state"] != "connected" {
+        assert!(Instant::now() < deadline, "the hub never connected");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (shell, cx) = window(&pc, cx);
+    settle(&shell, cx);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 1;
+
+    // A click, as any input.
+    click(&shell, cx, "settings");
+
+    let served = hub.served.as_ref().unwrap();
+    until(&shell, cx, "the hub has the window's input", |_| {
+        served
+            .with_hub(|hub| hub.presence(&member))
+            .is_some_and(|presence| presence.last_input >= before)
+    });
+}
+
+#[gpui_kit::test]
+fn the_window_tells_the_hub_its_presence_on_a_scroll(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let member: flottille_link::PublicKey =
+        serde_json::from_value(pc.member("pc").unwrap()["key"].clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while pc.remote()["hub"]["state"] != "connected" {
+        assert!(Instant::now() < deadline, "the hub never connected");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (shell, cx) = window(&pc, cx);
+    settle(&shell, cx);
+
+    // Reading the sidebar by the wheel, no click nor key: the user is at the window all the same.
+    let middle = cx.update(|window, _| window.find("sidebar").bounds().center());
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: middle,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-200.))),
+        ..Default::default()
+    });
+
+    let served = hub.served.as_ref().unwrap();
+    until(&shell, cx, "the hub has the window's input", |_| {
+        served
+            .with_hub(|hub| hub.presence(&member))
+            .is_some_and(|presence| presence.last_input > 0)
+    });
 }

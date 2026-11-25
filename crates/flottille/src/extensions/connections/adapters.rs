@@ -12,7 +12,7 @@
 //! secret, given only to a page of its entry's own site.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use flottille_core::vault::{self as uses, use_said};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
+use super::network::{self, Network};
 use super::{Declaration, Listing, Reach};
 use crate::daemon::Daemon;
 use crate::mcp::{Grant, Outcome};
@@ -39,19 +40,36 @@ pub struct Adapter {
     /// The server's actions off at the first pin, which the user may turn on: those that run a
     /// script in the page, which no gate can judge.
     scripts: &'static [&'static str],
-    /// The same, for those that write the page's traffic to a file, which no masking reaches.
+    /// The same, for those that write the page's traffic, or what was typed in it, to a file,
+    /// which no masking reaches.
     files: &'static [&'static str],
     /// Its actions whose `url` is a pattern matched against an address, never opened: every
     /// other `url` must be a web address (`web_address`).
     patterns: &'static [&'static str],
     /// Actions off while it applies, which no setting turns on.
     locked: &'static [&'static str],
+    /// The rest of the actions of the versions it was checked on, judged at the first pin. An
+    /// action in none of its lists is one it does not know: off at every pin it comes in with,
+    /// and the user's to turn on.
+    others: &'static [&'static str],
+    /// Its actions that take a file's path beside their other arguments, and those arguments:
+    /// a call that gives one is refused, and the action runs with the server's own folder.
+    file_arguments: &'static [(&'static str, &'static [&'static str])],
+    /// Arguments every one of its actions takes though no schema says them, refused on each.
+    hidden_arguments: &'static [&'static str],
+    /// The argument that says how long the browser may sit idle before it closes, which an action
+    /// that starts it takes: it must be a number above 0, as 0 keeps the browser alive, and no
+    /// close ever empties its screenshots and downloads folders.
+    idle_argument: &'static str,
     /// Why they are.
     pub locked_why: &'static str,
     /// Its own actions, served by Flottille.
     pub actions: &'static [Own],
     /// Flottille's line, added to what the agent reads with the server's instructions.
     pub line: &'static str,
+    /// The action that opens its browser and takes `headed`, and what Flottille says of it
+    /// beside the server's own description: the agent chooses per call whether to show it.
+    pub shows: Option<(&'static str, &'static str)>,
 }
 
 /// An action of Flottille's own in a connection's tool.
@@ -75,18 +93,24 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_eval",
         "agent_browser_wait_for_function",
         "agent_browser_add_init_script",
-        "agent_browser_batch",         // runs other actions, eval among them
-        "agent_browser_flow_run",      // replays steps, as batch does
         "agent_browser_network_route", // serves a body of its own for the page's requests
-        "agent_browser_chat",          // agent-browser's own model, through an external gateway
     ],
     files: &[
         "agent_browser_network_har_start",
         "agent_browser_network_har_stop",
         "agent_browser_trace_start",
         "agent_browser_trace_stop",
+        // A recorded session saved as a flow, in a file agent-browser writes itself: what a
+        // login types may be in it.
+        "agent_browser_flow_save",
+        "agent_browser_flow_steps",
     ],
-    patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
+    patterns: &[
+        "agent_browser_wait_for_url",
+        "agent_browser_network_route",
+        // The pattern a route was given, as network_route's own url.
+        "agent_browser_network_unroute",
+    ],
     locked: &[
         "agent_browser_auth_delete",
         "agent_browser_auth_list",
@@ -101,15 +125,221 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         // A browser, or a session, that someone else controls: a login would type into it.
         "agent_browser_connect",
         "agent_browser_state_load",
+        // Chrome's DevTools address: anything of this user's on this machine that has it drives
+        // the browser with no gate (no token guards the port), and reads its pages, a password
+        // filled and the cookies.
+        "agent_browser_get_cdp_url",
         // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
         // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
+        // The browser's profile lasts from one browser to the next and keeps the sign-ins, made
+        // by hand or through the vault (#1326): a session cookie or a token in a page's storage is
+        // a credential. Their answers are not masked to names instead: a value of a site's own
+        // format is no secret Flottille knows, and saved state is a file.
+        "agent_browser_cookies_get",
+        "agent_browser_storage_get",
+        "agent_browser_state_save",
+        "agent_browser_state_show",
+        // They read or write a file by a path the agent gives, through the server, which reaches
+        // the profile: a run plants a link to its cookies under a name built in a script, which
+        // the gate never sees, and the server follows it. A check of the path loses to a link
+        // swapped after it, and these cannot run without a path.
+        "agent_browser_cookies_set_curl",
+        "agent_browser_upload",
+        "agent_browser_download",
+        "agent_browser_pdf",
+        "agent_browser_record_start",
+        "agent_browser_record_restart",
+        // A request's details hold its headers and body: the `Authorization` a page builds from
+        // a token in its storage, the Cookie it sends and the Set-Cookie it gets. A header is
+        // not masked instead: a value of a site's own format is no secret Flottille knows.
+        "agent_browser_network_requests",
+        "agent_browser_network_request",
+        // batch runs any command of agent-browser's, the locked ones among them (cookies get,
+        // state save, upload, get cdp-url), which no list of Flottille's follows; flow_run
+        // replays a flow, a file under the home, which a run writes. Off at the first pin is not
+        // enough: the user turning one on would open every lock.
+        "agent_browser_batch",
+        "agent_browser_flow_run",
+        // As get_cdp_url: DevTools, a stream's WebSocket and the dashboard drive the browser
+        // from a local port no token guards.
+        "agent_browser_inspect",
+        "agent_browser_dashboard_start",
+        // 0.43.0 streams always ("Streaming is always enabled"), so this lock changes nothing:
+        // what protects the port stream_status hands out is the browser's network namespace.
+        "agent_browser_stream_enable",
+        // Past every lock, as batch: chat is agent-browser's own model, which drives it through
+        // its own command function; install with withDeps runs the package manager as root
+        // through sudo; upgrade moves the server out of 0.43.x, after which an accepted review
+        // makes the connection generic (no locks, no url or file refusals).
+        "agent_browser_chat",
+        "agent_browser_install",
+        "agent_browser_upgrade",
     ],
+    // Every other tool of 0.43.0's `tools/list --tools all`. webmcp_invoke takes params as an
+    // object, which the server gives agent-browser as JSON, never its `@file` form; 0.43.0
+    // serves no add_init_script (its init scripts are a global option, which extraArgs and
+    // batch alone would carry).
+    others: &[
+        "agent_browser_tools_profiles",
+        "agent_browser_open",
+        "agent_browser_flow_list",
+        "agent_browser_webmcp_list",
+        "agent_browser_webmcp_invoke",
+        "agent_browser_webmcp_result",
+        "agent_browser_webmcp_cancel",
+        "agent_browser_read",
+        "agent_browser_snapshot",
+        "agent_browser_click",
+        "agent_browser_fill",
+        "agent_browser_type",
+        "agent_browser_press",
+        "agent_browser_hover",
+        "agent_browser_focus",
+        "agent_browser_check",
+        "agent_browser_uncheck",
+        "agent_browser_select",
+        "agent_browser_scroll",
+        "agent_browser_scroll_into_view",
+        "agent_browser_wait_ms",
+        "agent_browser_wait_for_selector",
+        "agent_browser_wait_for_text",
+        "agent_browser_wait_for_load",
+        "agent_browser_get_text",
+        "agent_browser_get_html",
+        "agent_browser_get_value",
+        "agent_browser_get_url",
+        "agent_browser_get_title",
+        "agent_browser_close",
+        "agent_browser_back",
+        "agent_browser_forward",
+        "agent_browser_reload",
+        "agent_browser_dblclick",
+        "agent_browser_drag",
+        "agent_browser_keydown",
+        "agent_browser_keyup",
+        "agent_browser_keyboard_type",
+        "agent_browser_keyboard_insert_text",
+        "agent_browser_get_attr",
+        "agent_browser_get_count",
+        "agent_browser_get_box",
+        "agent_browser_get_styles",
+        "agent_browser_is_visible",
+        "agent_browser_is_enabled",
+        "agent_browser_is_checked",
+        "agent_browser_find",
+        "agent_browser_mouse_move",
+        "agent_browser_mouse_down",
+        "agent_browser_mouse_up",
+        "agent_browser_mouse_wheel",
+        "agent_browser_set_viewport",
+        "agent_browser_set_device",
+        "agent_browser_set_geo",
+        "agent_browser_set_offline",
+        "agent_browser_set_headers",
+        "agent_browser_set_media",
+        "agent_browser_storage_set",
+        "agent_browser_storage_clear",
+        "agent_browser_cookies_set",
+        "agent_browser_cookies_clear",
+        "agent_browser_tab_new",
+        "agent_browser_tab_list",
+        "agent_browser_tab_switch",
+        "agent_browser_tab_close",
+        "agent_browser_window_new",
+        "agent_browser_frame_switch",
+        "agent_browser_frame_main",
+        "agent_browser_dialog_status",
+        "agent_browser_dialog_accept",
+        "agent_browser_dialog_dismiss",
+        "agent_browser_profiler_start",
+        "agent_browser_record_stop",
+        "agent_browser_console",
+        "agent_browser_errors",
+        "agent_browser_highlight",
+        "agent_browser_clipboard_read",
+        "agent_browser_clipboard_write",
+        "agent_browser_clipboard_copy",
+        "agent_browser_clipboard_paste",
+        "agent_browser_state_list",
+        "agent_browser_state_clear",
+        "agent_browser_state_clean",
+        "agent_browser_state_rename",
+        "agent_browser_tap",
+        "agent_browser_swipe",
+        "agent_browser_device",
+        "agent_browser_diff_url",
+        "agent_browser_react_tree",
+        "agent_browser_react_inspect",
+        "agent_browser_react_renders_start",
+        "agent_browser_react_renders_stop",
+        "agent_browser_react_suspense",
+        "agent_browser_vitals",
+        "agent_browser_a11y",
+        "agent_browser_pushstate",
+        "agent_browser_remove_init_script",
+        "agent_browser_confirm",
+        "agent_browser_deny",
+        "agent_browser_stream_disable",
+        "agent_browser_stream_status",
+        "agent_browser_session",
+        "agent_browser_session_list",
+        "agent_browser_session_id",
+        "agent_browser_session_info",
+        "agent_browser_profiles",
+        "agent_browser_skills_list",
+        "agent_browser_skills_get",
+        "agent_browser_skills_path",
+        "agent_browser_doctor",
+        "agent_browser_dashboard_stop",
+    ],
+    // The same, where the path is optional: without one the server writes to its own folder,
+    // which Flottille puts in the vault folder (`display`) or which only the user turns on
+    // (HAR, traces).
+    file_arguments: &[
+        ("agent_browser_screenshot", &["path", "screenshotDir"]),
+        ("agent_browser_wait_for_download", &["path"]),
+        ("agent_browser_network_har_stop", &["path"]),
+        ("agent_browser_trace_stop", &["path"]),
+        ("agent_browser_profiler_stop", &["path"]),
+        ("agent_browser_flow_save", &["output"]),
+        ("agent_browser_diff_snapshot", &["baseline"]),
+        ("agent_browser_diff_screenshot", &["baseline", "output"]),
+    ],
+    // restore and restoreSave save the cookies and storage to a file under the home, which runs
+    // read; caCert is a file the server reads and trusts; namespace moves the daemon's socket and
+    // its restore folders, as at the start (`UNSAFE`); extraArgs carries any of agent-browser's
+    // options (--restore, --screenshot-dir…), which no list of Flottille's can follow.
+    // capture: "flow" records the session, what a login types included, for flow_save to write
+    // under the home.
+    hidden_arguments: &[
+        "extraArgs",
+        "restore",
+        "restoreSave",
+        "caCert",
+        "namespace",
+        "capture",
+    ],
+    idle_argument: "idleTimeout",
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
                  arguments, and its plugins run commands with its credential providers: \
                  Flottille's vault is the only way to sign in, with the action login; connect and \
                  state_load bring a browser or a session someone else controls, which a login \
-                 would type into",
+                 would type into; get_cdp_url hands out Chrome's DevTools address, which drives \
+                 the browser with no gate; cookies_get, storage_get, state_save and state_show \
+                 give the cookies, storage and saved state of the browser's profile, which keeps \
+                 the sign-ins, and upload, download, pdf, cookies_set_curl, record_start and \
+                 record_restart read or write a file by its path through the server, which \
+                 reaches the profile however that path is made; network_requests and \
+                 network_request give a request's headers and body, its Authorization and \
+                 cookies among them; batch and flow_run run any command of agent-browser's, \
+                 the locked ones among them, and so does chat, agent-browser's own model, which \
+                 drives it through its own command function; install with withDeps runs the \
+                 package manager as root, and upgrade moves the server out of the version this \
+                 adapter was checked on, after which no lock applies; inspect and \
+                 dashboard_start open a local port that drives the browser with no gate; \
+                 stream_enable changes nothing, agent-browser 0.43 streams always, and what \
+                 protects the port stream_status hands out is the browser's network namespace",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -120,21 +350,55 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         schema: login_schema,
     }],
     line: "To sign in to a site, use the action login with the name of a vault entry; \
-           agent-browser's own logins are off.",
+           agent-browser's own logins are off. The browser is headless: agent_browser_open takes \
+           headed, true to show it on the user's screen, only when the user must act in the page \
+           (sign in, a captcha) or see it, never to read a page; left out or false it runs \
+           headless, and the next open without headed hides it again. The browser keeps its \
+           profile when it changes. Its cookies, storage and saved state are not yours to read: \
+           cookies_get, storage_get, state_save, upload, download, pdf, network_request and \
+           batch are off, and no action takes a file's path, extraArgs, restore or capture; a \
+           screenshot without a path comes back as an image.",
+    shows: Some((OPEN, SHOWS)),
 };
 
 const ALL: &[&Adapter] = &[&AGENT_BROWSER];
 
 pub(super) const LOGIN: &str = "login";
+/// agent-browser's action that opens the browser, and takes `headed`.
+const OPEN: &str = "agent_browser_open";
+/// What Flottille says of `headed` beside the server's own words.
+const SHOWS: &str = "headed: true shows the browser on the user's screen, and only when the user \
+    must act in the page (sign in, a captcha) or see it; never to read a page. Left out or false \
+    it runs headless. Changing it restarts the browser and keeps its profile (cookies, sign-ins), \
+    so the user can sign in shown and you then go on headless.";
 /// What Flottille is called in the configuration it writes for agent-browser.
 const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
 /// The launch argument that names a shown browser's window.
 const BROWSER_CLASS_ARG: &str = "--class=flottille-browser";
-/// The variable that gives a login's run its one-time token.
-pub const TOKEN_VARIABLE: &str = "FLOTTILLE_VAULT_TOKEN";
+/// Chrome's disk cache at 32 MiB: its profile is in the vault folder, in the runtime folder, which
+/// is in memory on most systems.
+const CACHE_ARG: &str = "--disk-cache-size=33554432";
+/// Beside the plugin's socket, the file that holds a login run's one-time token, and the one
+/// where the plugin says why it failed: agent-browser's session daemon starts the plugin, with the
+/// environment it was started with and not the login's command line's, and says of a plugin that
+/// failed only that it "exited unsuccessfully".
+const TOKEN_FILE: &str = "vault.token";
+const WHY_FILE: &str = "vault.why";
+/// How much of the plugin's reason the login reads.
+const WHY_BYTES: u64 = 1024;
 /// How long a login has, as a call of the server has.
 const LOGIN_LIMIT: Duration = Duration::from_secs(120);
+
+/// [`LOGIN_LIMIT`], or in a test build the milliseconds of `FLOTTILLE_CONNECTION_LOGIN_MS`.
+fn login_limit() -> Duration {
+    std::env::var("FLOTTILLE_CONNECTION_LOGIN_MS")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(LOGIN_LIMIT)
+}
 /// How long `agent-browser close` may take.
 const CLOSE_LIMIT: Duration = Duration::from_secs(10);
 /// How long the plugin has to say what it asks, once it reached the daemon.
@@ -180,6 +444,11 @@ pub fn applying(listing: &Listing) -> Option<&'static Adapter> {
     }
 }
 
+/// The adapter whose program the server's command `words` runs, if one does.
+pub fn named_by(words: &[String]) -> Option<&'static Adapter> {
+    ALL.iter().copied().find(|adapter| adapter.named_by(words))
+}
+
 /// `MAJOR.MINOR.PATCH`, nothing more: a pre-release or a build is no version an adapter was
 /// checked on.
 fn version(text: &str) -> Option<(u64, u64, u64)> {
@@ -198,9 +467,30 @@ impl Adapter {
         self.locked.contains(&action)
     }
 
-    /// The setting of a new action at the first pin, if the adapter sets one.
+    /// Whether `action` is in one of its lists: one it was checked on.
+    pub fn knows(&self, action: &str) -> bool {
+        [
+            self.locked,
+            self.scripts,
+            self.files,
+            self.patterns,
+            self.others,
+        ]
+        .iter()
+        .any(|list| list.contains(&action))
+            || self.file_arguments.iter().any(|(name, _)| *name == action)
+    }
+
+    /// The setting of an action new to a pin, or changed, if the adapter sets one, at the first
+    /// pin and at every one after it: off where it does not know the action, or keeps it off, or
+    /// where it is off by design (`scripts`, `files`). A re-pin that switches the server's tools
+    /// (agent-browser's default ones to `--tools all`) brings those in off, as the first did.
     pub fn first(&self, action: &str) -> Option<&'static str> {
-        if self.locks(action) || self.scripts.contains(&action) || self.files.contains(&action) {
+        if !self.knows(action)
+            || self.locks(action)
+            || self.scripts.contains(&action)
+            || self.files.contains(&action)
+        {
             return Some("off");
         }
         None
@@ -220,13 +510,31 @@ impl Adapter {
             .collect()
     }
 
-    /// Why a call of `action` with `arguments` is refused: a `url` that is no web address, such
-    /// as a `javascript:` or a `data:` one, which runs in the page.
+    /// Whether a call of `action` asks to show the browser: `headed` of the action that opens it
+    /// (false when left out), nothing for any other action, which goes on in the mode that runs.
+    pub fn headed(&self, action: &str, arguments: &Map<String, Value>) -> Option<bool> {
+        let (opens, _) = self.shows?;
+        (action == opens).then(|| {
+            arguments
+                .get("headed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Why a call of `action` with `arguments` is refused: a `url`, or any argument whose name
+    /// starts with it (`url1`, `url2` of `diff_url`), that is no web address, such as a
+    /// `javascript:` or a `data:` one, which runs in the page, or a `file:` one, which reads the
+    /// profile.
     pub fn refuses_url(&self, action: &str, arguments: &Value) -> Option<String> {
-        let url = arguments["url"].as_str()?;
-        if self.patterns.contains(&action) || web_address(url).is_some() {
+        if self.patterns.contains(&action) {
             return None;
         }
+        arguments
+            .as_object()?
+            .iter()
+            .filter(|(name, _)| name.starts_with("url"))
+            .find(|(_, url)| url.as_str().is_none_or(|url| web_address(url).is_none()))?;
         Some(format!(
             "{action} takes a url that is http or https with a host while Flottille's adapter \
              applies: another scheme (javascript:, data:, file:…) runs in the page or reads \
@@ -234,22 +542,77 @@ impl Adapter {
         ))
     }
 
-    /// What it changes, a sentence each, as the review says it; `headed` says whether its browser
-    /// is shown.
-    pub fn changed(&self, config: &Path, headed: bool) -> Vec<String> {
+    /// Why a call of `action` with `arguments` is refused: a file's path, which the server would
+    /// follow into the browser's profile, or an argument agent-browser takes on every action that
+    /// saves the browser's state or moves its folders (`file_arguments`, `hidden_arguments`).
+    pub fn refuses_files(&self, action: &str, arguments: &Value) -> Option<String> {
+        let files = self
+            .file_arguments
+            .iter()
+            .find(|(name, _)| *name == action)
+            .map_or(&[][..], |(_, files)| *files);
+        let given = files
+            .iter()
+            .chain(self.hidden_arguments)
+            .find(|name| arguments.get(**name).is_some())?;
+        Some(format!(
+            "{action} takes no {given} while Flottille's adapter applies: the server would read \
+             or write a file Flottille does not choose, or save the browser's state, and the \
+             browser's profile keeps the user's sign-ins; call it without {given}"
+        ))
+    }
+
+    /// Why a call of `action` with `arguments` is refused: an idle timeout that is not a number
+    /// above 0 (`idle_argument`). 0 keeps the browser alive, so its screenshots and downloads,
+    /// emptied once it ended, stay where a run can reach them; the unit is the server's own, and
+    /// the adapter does not state a floor beyond 0.
+    pub fn refuses_idle(&self, action: &str, arguments: &Value) -> Option<String> {
+        let idle = arguments.get(self.idle_argument)?;
+        if idle.as_f64().is_some_and(|idle| idle > 0.0) {
+            return None;
+        }
+        Some(format!(
+            "{action} takes {} only as a number above 0 while Flottille's adapter applies: 0 \
+             keeps the browser alive, and the screenshots and downloads of its folders are \
+             emptied only once it ended",
+            self.idle_argument
+        ))
+    }
+
+    /// What it changes, a sentence each, as the review says it.
+    pub fn changed(&self, config: &Path) -> Vec<String> {
         let mut said = vec![format!(
             "{} run a script in the page, which no gate can judge: they are off at the first \
-             review, and the user may turn them on",
+             review and at any later one they come in with, and the user may turn them on",
             self.scripts.join(", ")
         )];
         said.push(format!(
-            "{} write the page's traffic to a file, which is not masked: they are off at the \
-             first review, and the user may turn them on",
+            "{} write the page's traffic, or what was typed in it, to a file, which is not \
+             masked: they are off at the first review and at any later one they come in with, and the user may \
+             turn them on",
             self.files.join(", ")
         ));
         said.push(
             "a url its actions open must be http or https with a host: a javascript: or a data: \
-             one runs in the page"
+             one runs in the page; an idleTimeout must be a number above 0, as 0 keeps the \
+             browser alive"
+                .to_owned(),
+        );
+        said.push(format!(
+            "a call that gives a file's path ({}) or {} is refused: the server would follow it \
+             into the browser's profile, or save the browser's state; a screenshot and a \
+             download without a path go to a folder of the connection's vault folder",
+            self.file_arguments
+                .iter()
+                .map(|(action, files)| format!("{} of {action}", files.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; "),
+            self.hidden_arguments.join(", ")
+        ));
+        said.push(
+            "an action it does not know, which a version of its range adds, is off at the \
+             review it comes in with, as one may read what the locked ones do, and the user may \
+             turn it on"
                 .to_owned(),
         );
         said.push(format!(
@@ -278,17 +641,27 @@ impl Adapter {
              the entry's host; the browser itself goes wherever the agent takes it"
                 .to_owned(),
         );
-        if headed {
-            said.push(
-                "its browser is shown on the screen: the server gets the session's display \
-                 (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
-                 holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed and gives its window the class flottille-browser (args); with X11 the browser can read the keys typed in other windows and type \
-                 into them (a terminal's included), and on some Wayland compositors a client can \
-                 capture the screen and the clipboard"
-                    .to_owned(),
-            );
-        }
+        said.push(
+            "its server, its login and its browser run in a network of their own, through \
+             passt's pasta, where no run reaches Chrome's DevTools, and the browser still reaches \
+             the internet and this machine's local servers; without pasta, or where the kernel \
+             refuses user namespaces, the browser runs in the runs' network and login refuses \
+             to fill"
+                .to_owned(),
+        );
+        said.push(
+            "its browser runs headless; the agent chooses, at each agent_browser_open, to show \
+             it on the screen with headed: when it does, the server gets the session's display \
+             (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
+             holding the Wayland socket alone, never the user's, and the configuration sets \
+             headed and gives its window the class flottille-browser (args); with X11 the \
+             browser can read the keys typed in other windows and type into them (a terminal's \
+             included), and on some Wayland compositors a client can capture the screen and the \
+             clipboard; its profile (cookies, sign-ins) is kept from one browser to the next in a \
+             folder of the connection's own, which no other command Flottille runs reaches, \
+             unless its command keeps it to some domains"
+                .to_owned(),
+        );
         said
     }
 
@@ -329,6 +702,340 @@ impl Adapter {
         ))
     }
 }
+
+impl Adapter {
+    /// Why login is refused when the server's command or the connection's environment names a
+    /// variable that says where agent-browser puts its socket and Chrome its profile, caches and
+    /// crash dumps (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder,
+    /// and the connection, which an agent can propose an edit of, is not to move them.
+    pub fn moves_folders(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        let why = self.folder_set(words).map(command_sets).or_else(|| {
+            let named = FOLDERS_OF_THE_BROWSER
+                .iter()
+                .find(|name| env.contains_key(**name))?;
+            Some(sets_a_folder(
+                "the connection's environment",
+                "the connection's env",
+                named,
+            ))
+        })?;
+        Some(format!("login is refused while {why}"))
+    }
+
+    /// Why login is refused when the server's command does not run the adapter's program itself
+    /// (`not_itself`).
+    pub fn launched(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let why = self.not_itself(words, search_path(env).as_deref())?;
+        Some(format!("login is refused while {why}"))
+    }
+
+    /// Why the adapter's server is not started, nor its connection accepted, with the server's
+    /// command `words`: it sets one of the browser's folders before the program, or does not run
+    /// the program itself. Flottille sets the folders before it runs the command, so anything
+    /// between the two (`env`, a shell, a sandbox) would put the browser's socket, which drives
+    /// it with no gate, and its profile where a run reaches them.
+    pub fn command_refused(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        self.command_refused_on(words, search_path(env).as_deref())
+    }
+
+    /// `command_refused`, with the folders the server looks a program in (its `PATH`), `None`
+    /// when they are not known.
+    fn command_refused_on(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
+        let why = self
+            .folder_set(words)
+            .map(command_sets)
+            .or_else(|| self.not_itself(words, path))?;
+        Some(format!("{} {REFUSED_START} {why}", self.server))
+    }
+
+    /// Whether the server's command names the adapter's program: run through a wrapper the gate
+    /// unwraps, or any word of it (`setsid …/agent-browser mcp`, which the gate does not unwrap).
+    /// Its server is checked before its first start, as the adapter's.
+    pub fn named_by(&self, words: &[String]) -> bool {
+        self.reached(words, None).named || words.iter().any(|word| self.names_program(word))
+    }
+
+    /// Whether `word` looks like the adapter's program, by what follows its last `/`: it only
+    /// decides that the command is checked, never that it is accepted (`is_program`).
+    fn names_program(&self, word: &str) -> bool {
+        let program = crate::gate::base(word);
+        program == self.server
+            || program
+                .strip_prefix(self.server)
+                .is_some_and(|rest| rest.starts_with('@'))
+    }
+
+    /// Whether a package runner's `spec` is the adapter's package: its name alone, or with a
+    /// version or a tag (`agent-browser@0.43.0`, `agent-browser@latest`). A scope, a path, a URL,
+    /// an alias (`@npm:`) or a source (`@github:`, `@file:`) would run another program.
+    fn is_package(&self, spec: &str) -> bool {
+        match spec.strip_prefix(self.server) {
+            Some("") => true,
+            Some(rest) => rest.strip_prefix('@').is_some_and(|version| {
+                version.starts_with(|c: char| c.is_ascii_alphanumeric() || "^~<>=*".contains(c))
+                    && version
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_+^~<>=*|".contains(c))
+            }),
+            None => false,
+        }
+    }
+
+    /// Whether `word`, run directly, is the adapter's program: its name, which the system finds
+    /// on the server's `PATH`, or the path of that very file.
+    fn is_program(&self, word: &str, path: Option<&OsStr>) -> bool {
+        if word == self.server {
+            return true;
+        }
+        let (Some(path), true) = (path, Path::new(word).is_absolute()) else {
+            return false;
+        };
+        let found = std::env::split_paths(path)
+            .map(|folder| folder.join(self.server))
+            .find(|program| program.is_file());
+        match (
+            std::fs::canonicalize(word),
+            found.map(std::fs::canonicalize),
+        ) {
+            (Ok(asked), Some(Ok(found))) => asked == found,
+            _ => false,
+        }
+    }
+
+    /// The folder variable an assignment sets before the program, in any layer of the command.
+    /// The program's own arguments are its own: one that holds `HOME=` as text sets nothing.
+    fn folder_set(&self, words: &[String]) -> Option<&'static str> {
+        let reached = self.reached(words, None);
+        FOLDERS_OF_THE_BROWSER.into_iter().find(|name| {
+            reached.before.iter().any(|word| {
+                crate::gate::assignment(word) && word.split_once('=').map(|(n, _)| n) == Some(*name)
+            })
+        })
+    }
+
+    /// Why the server's command does not run the adapter's program itself: the program, its path
+    /// or a package runner's spec of it (`agent-browser@0.43.0`), run directly or by a chain of
+    /// plain package runners (`RUNNERS`, with no word but `RUNNER_WORDS` before what they run).
+    /// Every other program before it is refused, whatever it is: a list of the wrappers that set
+    /// an environment (`env`, `envdir`, `chpst`, `setpriv`, `flatpak`, a shell, `node -e`…) is
+    /// never whole.
+    fn not_itself(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
+        let what = self.reached(words, path).refused?;
+        Some(format!(
+            "the server's command {what}: a connection to {server} runs {server} itself, by its \
+             name or its path, or through npx, bunx, pnpm or yarn with dlx or exec and no option \
+             but -y, since anything between them could set the environment after Flottille set \
+             where the browser keeps its socket, which drives it with no gate, its profile and \
+             the password filled. The user starts the connection's command with {server}",
+            server = self.server
+        ))
+    }
+
+    /// How the server's command reaches the adapter's program, layer after layer as the gate
+    /// unwraps them.
+    fn reached(&self, words: &[String], path: Option<&OsStr>) -> Arrival {
+        let layers = crate::gate::layers(words).unwrap_or_else(|_| vec![words.to_vec()]);
+        let mut reached = Arrival::default();
+        for (at, layer) in layers.iter().enumerate() {
+            // Assignments in front of a program, as a shell's line has them.
+            let set = layer
+                .iter()
+                .take_while(|word| crate::gate::assignment(word))
+                .count();
+            reached.before.extend(layer[..set].iter().cloned());
+            if let Some((name, _)) = layer
+                .first()
+                .filter(|_| set > 0)
+                .and_then(|w| w.split_once('='))
+            {
+                reached
+                    .refused
+                    .get_or_insert_with(|| format!("sets {name} before its program"));
+            }
+            let Some(first) = layer.get(set) else {
+                break;
+            };
+            let program = crate::gate::base(first);
+            if self.names_program(first) {
+                reached.named = true;
+                if reached.refused.is_none() {
+                    // What a runner was given is a package, what the command starts with a
+                    // program: neither is accepted by what follows its last `/`.
+                    let itself = match at {
+                        0 => self.is_program(first, path),
+                        _ => self.is_package(first),
+                    };
+                    if !itself {
+                        reached.refused = Some(match at {
+                            0 => format!(
+                                "runs {} by a path that is not the one found on the PATH",
+                                self.server
+                            ),
+                            _ => format!(
+                                "gives its runner another package than {}, or {} by a path, a \
+                                 scope, a URL, an alias or a source",
+                                self.server, self.server
+                            ),
+                        });
+                    }
+                }
+                return reached;
+            }
+            // The words between the program and what it runs: all of them when what it runs is
+            // not its end (a line it splits).
+            let end = match layers.get(at + 1) {
+                Some(next) if layer.ends_with(next) => layer.len() - next.len(),
+                _ => layer.len(),
+            };
+            reached.before.extend(layer[set..end].iter().cloned());
+            if reached.refused.is_some() {
+                continue;
+            }
+            reached.refused = if !RUNNERS.contains(&program) {
+                Some(match at + set {
+                    0 => format!("starts with {program}"),
+                    _ => format!("runs {program}"),
+                })
+            } else {
+                let passed = layer[set + 1..end]
+                    .iter()
+                    .find(|word| !RUNNER_WORDS.contains(&word.as_str()));
+                match passed {
+                    // An option by its name alone: its value may be a path or a secret.
+                    Some(word) => Some(format!(
+                        "passes {} to {program}",
+                        word.split('=').next().unwrap_or(word)
+                    )),
+                    None if end == layer.len() => Some(format!("runs nothing with {program}")),
+                    None => None,
+                }
+            };
+        }
+        reached
+            .refused
+            .get_or_insert_with(|| format!("runs no {}", self.server));
+        reached
+    }
+}
+
+/// What `Adapter::reached` found of a server's command.
+#[derive(Default)]
+struct Arrival {
+    /// The words before the program, of every layer: the wrappers, their options and the
+    /// assignments they make.
+    before: Vec<String>,
+    /// Why it does not run the program itself, by names alone, never a value.
+    refused: Option<String>,
+    /// Whether a layer runs the program.
+    named: bool,
+}
+
+/// The package runners that run a package's program as it was given, with the environment they
+/// were given.
+const RUNNERS: &[&str] = &["npx", "bunx", "pnpm", "yarn"];
+
+/// The words a package runner may have before what it runs: anything else could choose another
+/// package (`-p`), a shell (`-c`) or Node's own options (`--node-options`).
+const RUNNER_WORDS: &[&str] = &["-y", "--yes", "dlx", "exec", "--"];
+
+/// That `sets` (the server's command, the connection's environment) sets the folder variable
+/// `named`, and from where the user takes it out.
+fn sets_a_folder(sets: &str, from: &str, named: &str) -> String {
+    format!(
+        "{sets} sets {named}: Flottille sets it for the browser, in the connection's vault \
+         folder, which no run reaches, so that the socket that drives the browser with no gate, \
+         its profile (cookies, the password filled) and its crash dumps stay out of their reach; \
+         one the connection moved would put them where a run reads them. The user takes {named} \
+         out of {from}"
+    )
+}
+
+/// What follows the server's name in Flottille's own refusal to start it (`command_refused`),
+/// which says it apart from what a server says.
+const REFUSED_START: &str = "is not started while";
+
+/// Whether `why` is Flottille's own refusal to start a server (`command_refused`), not words of
+/// the server's.
+pub fn is_start_refusal(why: &str) -> bool {
+    why.contains(REFUSED_START)
+}
+
+/// Where the server looks for a program: the daemon's `PATH`, which it is given, unless the
+/// connection's environment sets one (its value is a vault entry, which is not read here).
+fn search_path(env: &BTreeMap<String, String>) -> Option<OsString> {
+    match env.contains_key("PATH") {
+        true => None,
+        false => std::env::var_os("PATH"),
+    }
+}
+
+fn command_sets(named: &str) -> String {
+    sets_a_folder("the server's command", "the connection's command", named)
+}
+
+impl Adapter {
+    /// Why login is refused when an option agent-browser itself calls unsafe (those its
+    /// `--allowed-domains` rejects, `UNSAFE`) is set by the server's command, the connection's
+    /// environment, or the environment the daemon started with, which agent-browser inherits:
+    /// the login would type into a browser, a profile or a network other than the one Flottille
+    /// made. No configuration file of the user's is read: agent-browser reads the one `--config`
+    /// Flottille names, and only it.
+    pub fn unsafe_start(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let options: Vec<&str> = UNSAFE.iter().map(|(option, _)| *option).collect();
+        let variables: Vec<String> = UNSAFE
+            .iter()
+            .flat_map(|(_, variables)| variables.iter().map(|name| (*name).to_owned()))
+            .collect();
+        let (sets, option, from) = set_by(words, env, &options, &variables).or_else(|| {
+            variables
+                .iter()
+                .find(|name| std::env::var_os(name).is_some())
+                .map(|name| {
+                    (
+                        "the environment Flottille's daemon started with sets",
+                        name.clone(),
+                        "the environment the daemon starts with, then restarts it",
+                    )
+                })
+        })?;
+        Some(format!(
+            "login is refused while {sets} {option}, which agent-browser itself calls unsafe: the \
+             login would type the password into a browser, a profile or a network other than the \
+             one Flottille made for it (another profile, a saved or restored session, a browser \
+             reached over CDP or found running, a provider's browser, or launch arguments such as \
+             a proxy). The user takes {option} out of {from}"
+        ))
+    }
+}
+
+/// The options agent-browser itself calls unsafe beside a list of allowed domains, and the
+/// variables it reads as each: another profile, a session saved or restored, a browser reached
+/// over CDP or found running, a provider's browser, launch arguments (a `--proxy-server` among
+/// them), a plugin registry, a namespace.
+const UNSAFE: &[(&str, &[&str])] = &[
+    ("--profile", &["AGENT_BROWSER_PROFILE"]),
+    ("--state", &["AGENT_BROWSER_STATE"]),
+    ("--restore", &["AGENT_BROWSER_RESTORE"]),
+    ("--session-name", &["AGENT_BROWSER_SESSION_NAME"]),
+    ("--cdp", &["AGENT_BROWSER_CDP"]),
+    ("--auto-connect", &["AGENT_BROWSER_AUTO_CONNECT"]),
+    ("--provider", &["AGENT_BROWSER_PROVIDER"]),
+    ("-p", &[]),
+    ("--args", &["AGENT_BROWSER_ARGS"]),
+    // Its plugin registry replaces Flottille's plugin, which runs with the vault's access.
+    ("--plugins", &["AGENT_BROWSER_PLUGINS"]),
+    // A namespace puts the daemon's socket in a subfolder of its own, away from the socket
+    // folder's listing.
+    ("--namespace", &["AGENT_BROWSER_NAMESPACE"]),
+];
 
 /// Where the first of the options `list`, or of the `variables` that stand for them, is set, by
 /// the server's command `words` or the connection's environment `env`: what sets it, the option
@@ -393,22 +1100,28 @@ const SENDS_ELSEWHERE: &[(&str, &[&str])] = &[
 
 // ── The start ────────────────────────────────────────────────────────────────────────────────
 
-/// The connection's folder, where its server runs and Flottille writes what it adds.
+/// The connection's folder, where its server runs and agent-browser keeps its state.
 pub fn folder(daemon: &Daemon, name: &str) -> PathBuf {
     daemon.paths.state.join("connections").join(name)
 }
 
+const CONFIG_FILE: &str = "agent-browser.json";
+const PLUGIN_SOCKET: &str = "vault.sock";
+
 fn config_file(folder: &Path) -> PathBuf {
-    folder.join("agent-browser.json")
+    folder.join(CONFIG_FILE)
 }
 
-fn socket_file(folder: &Path) -> PathBuf {
-    folder.join("vault.sock")
+/// The plugin's socket, in the connection's vault folder (`display::vault`): out of every run's
+/// reach, as the token beside it is.
+fn socket_file(vault: &crate::display::Folder) -> PathBuf {
+    vault.path().join(PLUGIN_SOCKET)
 }
 
-/// Where the configuration it writes is, as the review names it.
+/// Where the configuration it writes is, as the review names it: in the connection's vault folder
+/// (`display::vault`), out of every run's reach, as the plugin it names is.
 pub fn config_of(daemon: &Daemon, name: &str) -> PathBuf {
-    config_file(&folder(daemon, name))
+    config_file(&daemon.paths.runtime.join("vault").join(name))
 }
 
 /// The site an entry's URL gives, its host: none for a URL that is no web address a password may
@@ -464,40 +1177,73 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// configuration that names Flottille as agent-browser's credential provider, and only it (an
 /// explicit one replaces agent-browser's discovery of the user's own). It is the file and not
 /// flags: agent-browser's MCP tool calls run in child processes that load only the `--config`
-/// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file.
-pub fn start_options(folder: &Path, headed: bool) -> Result<Vec<String>, String> {
+/// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file. It is in the
+/// vault folder: a run that rewrote it while a login starts would have its own program run as the
+/// plugin, by a browser that reaches the vault.
+///
+/// It names the browser's profile too, in the folder of the connection's browser (`browsers.rs`),
+/// which no other command Flottille runs reaches: each browser started in the other mode is a
+/// new one, and agent-browser's own profile of a browser is gone when it closes; with it the user
+/// signs in shown and the agent goes on headless, signed in. A command kept to some domains gets
+/// none: agent-browser refuses `--allowed-domains` beside a profile.
+pub fn start_options(
+    declaration: &Declaration,
+    vault: &crate::display::Folder,
+    browser: &crate::browsers::Folder,
+    headed: bool,
+) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
         "name": PLUGIN,
         "command": program,
-        "args": ["vault", "provide", socket_file(folder)],
+        "args": ["vault", "provide", socket_file(vault)],
         "capabilities": ["credential.read"],
     }]});
+    if !kept_to_domains(declaration) {
+        config["profile"] = json!(browser.profile());
+    }
+    // agent-browser's launch arguments, separated by commas.
+    config["args"] = json!(CACHE_ARG);
     if headed {
         config["headed"] = json!(true);
         // Chrome's `--class` is its app id on Wayland and its WM_CLASS on X11: the user's desktop
         // can tell this browser from their own, which a rule that keeps it from taking the focus
         // needs (`docs/extensions.md`, "Show the browser"). Only a shown browser has a window.
-        config["args"] = json!(BROWSER_CLASS_ARG);
+        config["args"] = json!(format!("{BROWSER_CLASS_ARG},{CACHE_ARG}"));
     }
-    let file = config_file(folder);
+    let file = config_file(vault.path());
     written(&file, config.to_string().as_bytes())
         .map_err(|error| format!("{}: {error}", file.display()))?;
     Ok(vec!["--config".into(), file.display().to_string()])
 }
 
-/// The display of the browser of `declaration` when the user shows it: a runtime folder of its
-/// own holding the session's Wayland socket alone (`display.rs`), kept while the `owner` that
-/// uses it runs, and while the browser started with it does. When it cannot be made the browser
-/// runs headless, never with the user's real runtime folder: the daemon says why on its stderr and
-/// the reason is returned, for the server's record to keep (the window says it under the switch).
+/// Whether the user's command keeps the browser to some domains (`--allowed-domains`, or its
+/// variable in the connection's `env`).
+fn kept_to_domains(declaration: &Declaration) -> bool {
+    let Reach::Command(words) = &declaration.reach else {
+        return false;
+    };
+    words
+        .iter()
+        .any(|word| word == "--allowed-domains" || word.starts_with("--allowed-domains="))
+        || declaration
+            .env
+            .contains_key("AGENT_BROWSER_ALLOWED_DOMAINS")
+}
+
+/// The display of the browser of `declaration` when the agent's call shows it (`headed`): a
+/// runtime folder of its own holding the session's Wayland socket alone (`display.rs`), kept
+/// while the `owner` that uses it runs, and while the browser started with it does. When it cannot
+/// be made the browser runs headless, never with the user's real runtime folder: the daemon says
+/// why on its stderr and the reason is returned, for the server's record to keep.
 pub fn shown(
     daemon: &Daemon,
     declaration: &Declaration,
     owner: &str,
+    headed: bool,
 ) -> (Option<crate::display::Shown>, Option<String>) {
-    if !declaration.headed {
+    if !headed {
         return (None, None);
     }
     // The browser that runs was confined with its folder, which Landlock holds by its inode: one
@@ -519,17 +1265,21 @@ pub fn shown(
     }
 }
 
-/// The browser's environment: no display of the daemon's own, never the session bus address,
-/// whether the browser is shown or not, and the display folder's variables (`shown`, a
+/// The browser's environment, applied after the connection's own variables (a connection's env
+/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the
+/// session bus address, whether the browser is shown or not, and the display folder's variables
+/// (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
-/// name the connection's own `folder`, so they reach the same browser, and the removal of a
-/// display folder never takes a live socket.
+/// name the connection's socket folder in its vault folder ([`sockets`]), so they reach the same
+/// browser, the removal of a display folder never takes a live socket, and a run, which the vault
+/// folder is out of the reach of, does not reach the socket, which drives the browser with no
+/// gate (`docs/vault.md`, "The gaps", says what is still within its reach).
 pub fn display(
     env: &mut BTreeMap<OsString, OsString>,
     shown: Option<&BTreeMap<OsString, OsString>>,
-    folder: &Path,
-) {
+    vault: &crate::display::Folder,
+) -> Result<(), String> {
     for name in [
         "WAYLAND_DISPLAY",
         "DISPLAY",
@@ -543,17 +1293,160 @@ pub fn display(
     }
     env.insert(
         "AGENT_BROWSER_SOCKET_DIR".into(),
-        folder.as_os_str().to_owned(),
+        sockets(vault)?.into_os_string(),
     );
+    env.insert("TMPDIR".into(), private(vault, TEMPORARY)?.into_os_string());
+    // A screenshot without a path goes to `~/.agent-browser/tmp/screenshots`, under the home
+    // runs write: a link planted there, at the name of the next one, would have it written into
+    // the profile. A download would go to a folder of Chrome's choosing.
+    for (variable, name) in BROWSERS_FILES {
+        env.insert(variable.into(), private(vault, name)?.into_os_string());
+    }
+    // Chrome writes outside its profile, whatever profile it is given: its crash database (page
+    // memory, a password typed) under its default configuration folder, its caches; never in a
+    // folder of the user's, which runs read and write (`docs/vault.md`, "The browser's network").
+    for (variable, name) in CHROMES_FOLDERS {
+        env.insert(variable.into(), private(vault, name)?.into_os_string());
+    }
+    for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+        env.remove(&OsString::from(name));
+    }
+    Ok(())
 }
 
-/// How the browser agent-browser's daemon runs for a connection is closed: its command line and
-/// the socket folder the daemon answers on; and the display folder it was started with, kept
-/// until it is closed.
+/// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
+/// socket, and where Chrome writes its profile, caches and crash dumps; and `HOME`, which moves
+/// where agent-browser looks for the Chrome it downloaded and where Chrome reads `~/.pki/nssdb`.
+pub const FOLDERS_OF_THE_BROWSER: [&str; 10] = [
+    "HOME",
+    "AGENT_BROWSER_SOCKET_DIR",
+    "TMPDIR",
+    "AGENT_BROWSER_SCREENSHOT_DIR",
+    "AGENT_BROWSER_DOWNLOAD_PATH",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "CHROME_CONFIG_HOME",
+    "BREAKPAD_DUMP_LOCATION",
+];
+
+/// The variables that say where Chrome and agent-browser write outside the profile, and the
+/// folder of the vault folder each names.
+const CHROMES_FOLDERS: [(&str, &str); 3] = [
+    ("XDG_CONFIG_HOME", "config"),
+    ("XDG_CACHE_HOME", "cache"),
+    ("XDG_DATA_HOME", "data"),
+];
+
+/// The variables that say where agent-browser writes a screenshot and a download given no path,
+/// and the folder of the vault folder each names.
+const BROWSERS_FILES: [(&str, &str); 2] = [
+    ("AGENT_BROWSER_SCREENSHOT_DIR", "screenshots"),
+    ("AGENT_BROWSER_DOWNLOAD_PATH", "downloads"),
+];
+
+/// The folder `name` of the vault folder, made the user's alone: the temporary folder of
+/// agent-browser and its Chrome, where agent-browser makes Chrome's profile
+/// (`agent-browser-chrome-…`: cookies, Local Storage, History, and the `Preferences` that name a
+/// proxy), which in the daemon's own (`/tmp`) runs would read and plant, and the folders of
+/// [`CHROMES_FOLDERS`] (`docs/vault.md`, "The browser's network").
+fn private(vault: &crate::display::Folder, name: &str) -> Result<PathBuf, String> {
+    let folder = vault.path().join(name);
+    flottille_core::paths::ensure_private_dir(&folder)
+        .map_err(|error| format!("{}: {error}", folder.display()))?;
+    Ok(folder)
+}
+
+/// What the name of the socket folder starts with.
+const SOCKETS: &str = "browser-";
+/// The temporary folder's name.
+const TEMPORARY: &str = "tmp";
+
+/// The folder agent-browser's daemon puts its socket in: the one folder of the vault folder, of
+/// a random name made the first time and found again by listing, by this daemon and the next.
+/// agent-browser names its socket after its session (`default`): in a folder of a name anyone can
+/// tell, a program that may connect by its path (a run where neither a namespace nor Landlock
+/// keeps the vault folder) would find it.
+fn sockets(vault: &crate::display::Folder) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(found) = sockets_in(vault.path()) {
+        return Ok(found);
+    }
+    let folder = vault
+        .path()
+        .join(format!("{SOCKETS}{}", super::oauth::random(16)?));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .map_err(|error| format!("{}: {error}", folder.display()))?;
+    Ok(folder)
+}
+
+/// The socket folder of the vault folder `vault`, when there is one.
+fn sockets_in(vault: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(vault).ok()?.flatten().find_map(|entry| {
+        // Never through a link: the type of the entry itself.
+        let folder = entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && entry.file_name().to_string_lossy().starts_with(SOCKETS);
+        folder.then(|| entry.path())
+    })
+}
+
+/// What a daemon that died during a login left in the vault folders (its token, its plugin's
+/// socket, the plugin's reason: a login ends with them, a SIGKILL does not), and what an earlier
+/// Flottille kept in the connections' state folders, which runs reach (agent-browser's
+/// configuration, the plugin's socket). Called before any connection starts: no login runs. The
+/// socket folders stay, a browser left may answer on them (`left`).
+pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
+    // Folders alone, never through a link: the state folder is within the runs' reach.
+    let folders = |base: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(base)
+            .map(|listed| {
+                listed
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for vault in folders(paths.runtime.join("vault")) {
+        for name in [TOKEN_FILE, WHY_FILE, PLUGIN_SOCKET] {
+            let _ = std::fs::remove_file(vault.join(name));
+        }
+        // No browser left to close (`left`), whose `close` would empty it: what is there is a
+        // profile no browser uses, a Chrome that crashed left it.
+        let no_browser = sockets_in(&vault)
+            .and_then(|sockets| std::fs::read_dir(sockets).ok()?.next())
+            .is_none();
+        if no_browser {
+            emptied_files(&vault);
+        }
+    }
+    for state in folders(paths.state.join("connections")) {
+        for name in [CONFIG_FILE, PLUGIN_SOCKET] {
+            let _ = std::fs::remove_file(state.join(name));
+        }
+    }
+}
+
+/// The browser a daemon that died left for `declaration`, shown or not: one whose socket folder
+/// holds something. Only an adapter's server has a vault folder, so no other server's program is
+/// run to close anything.
+pub fn left(daemon: &Daemon, declaration: &Declaration) -> Option<Browser> {
+    let vault = daemon.paths.runtime.join("vault").join(&declaration.name);
+    std::fs::read_dir(sockets_in(&vault)?).ok()?.next()?.ok()?;
+    browser(daemon, declaration, None)
+}
+
+/// How the browser agent-browser's daemon runs for a connection is closed: its command line, the
+/// connection's folder and its vault's, where the daemon answers; and the display folder it was
+/// started with, kept until it is closed.
 #[derive(Clone, Debug)]
 pub struct Browser {
     program: Vec<String>,
     folder: PathBuf,
+    vault: crate::display::Folder,
     pub(super) shown: Option<crate::display::Shown>,
 }
 
@@ -566,6 +1459,7 @@ pub fn browser(
     Some(Browser {
         program: command_line(declaration)?,
         folder: folder(daemon, &declaration.name),
+        vault: super::client::vault_of(daemon, &declaration.name).ok()?,
         shown: shown.cloned(),
     })
 }
@@ -574,29 +1468,162 @@ pub fn browser(
 /// whichever of the server and a login started it: it outlives both, in the display folder and
 /// the mode it started with, and the next start must apply the user's switch.
 pub async fn close(daemon: &Daemon, browser: &Browser) {
+    // In the browser's network, as every command of agent-browser's: one that found no browser
+    // would start one where it runs. Without one, as it started.
+    // Used only where a run stays out of the browser's reach (`network::present`), as when one
+    // is made for a login.
+    let network = match network::present(browser.vault.path(), crate::landlock::abi()) {
+        Ok(Some(network)) => Some(network),
+        Ok(None) => network::made(browser.vault.path()).await.ok(),
+        Err(_) => None,
+    };
+    closed_in(
+        daemon,
+        &browser.program,
+        &browser.folder,
+        &browser.vault,
+        network.as_ref(),
+        false,
+    )
+    .await;
+    // Nothing of the browser's runs in it any more.
+    network::ended(browser.vault.path());
+    // A Chrome that crashed left its profile, which agent-browser's close never removes.
+    emptied_once_ended(browser.vault.path());
+}
+
+/// Every entry of `folder` removed, the folder kept (a server's next browser makes its profile
+/// there): never through a link, the entry's own type, and `folder` itself a real folder. A link
+/// there (the vault folder is the user's, but a Flottille that crashed halfway is not trusted)
+/// would be followed by `read_dir` to a folder that is not Flottille's.
+fn emptied(folder: &Path) {
+    if !std::fs::symlink_metadata(folder).is_ok_and(|kind| kind.is_dir()) {
+        return;
+    }
+    let Ok(listed) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in listed.flatten() {
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(entry.path()),
+            _ => std::fs::remove_file(entry.path()),
+        };
+    }
+}
+
+/// `emptied` the temporary folder of the vault folder `vault`, once the browsers it holds ended:
+/// not while one still answers on the socket folder (a close that timed out or did not run, or
+/// one of the other sessions, which `agent-browser close` leaves), whose profile it uses and
+/// which of the folder's profiles is whose is not known.
+fn emptied_once_ended(vault: &Path) {
+    let answering = sockets_in(vault).is_some_and(|sockets| network::alive(&sockets));
+    if !answering {
+        emptied_files(vault);
+    }
+}
+
+/// `emptied` the temporary folder of the vault folder `vault`, and the folders of its
+/// screenshots and downloads, which no browser's next start needs.
+fn emptied_files(vault: &Path) {
+    for name in [TEMPORARY]
+        .into_iter()
+        .chain(BROWSERS_FILES.map(|(_, name)| name))
+    {
+        emptied(&vault.join(name));
+    }
+}
+
+/// The network of the browser of the vault folder `vault`, found or made, for a command of
+/// agent-browser's (`program`, run in `folder`) to start in: why not where none can be made. A
+/// browser that answers on the socket folder from outside it (started by a server that ran
+/// without one, or in one whose holder was killed) is closed first: a login would fill it, and a
+/// call of the server's would use it.
+pub async fn network(
+    daemon: &Daemon,
+    program: &[String],
+    folder: &Path,
+    vault: &crate::display::Folder,
+) -> Result<Network, String> {
+    // Each time one is used, not only when it is made: the host may have changed since.
+    let network = match network::present(vault.path(), crate::landlock::abi())? {
+        Some(network) => network,
+        None => {
+            network::available()?;
+            network::made(vault.path()).await?
+        }
+    };
+    if !outside(&network, vault).await.is_empty() {
+        closed_in(daemon, program, folder, vault, Some(&network), true).await;
+    }
+    Ok(network)
+}
+
+/// The browsers that answer on the socket folder of `vault` and do not run in `network`.
+async fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
+    answering(vault.path())
+        .await
+        .into_iter()
+        .filter(|pid| !network.holds(*pid))
+        .collect()
+}
+
+/// The pids behind the sockets of the socket folder of the vault folder `vault` (0 for one that
+/// cannot be told). Each socket is connected to, which blocks: on a thread of its own.
+async fn answering(vault: &Path) -> Vec<u32> {
+    let Some(sockets) = sockets_in(vault) else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || {
+        // A crashed browser's socket file stays in the kept socket folders: nobody listens, so it
+        // is not outside, and counting it would block every login.
+        network::swept(&sockets);
+        network::daemons(&sockets)
+    })
+    .await
+    // Not known: as a browser outside, so nothing is filled.
+    .unwrap_or_else(|_| vec![0])
+}
+
+/// `agent-browser close` (`--all` its sessions when `all`), in `network` when there is one.
+async fn closed_in(
+    daemon: &Daemon,
+    program: &[String],
+    folder: &Path,
+    vault: &crate::display::Folder,
+    network: Option<&Network>,
+    all: bool,
+) {
     let Ok(mut env) = crate::runs::beside(daemon) else {
         return;
     };
-    display(&mut env, None, &browser.folder);
-    let mut command = tokio::process::Command::new(&browser.program[0]);
+    if display(&mut env, None, vault).is_err() {
+        return;
+    }
+    let mut command = tokio::process::Command::new(&program[0]);
     command
-        .args(&browser.program[1..])
+        .args(&program[1..])
         .arg("close")
+        .args(all.then_some("--all"))
         .env_clear()
         .envs(&env)
-        .current_dir(&browser.folder)
+        .current_dir(folder)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = match crate::children::spawn(crate::landlock::confined(
+    if let Some(network) = network {
+        network.entered(&mut command);
+    }
+    // Its socket is in the vault folder, which it must reach.
+    let mut child = match crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
+        &[vault],
     )) {
         Ok(child) => child,
         Err(error) => {
             eprintln!(
                 "flottille daemon: cannot close the browser of {}: {error}",
-                browser.folder.display()
+                folder.display()
             );
             return;
         }
@@ -724,15 +1751,38 @@ pub async fn perform(
         if let Some(why) = AGENT_BROWSER
             .own_config(&program)
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.moves_folders(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.launched(&program, &declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
+        // Never in a browser any run reaches: its DevTools, with no token, reads the password
+        // filled and every cookie.
+        let made = match super::client::vault_of(daemon, name) {
+            Ok(vault) => network(daemon, &program, &folder(daemon, name), &vault).await,
+            Err(why) => Err(why),
+        };
+        let network = match made {
+            Ok(network) => network,
+            Err(why) => return Outcome::Refused(format!("refused: {}", isolation_refused(&why))),
+        };
         let login = Login {
             connection: name.clone(),
             entry: entry_of.name.clone(),
             project: grant.place.project.clone(),
         };
-        match run(daemon, declaration, &program, &login, &url, served).await {
+        match run(
+            daemon,
+            declaration,
+            &program,
+            &login,
+            &url,
+            served,
+            &network,
+        )
+        .await
+        {
             Ok(said) => Outcome::Done(format!(
                 "Signed in with the vault entry {entry}: agent-browser typed its username and \
                  secret into the page's login form; the secret never reaches you. What \
@@ -753,6 +1803,15 @@ pub async fn perform(
         }
     })
     .await
+}
+
+/// Why login is refused when the browser cannot run in a network of its own: `why` it cannot.
+fn isolation_refused(why: &str) -> String {
+    format!(
+        "login fills a password only into a browser that runs in a network of its own, where no \
+         run reaches its DevTools, and none can be made here: {why}. The rest of the browser \
+         works meanwhile"
+    )
 }
 
 /// Whether login may still run under the connection's turn, with the pin it has then: the
@@ -777,7 +1836,7 @@ fn web_address(text: &str) -> Option<String> {
 
 /// The words of agent-browser's command line in the server's own command: those before its
 /// `mcp`, global options included, so that it runs as the server does.
-fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
+pub(super) fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
     let Reach::Command(words) = &declaration.reach else {
         return None;
     };
@@ -785,7 +1844,16 @@ fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
     (at > 0).then(|| words[..at].to_vec())
 }
 
+/// What a login's commands are given back of what every confined command is kept out of: the
+/// display folder of the browser that is shown, if one is, the connection's vault folder, and the
+/// folder of its browser.
+struct Reached<'a> {
+    folders: Vec<&'a crate::display::Folder>,
+    browser: crate::browsers::Folder,
+}
+
 /// One login: the entry it may give, to whom.
+#[derive(Clone)]
 struct Login {
     connection: String,
     entry: String,
@@ -795,7 +1863,7 @@ struct Login {
 /// Loads the entry's page (`agent-browser open`), then runs `agent-browser auth login
 /// --no-navigate` on it with Flottille as its credential provider, and answers the plugin's
 /// request for this run alone: what it printed, or why it failed. `served` is the display of the
-/// server that runs, if it shows its browser.
+/// server that runs, if it shows its browser, else the display of the browser that runs, if any.
 async fn run(
     daemon: &Arc<Daemon>,
     declaration: &Declaration,
@@ -803,6 +1871,7 @@ async fn run(
     login: &Login,
     url: &str,
     served: Option<crate::display::Shown>,
+    network: &Network,
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
@@ -810,46 +1879,67 @@ async fn run(
     // made under its name, the same path the server's next start makes again.
     let shown = match served {
         Some(served) => Some(served),
-        None => shown(daemon, declaration, &declaration.name).0,
+        // A login never shows a browser by itself: it goes on in the one that is shown, if any.
+        None => super::client::browser_display(daemon, &declaration.name),
     };
-    let options = start_options(&folder, shown.is_some())?;
+    let vault = super::client::vault_of(daemon, &declaration.name)?;
+    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
+    let options = start_options(declaration, &vault, &given, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
     let token = super::oauth::random(32)?;
-    let socket = socket_file(&folder);
-    // Left by a login that was killed: the folder is the user's alone (0700) and a connection runs
-    // one login at a time under its turn, so no one else's socket is there to be taken over.
+    let socket = socket_file(&vault);
+    // Left by a login that was killed: the folder is the daemon's alone (0700, out of every run's
+    // reach) and a connection runs one login at a time under its turn, so no one else's socket is
+    // there to be taken over.
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).map_err(|error| format!("{error}"))?;
     let _gone = Removed(socket.clone());
+    let why_file = socket.with_file_name(WHY_FILE);
+    let _ = std::fs::remove_file(&why_file);
+    let _why_gone = Removed(why_file.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
-    // The one folder the login's commands may reach: the daemon's own, never what a variable of
-    // the connection (the vault's, below) names.
-    let reached = shown.as_ref().map(|shown| shown.folder.clone());
+    // The folders the login's commands may reach: the daemon's own, never what a variable of the
+    // connection (the vault's, below) names. The browser they may start runs the plugin, which
+    // reaches the token and the socket in the vault's, and keeps its profile in its own folder.
+    let reached = Reached {
+        folders: shown
+            .as_ref()
+            .map(|shown| &shown.folder)
+            .into_iter()
+            .chain([&vault])
+            .collect(),
+        browser: given,
+    };
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
         env.insert(OsString::from(variable), OsString::from(secret));
     }
-    // The loads of the page need no token: they ask for no secret.
-    let without_token = env.clone();
-    env.insert(TOKEN_VARIABLE.into(), token.clone().into());
+    // Last: the connection's own variables never move the browser's folders.
+    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault)?;
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
-    reload(
-        program,
-        &options,
-        &without_token,
-        reached.as_ref(),
-        &folder,
-        url,
-    )
-    .await
-    .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    reload(program, &options, &env, &reached, &folder, url, network)
+        .await
+        .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    // The browser the page loaded in is the one the login fills: in the network, as every other
+    // that answers on the socket folder.
+    if !outside(network, &vault).await.is_empty() {
+        return Err(
+            "a browser of this connection runs outside its network, where runs reach its \
+             DevTools: Flottille fills no password into it. Restarting the connection's server \
+             starts it again inside"
+                .to_owned(),
+        );
+    }
+    // Written once the page is loaded, which needs no token: it asks for no secret.
+    let token_file = socket.with_file_name(TOKEN_FILE);
+    written(&token_file, token.as_bytes()).map_err(|error| format!("{error}"))?;
+    let _token_gone = Removed(token_file);
     let mut command = tokio::process::Command::new(&program[0]);
     command
         .args(&program[1..])
@@ -873,30 +1963,49 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    network.entered(&mut command);
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        reached.as_ref(),
+        &reached.folders,
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
     let stdout = tokio::spawn(kept(child.stdout.take()));
     let stderr = tokio::spawn(kept(child.stderr.take()));
-    let mut token = Some(token);
+    let token = Arc::new(std::sync::Mutex::new(Some(token)));
+    let shared = Arc::new(login.clone());
     let mut refused = None;
-    let ended = tokio::time::timeout(LOGIN_LIMIT, async {
+    let mut stray = false;
+    // Each request answered on its own: one that says nothing does not hold the plugin's.
+    let mut asks = tokio::task::JoinSet::new();
+    // The first refusal is the login's: one that follows is a stray request's, never its reason.
+    let mut heard = |done: Result<Option<Refused>, tokio::task::JoinError>| match done {
+        Ok(Some(Refused::Asked(why))) => {
+            refused.get_or_insert(why);
+        }
+        Ok(Some(Refused::Untokened)) => stray = true,
+        _ => {}
+    };
+    let limit = login_limit();
+    let ended = tokio::time::timeout(limit, async {
         loop {
             tokio::select! {
                 status = child.wait() => return status,
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { continue };
-                    if let Some(why) = answer(daemon, stream, login, &mut token).await {
-                        refused = Some(why);
-                    }
+                    asks.spawn(answer(daemon.clone(), stream, shared.clone(), token.clone()));
                 }
+                Some(done) = asks.join_next() => heard(done),
             }
         }
     })
     .await;
+    // What was answered before agent-browser ended; the requests still waiting are dropped.
+    while let Some(done) = asks.try_join_next() {
+        heard(done);
+    }
+    drop(asks);
     let status = match ended {
         Ok(status) => status.map_err(|error| error.to_string())?,
         Err(_) => {
@@ -905,16 +2014,10 @@ async fn run(
             }
             let mut why = format!(
                 "agent-browser did not sign in within {} seconds: it was stopped",
-                LOGIN_LIMIT.as_secs()
+                limit.as_secs()
             );
             reloaded(
-                program,
-                &options,
-                &without_token,
-                reached.as_ref(),
-                &folder,
-                url,
-                &mut why,
+                program, &options, &env, &reached, &folder, url, network, &mut why,
             )
             .await;
             return Err(why);
@@ -927,22 +2030,27 @@ async fn run(
     if status.success() {
         return Ok(said);
     }
-    let mut why = match refused {
+    let mut why = match &refused {
         Some(refused) => format!("Flottille refused agent-browser's request: {refused}"),
         None => "agent-browser could not sign in".to_owned(),
     };
+    // Not the plugin's, maybe: anything that reached the socket may have sent it.
+    if stray {
+        why.push_str("; a request without the token of this login was refused");
+    }
     let first = error.lines().find(|line| !line.trim().is_empty());
     if let Some(line) = first {
         why.push_str(&format!("; it said: {line}"));
     }
+    // The plugin's own reason, when it failed before the daemon could refuse it.
+    if refused.is_none()
+        && let Some(said) = why_of(&why_file)
+        && let Some(line) = said.lines().find(|line| !line.trim().is_empty())
+    {
+        why.push_str(&format!("; Flottille's credential plugin said: {line}"));
+    }
     reloaded(
-        program,
-        &options,
-        &without_token,
-        reached.as_ref(),
-        &folder,
-        url,
-        &mut why,
+        program, &options, &env, &reached, &folder, url, network, &mut why,
     )
     .await;
     Err(why)
@@ -951,16 +2059,18 @@ async fn run(
 /// After a login that failed, the entry's page loaded afresh on the same session, by Flottille
 /// and not by an agent: a secret typed into its form does not stay there (a browser does not
 /// restore a password field). `why` says it when that fails too.
+#[allow(clippy::too_many_arguments)]
 async fn reloaded(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &Reached<'_>,
     folder: &Path,
     url: &str,
+    network: &Network,
     why: &mut String,
 ) {
-    if let Err(failed) = reload(program, options, env, reached, folder, url).await {
+    if let Err(failed) = reload(program, options, env, reached, folder, url, network).await {
         why.push_str(&format!(
             "; Flottille could not load {url} again to clear the form: {failed}"
         ));
@@ -971,9 +2081,10 @@ async fn reload(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &Reached<'_>,
     folder: &Path,
     url: &str,
+    network: &Network,
 ) -> Result<(), String> {
     let mut command = tokio::process::Command::new(&program[0]);
     command
@@ -987,9 +2098,11 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    network.entered(&mut command);
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        reached,
+        &reached.folders,
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -1017,6 +2130,24 @@ async fn reload(
         .to_owned())
 }
 
+/// The plugin's reason, its first [`WHY_BYTES`]: never through a link, never a file that is not
+/// a plain one.
+fn why_of(file: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(file)
+        .ok()?;
+    if !opened.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    opened.take(WHY_BYTES).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Removes the plugin's socket once the login ends, however it ends.
 struct Removed(PathBuf);
 
@@ -1038,14 +2169,25 @@ async fn kept(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Why a request to the login's socket was refused.
+enum Refused {
+    /// The plugin's, with the token: why.
+    Asked(String),
+    /// Without the token: from anything that reached the socket.
+    Untokened,
+    /// Once the token was spent, by the request that was given the credential: anything's,
+    /// which says nothing of why the login failed.
+    Spent,
+}
+
 /// Answers one request of the plugin: the credential, for the run's own token once and for its
 /// entry alone; why it refused otherwise. Nothing of the secret is said anywhere else.
 async fn answer(
-    daemon: &Daemon,
+    daemon: Arc<Daemon>,
     stream: tokio::net::UnixStream,
-    login: &Login,
-    token: &mut Option<String>,
-) -> Option<String> {
+    login: Arc<Login>,
+    token: Arc<std::sync::Mutex<Option<String>>>,
+) -> Option<Refused> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
     let mut reader = tokio::io::BufReader::new(read.take(OUTPUT_BYTES as u64));
@@ -1055,32 +2197,42 @@ async fn answer(
         _ => Value::Null,
     };
     let given = asked["token"].as_str().unwrap_or_default();
-    let (said, refused) = match token.as_deref() {
-        Some(own) if !given.is_empty() && same(own, given) => {
-            if asked["item"].as_str() != Some(login.entry.as_str()) {
-                let why = format!("this login gives the vault entry {} alone", login.entry);
-                (json!({"refused": why}), Some(why))
-            } else {
-                // Spent before the secret is read: a token is for one request.
-                *token = None;
-                match credential(daemon, login, asked["url"].as_str()).await {
-                    Ok(credential) => (json!({"credential": credential}), None),
-                    Err(why) => (json!({"refused": why}), Some(why)),
+    let allowed = {
+        let mut token = token.lock().unwrap();
+        match token.as_deref() {
+            Some(own) if !given.is_empty() && same(own, given) => {
+                if asked["item"].as_str() != Some(login.entry.as_str()) {
+                    let why = format!("this login gives the vault entry {} alone", login.entry);
+                    Err(Refused::Asked(why))
+                } else {
+                    // Spent before the secret is read: a token is for one request.
+                    *token = None;
+                    Ok(())
                 }
             }
+            Some(_) => Err(Refused::Untokened),
+            None => Err(Refused::Spent),
         }
-        Some(_) => {
-            let why = "the request does not carry the token of this login".to_owned();
-            (json!({"refused": why}), Some(why))
-        }
-        None => {
-            let why = "the token of this login was used already".to_owned();
-            (json!({"refused": why}), Some(why))
-        }
+    };
+    let (said, refused) = match allowed {
+        Ok(()) => match credential(&daemon, &login, asked["url"].as_str()).await {
+            Ok(credential) => (json!({"credential": credential}), None),
+            Err(why) => (json!({"refused": why}), Some(Refused::Asked(why))),
+        },
+        Err(Refused::Untokened) => (
+            json!({"refused": "the request does not carry the token of this login"}),
+            Some(Refused::Untokened),
+        ),
+        Err(Refused::Spent) => (
+            json!({"refused": "the token of this login was used already"}),
+            Some(Refused::Spent),
+        ),
+        Err(Refused::Asked(why)) => (json!({"refused": why}), Some(Refused::Asked(why))),
     };
     let mut bytes = serde_json::to_vec(&said).expect("JSON");
     bytes.push(b'\n');
-    let _ = write.write_all(&bytes).await;
+    // Bounded as its question is: one that never reads holds nothing.
+    let _ = tokio::time::timeout(ASK_LIMIT, write.write_all(&bytes)).await;
     refused
 }
 
@@ -1130,8 +2282,9 @@ async fn credential(daemon: &Daemon, login: &Login, page: Option<&str>) -> Resul
 
 /// `flottille vault provide <socket>`: agent-browser's credential provider, one request on the
 /// standard input, one answer on the standard output (`agent-browser.plugin.v1`). It asks the
-/// daemon's login that runs, at `socket`, with the token of that run; without one, it is refused
-/// before anything is asked.
+/// daemon's login that runs, at `socket`, with the token of that run, read beside it; without
+/// one, it is refused before anything is asked. Why it failed is also written beside it, for the
+/// login: agent-browser does not relay it.
 pub fn provide(socket: &Path) -> std::process::ExitCode {
     use std::io::{BufRead, Read, Write};
     let mut text = String::new();
@@ -1150,7 +2303,7 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
     {
         failed("Flottille resolves credentials alone (credential.read)")
     } else {
-        match std::env::var(TOKEN_VARIABLE) {
+        match std::fs::read_to_string(socket.with_file_name(TOKEN_FILE)) {
             Err(_) => failed("refused: no login of Flottille's runs this request"),
             Ok(token) => {
                 let asked = json!({"token": token, "item": request["request"]["itemRef"],
@@ -1177,6 +2330,10 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
             }
         }
     };
+    if let Some(why) = answer["error"].as_str() {
+        // As the token is written: a link left at its name is replaced, never written through.
+        let _ = written(&socket.with_file_name(WHY_FILE), why.as_bytes());
+    }
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{answer}");
     let _ = out.flush();
@@ -1189,6 +2346,266 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// Why agent-browser's adapter refuses the command `line`, if it does.
+    fn refused(line: &[&str]) -> Option<String> {
+        refused_on(line, OsStr::new("/nonexistent-folder"))
+    }
+
+    /// The same, with the folders the server looks for a program in (its `PATH`).
+    fn refused_on(line: &[&str], path: &OsStr) -> Option<String> {
+        AGENT_BROWSER.command_refused_on(&words(line), Some(path))
+    }
+
+    /// A folder holding a program named agent-browser, and the `PATH` that is that folder.
+    fn with_program() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("agent-browser");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (folder, program)
+    }
+
+    #[test]
+    fn agent_browser_run_by_a_package_runner_is_accepted() {
+        for line in [
+            &["agent-browser", "mcp"][..],
+            &["npx", "agent-browser", "mcp"],
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"],
+            &["pnpm", "dlx", "agent-browser", "mcp"],
+            &["pnpm", "exec", "agent-browser", "mcp"],
+            &["bunx", "agent-browser", "mcp"],
+            // An argument of agent-browser's own that holds `HOME=` as text.
+            &[
+                "agent-browser",
+                "--user-agent",
+                "HOME=/tmp/elsewhere",
+                "mcp",
+            ],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_is_given_agent_browser_by_its_name_and_a_version_or_a_tag_alone() {
+        for line in [
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"][..],
+            &["npx", "agent-browser@latest", "mcp"],
+            &["npx", "agent-browser@^0.43", "mcp"],
+            &["pnpm", "dlx", "agent-browser@next", "mcp"],
+            &["bunx", "agent-browser@0.43.0", "mcp"],
+            &["yarn", "dlx", "agent-browser", "mcp"],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_given_another_package_that_ends_in_agent_browser_is_refused() {
+        for (spec, kind) in [
+            ("@someone/agent-browser", "scope"),
+            ("someone/agent-browser", "GitHub shorthand"),
+            ("https://host.example.test/agent-browser", "tarball URL"),
+            ("agent-browser@npm:another-package", "alias"),
+            ("agent-browser@github:someone/agent-browser", "git source"),
+            ("./agent-browser", "folder"),
+            ("../agent-browser", "folder above"),
+            ("/tmp/x/agent-browser", "absolute folder"),
+            ("agent-browser@file:x.tgz", "file"),
+            ("agent-browser@../x.tgz", "relative file"),
+            (
+                "agent-browser@git+https://host.example.test/x.git",
+                "git URL",
+            ),
+            ("agent-browser@", "no version"),
+            ("agent-browser@1.0.0@2.0.0", "two versions"),
+            ("agent-browser@.", "dot"),
+            ("agent-browser-evil", "another name"),
+        ] {
+            for runner in [
+                &["npx", "-y"][..],
+                &["npx"],
+                &["bunx"],
+                &["pnpm", "dlx"],
+                &["pnpm", "exec"],
+                &["yarn", "dlx"],
+            ] {
+                let mut line = runner.to_vec();
+                line.extend([spec, "mcp"]);
+                let said =
+                    refused(&line).unwrap_or_else(|| panic!("not refused ({kind}): {line:?}"));
+                assert!(said.contains("agent-browser"), "{line:?}: {said}");
+                // Never the spec itself: a URL may carry a token.
+                assert!(!said.contains("host.example.test"), "{line:?}: {said}");
+                assert!(!said.contains("someone"), "{line:?}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_is_accepted_when_it_is_the_one_found_on_the_path() {
+        let (folder, program) = with_program();
+        let path = folder.path().as_os_str();
+        let by_path = program.to_str().unwrap();
+        assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+        assert_eq!(refused_on(&[by_path, "--headed", "mcp"], path), None);
+        // A link to it, named as it is, and a path with a folder that goes back, are the same
+        // file.
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("agent-browser");
+        std::os::unix::fs::symlink(&program, &link).unwrap();
+        assert_eq!(refused_on(&[link.to_str().unwrap(), "mcp"], path), None);
+        let around = format!("{}/../{}/agent-browser", folder.path().display(), {
+            folder.path().file_name().unwrap().to_str().unwrap()
+        });
+        assert_eq!(refused_on(&[&around, "mcp"], path), None);
+    }
+
+    #[test]
+    fn an_npm_global_install_is_accepted_by_its_name_and_by_its_path_on_the_path() {
+        // `npm install --global` links `<prefix>/bin/agent-browser` (a relative link) to a script
+        // under `<prefix>/lib/node_modules`, and the prefix may itself be a link: both sides of
+        // the comparison resolve to the same file.
+        let real = tempfile::tempdir().unwrap();
+        let script = real.path().join("lib/node_modules/agent-browser/bin");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(script.join("agent-browser.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::create_dir_all(real.path().join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/agent-browser/bin/agent-browser.js",
+            real.path().join("bin/agent-browser"),
+        )
+        .unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let prefix = links.path().join("prefix");
+        std::os::unix::fs::symlink(real.path(), &prefix).unwrap();
+        let bin = prefix.join("bin");
+        let by_path = bin.join("agent-browser");
+        let direct = real.path().join("bin");
+        for path in [bin.as_os_str(), direct.as_os_str()] {
+            assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+            assert_eq!(
+                refused_on(&[by_path.to_str().unwrap(), "mcp"], path),
+                None,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_that_is_not_the_one_found_on_the_path_is_refused() {
+        let (folder, _) = with_program();
+        let (other, elsewhere) = with_program();
+        let path = folder.path().as_os_str();
+        let said = refused_on(&[elsewhere.to_str().unwrap(), "mcp"], path).expect("refused");
+        assert!(said.contains("agent-browser"), "{said}");
+        assert!(!said.contains(other.path().to_str().unwrap()), "{said}");
+        // A path to nothing, a relative path (it is read from the connection's folder, which
+        // Flottille makes), and a path of the right name on a PATH that has none.
+        for line in [
+            &["/nonexistent-folder/agent-browser", "mcp"][..],
+            &["./agent-browser", "mcp"],
+            &["bin/agent-browser", "mcp"],
+        ] {
+            assert!(refused_on(line, path).is_some(), "{line:?}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert!(
+            refused_on(
+                &[elsewhere.to_str().unwrap(), "mcp"],
+                empty.path().as_os_str()
+            )
+            .is_some()
+        );
+        // A path whose program the PATH does not know, however it is spelt.
+        assert!(
+            AGENT_BROWSER
+                .command_refused_on(&words(&[elsewhere.to_str().unwrap(), "mcp"]), None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_package_runner_running_env_that_unsets_the_browser_s_folders_is_refused() {
+        let said = refused(&[
+            "pnpm",
+            "exec",
+            "env",
+            "-u",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "-u",
+            "TMPDIR",
+            "agent-browser",
+            "mcp",
+        ])
+        .expect("refused");
+        assert!(said.contains("env"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_envdir_is_refused() {
+        let said = refused(&["envdir", "/tmp/vars", "agent-browser", "mcp"]).expect("refused");
+        assert!(said.contains("starts with envdir"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_node_e_is_refused() {
+        let said = refused(&["node", "-e", "require('agent-browser')", "mcp"]).expect("refused");
+        assert!(said.contains("starts with node"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_another_wrapper_is_refused() {
+        for (line, named) in [
+            (
+                &["chpst", "-e", "/tmp/vars", "agent-browser", "mcp"][..],
+                "chpst",
+            ),
+            (
+                &["setpriv", "--reset-env", "agent-browser", "mcp"],
+                "setpriv",
+            ),
+            (&["flatpak", "run", "org.example.Browser", "mcp"], "flatpak"),
+            (&["toolbox", "run", "agent-browser", "mcp"], "toolbox"),
+            (&["sh", "-c", "agent-browser mcp"], "sh"),
+            (&["npx", "-c", "agent-browser mcp"], "-c"),
+            (
+                &[
+                    "npx",
+                    "env",
+                    "AGENT_BROWSER_SOCKET_DIR=/tmp/x",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "AGENT_BROWSER_SOCKET_DIR",
+            ),
+            (
+                &[
+                    "npx",
+                    "--node-options=--require=/tmp/x.js",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "--node-options",
+            ),
+            (
+                &["npx", "-p", "another-package", "agent-browser", "mcp"],
+                "-p",
+            ),
+            (&["HOME=/tmp/x", "agent-browser", "mcp"], "HOME"),
+            (&["pnpm", "exec", "node", "agent-browser", "mcp"], "node"),
+        ] {
+            let said = refused(line).unwrap_or_else(|| panic!("not refused: {line:?}"));
+            assert!(said.contains(named), "{line:?}: {said}");
+            assert!(!said.contains("/tmp/x"), "{line:?}: {said}");
+        }
+    }
 
     #[test]
     fn a_version_is_three_numbers_and_nothing_more() {
@@ -1316,5 +2733,59 @@ mod tests {
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "ab"));
         assert!(!same("", "a"));
+    }
+
+    #[test]
+    fn a_temporary_folder_that_is_a_link_is_never_emptied() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("kept"), "x").unwrap();
+        let link = base.path().join("tmp");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        emptied(&link);
+        assert!(real.join("kept").exists(), "the link was followed");
+    }
+
+    #[test]
+    fn a_profile_is_kept_while_a_browser_still_answers() {
+        // A close that timed out or did not run leaves its browser, and the profile it uses; and
+        // a close of one session leaves the others'.
+        let vault = tempfile::tempdir().unwrap();
+        let profile = vault
+            .path()
+            .join(TEMPORARY)
+            .join("agent-browser-chrome-live");
+        std::fs::create_dir_all(&profile).unwrap();
+        let sockets = vault.path().join(format!("{SOCKETS}abc"));
+        std::fs::create_dir_all(&sockets).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(sockets.join("other.sock")).unwrap();
+        emptied_once_ended(vault.path());
+        assert!(profile.exists(), "a live browser's profile was removed");
+        // Its socket left and nobody answering: a browser that crashed.
+        drop(listener);
+        emptied_once_ended(vault.path());
+        assert!(!profile.exists(), "a crashed browser's profile was kept");
+        assert!(vault.path().join(TEMPORARY).is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_socket_left_by_a_crashed_browser_does_not_block_the_login() {
+        // A browser that crashed leaves its socket file, and the socket folders are kept: nobody
+        // listens on it, so it holds nothing and is not outside. A live one still is.
+        let vault = tempfile::tempdir().unwrap();
+        let sockets = vault.path().join(format!("{SOCKETS}abc"));
+        std::fs::create_dir_all(sockets.join("other")).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("crashed.sock")).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("other/crashed.sock")).unwrap());
+        assert!(
+            answering(vault.path()).await.is_empty(),
+            "a crashed browser's socket"
+        );
+        assert!(!sockets.join("crashed.sock").exists());
+        assert!(!sockets.join("other/crashed.sock").exists());
+        let _live = std::os::unix::net::UnixListener::bind(sockets.join("live.sock")).unwrap();
+        assert_eq!(answering(vault.path()).await.len(), 1, "a live browser");
+        assert!(sockets.join("live.sock").exists());
     }
 }

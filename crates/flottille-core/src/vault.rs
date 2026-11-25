@@ -19,7 +19,8 @@ pub struct Entry {
     pub project: Option<String>,
     /// Milliseconds since the Unix epoch.
     pub updated_at: u64,
-    /// The one use that reads it (`worklog:<project>`, `connection:<name>`); any feature that
+    /// The one use that reads it (`worklog:<project>`, `connection:<name>`,
+    /// `file:<project>/<path>`); any feature that
     /// names it when `None`.
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
@@ -37,6 +38,28 @@ pub fn worklog(project: &str) -> String {
 /// The use of the connection `name`: what its server is given.
 pub fn connection(name: &str) -> String {
     format!("connection:{name}")
+}
+
+/// The use of the file `path` of the project `project`, as its setup copies it: what a launch on
+/// another machine lays from the entry (`docs/remote.md`, "What travels"), and nothing else.
+pub fn file_use(project: &str, path: &str) -> String {
+    format!("file:{project}/{path}")
+}
+
+/// The vault entry the file `path` of the project `project` is offered as: `<project>-<path>`,
+/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most. Two files may
+/// have one name (`a/b` and `a-b`): the entry is bound to the one it was made of
+/// ([`file_use`]), which alone it is laid as, and the other is refused it.
+pub fn entry_for(project: &str, path: &str) -> String {
+    format!("{project}-{path}")
+        .chars()
+        .map(|c| match c {
+            '/' => '-',
+            c if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') => c,
+            _ => '_',
+        })
+        .take(64)
+        .collect()
 }
 
 /// What the daemon says when the server of a connection asks to be signed in (a `401`), and the
@@ -73,6 +96,10 @@ pub fn use_said(bound: &str) -> Option<String> {
             Some(format!("the worklog of the project {project}"))
         }
         ("connection", name) if !name.is_empty() => Some(format!("the connection {name}")),
+        ("file", file) => file
+            .split_once('/')
+            .filter(|(project, path)| !project.is_empty() && !path.is_empty())
+            .map(|(project, path)| format!("the file {path} of the project {project}")),
         _ => None,
     }
 }
@@ -86,6 +113,9 @@ pub fn use_stops(bound: &str) -> Option<String> {
         ("connection", name) if !name.is_empty() => {
             Some(format!("the connection {name} can no longer start"))
         }
+        ("file", file) => file.split_once('/').map(|(project, path)| {
+            format!("a launch on another machine can no longer lay {path} of {project}")
+        }),
         _ => None,
     }
 }

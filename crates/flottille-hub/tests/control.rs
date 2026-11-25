@@ -1072,6 +1072,7 @@ async fn a_machine_of_the_previous_version_that_tells_addresses_keeps_its_sessio
         .ask(flottille_link::Ask::About {
             device: "computer".to_owned(),
             system: "linux".to_owned(),
+            notices: false,
         })
         .await
         .unwrap();
@@ -1089,6 +1090,63 @@ async fn a_machine_of_the_previous_version_that_tells_addresses_keeps_its_sessio
     .await
     .unwrap();
     assert!(!facts.is_empty());
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runner_tells_no_notice_to_a_hub_of_before_notices_and_keeps_its_session() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let two = two(&place, &served).await;
+    let notice = flottille_link::Notice {
+        kind: flottille_link::NoticeKind::Request,
+        notification: 7,
+        session: None,
+    };
+    // This hub says it takes notices.
+    let session = two
+        .server_device
+        .connect(&two.server_machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    assert!(session.asker().takes_notices());
+    session
+        .ask(flottille_link::Ask::Notify {
+            notice: notice.clone(),
+        })
+        .await
+        .unwrap();
+
+    // A hub of before #827 welcomes with nothing more, and closes a session that asks `notify`:
+    // the runner asks it nothing of the kind.
+    let forget = std::sync::Arc::new(|line: &str| {
+        if line.starts_with(r#"{"welcome""#) {
+            "{\"welcome\":{}}\n".to_owned()
+        } else {
+            line.to_owned()
+        }
+    });
+    let (middle, _) = in_the_middle(served.address(), forget).await;
+    let mut device = two.server_device.clone();
+    device.url = url(middle);
+    let session = device
+        .connect(&two.server_machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    assert!(!session.asker().takes_notices());
+    let refused = session
+        .ask(flottille_link::Ask::Notify { notice })
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("takes no notice"), "{refused}");
+    session
+        .ask(flottille_link::Ask::About {
+            device: "computer".to_owned(),
+            system: "linux".to_owned(),
+            notices: false,
+        })
+        .await
+        .expect("the session goes on");
     served.stop().await;
 }
 
@@ -2659,16 +2717,18 @@ async fn a_device_hello_changed_on_the_way_never_lowers_the_hub_s_protocol() {
         .await;
     assert_hello_not_taken(said, "the device's protocols made [1]");
 
-    // A hub of protocol 1 the device's [1, 2] made [2] on its way refuses it, its refusal signed
-    // over the [2] it received: the device, which sent [1, 2], takes it for no verdict.
+    // A hub of protocol 1 the device's [2] made [3] on its way refuses it, its refusal signed over
+    // the [3] it received: the device, which sent [2], takes it for no verdict. Were its own hello
+    // left out of what is signed, the refusal would read as the hub's word, and the device would
+    // be told to update the hub.
     let older = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
-    let (middle, _) = relay(older, device_hello_made(serde_json::json!([2]))).await;
+    let (middle, _) = relay(older, device_hello_made(serde_json::json!([3]))).await;
     let said = pinned_to(middle, &key)
-        .connect(&machine, &both, &Tls::System)
+        .connect(&machine, &hello(), &Tls::System)
         .await;
     assert_hello_not_taken(
         said,
-        "the device's protocols made [2], the hub's refusal for it",
+        "the device's protocols made [3], the hub's refusal for it",
     );
 }
 

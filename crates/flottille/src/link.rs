@@ -68,6 +68,9 @@ struct Peer {
 /// it was, and is said once.
 struct Kept {
     last: Peers,
+    /// Whether `last` is a file that was read whole: false while the file never was, so that an
+    /// empty list is not taken for a member list with nobody in it.
+    whole: bool,
     said: bool,
     /// What the file was when it was last read, whole or not.
     read: Option<Stamp>,
@@ -155,7 +158,7 @@ pub struct Remote {
     /// coming in is not judged after a write to the disk.
     writing: Mutex<()>,
     /// The control session to the hub.
-    control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
+    pub(crate) control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
     /// `None` once the hub's list was taken, or the hub could not give one at start; since when
     /// the daemon waits for one, at start and after the session to the hub was lost (a machine
     /// that wakes from a suspend). Meanwhile, `first_list` at most, no link is accepted or
@@ -184,6 +187,12 @@ pub struct Remote {
     /// This machine's live root sessions, light, while its member is a runner; none otherwise.
     /// Each link sends it when made and whenever it changes, as `offered`.
     sessions: tokio::sync::watch::Sender<Option<flottille_link::SessionList>>,
+    /// This machine's projects, each by its repositories' remotes, while its member is a runner:
+    /// sent as a message of its own, apart from the sessions (`docs/remote.md`, "The version").
+    projects: tokio::sync::watch::Sender<Option<flottille_link::ProjectList>>,
+    /// The pilots of another machine of this machine's led sessions, while its member is a runner:
+    /// sent as a message of its own, as the projects are.
+    pilots: tokio::sync::watch::Sender<Option<flottille_link::PilotList>>,
     /// Counts the member lists taken: a watch carried for a device looks again whether the
     /// device is still a member.
     pub(crate) lists: tokio::sync::watch::Sender<u64>,
@@ -192,6 +201,9 @@ pub struct Remote {
     /// The machines this one is reading a bundle from or placing code of, one thing at a time
     /// each (`travel.rs`).
     pub(crate) receiving: crate::travel::Receiving,
+    /// The calls of this machine's agents sent to another machine and not answered yet
+    /// (`across::forward`).
+    pub(crate) calling: crate::across::Calling,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
     /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
@@ -331,6 +343,7 @@ impl Remote {
             hello: hello(),
             peers: Mutex::new(Kept {
                 last: Peers::default(),
+                whole: false,
                 said: false,
                 read: None,
             }),
@@ -350,11 +363,14 @@ impl Remote {
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
             sessions: tokio::sync::watch::Sender::new(None),
+            projects: tokio::sync::watch::Sender::new(None),
+            pilots: tokio::sync::watch::Sender::new(None),
             lists: tokio::sync::watch::Sender::new(0),
             tunnels: crate::tunnel::Tunnels::default(),
             halt: Arc::new(tokio::sync::watch::Sender::new(false)),
             transfers: Default::default(),
             receiving: Default::default(),
+            calling: Default::default(),
         }
     }
 
@@ -403,7 +419,11 @@ impl Remote {
             };
             // Kept before the file is written: a link judged meanwhile is judged by this list,
             // never by the one before it, which may still hold a machine removed now.
-            self.peers.lock().unwrap().last = peers.clone();
+            {
+                let mut kept = self.peers.lock().unwrap();
+                kept.last = peers.clone();
+                kept.whole = true;
+            }
             // A file broken by hand is written over: the list is what says whom to trust.
             let before = read_json::<Peers>(&file).unwrap_or_default();
             let same = serde_json::to_value(&peers).ok() == serde_json::to_value(&before).ok();
@@ -523,6 +543,7 @@ impl Remote {
         match read_json::<Peers>(&file) {
             Ok(peers) => {
                 kept.said = false;
+                kept.whole = true;
                 kept.last = peers.clone();
                 peers
             }
@@ -666,11 +687,32 @@ impl Remote {
             link.clone(),
             self.offered.subscribe(),
             MachineMessage::Capabilities,
+            None,
         ));
         tokio::spawn(offer(
             link.clone(),
             self.sessions.subscribe(),
             MachineMessage::Sessions,
+            None,
+        ));
+        tokio::spawn(offer(
+            link.clone(),
+            self.projects.subscribe(),
+            MachineMessage::Projects,
+            Some((
+                name.to_owned(),
+                "this machine's projects: its sessions go on, its project rows stay by name",
+            )),
+        ));
+        tokio::spawn(offer(
+            link.clone(),
+            self.pilots.subscribe(),
+            MachineMessage::Pilots,
+            Some((
+                name.to_owned(),
+                "the pilots of this machine's led sessions: its sessions go on, those led from \
+                 another machine as roots",
+            )),
         ));
         self.offer_now.notify_one();
         // What was kept for that machine while it was off goes now, in order.
@@ -811,6 +853,21 @@ impl Remote {
         runner.then(|| sessions_of(&daemon))
     }
 
+    /// This machine's projects, as `sessions_here` says its sessions. It runs git for each
+    /// repository: called on a blocking thread.
+    fn projects_here(
+        &self,
+        listed: Option<&(flottille_link::Members, String)>,
+    ) -> Option<flottille_link::ProjectList> {
+        let (members, name) = listed?;
+        let runner = members
+            .members()
+            .iter()
+            .any(|member| member.name == *name && member.role == Role::Runner);
+        let daemon = self.daemon.get().and_then(std::sync::Weak::upgrade)?;
+        runner.then(|| projects_of(&daemon))
+    }
+
     /// Whether a machine is linked to this one now.
     fn linked_to_any(&self) -> bool {
         self.seen
@@ -824,11 +881,18 @@ impl Remote {
     /// from the tasks that take links: the list is checked, the projects' files read.
     async fn offer_if_changed(self: &Arc<Self>) {
         let remote = self.clone();
-        let (offers, sessions) = tokio::task::spawn_blocking(move || {
+        let (offers, sessions, projects, pilots) = tokio::task::spawn_blocking(move || {
             let listed = remote.listed().ok();
+            let sessions = remote.sessions_here(listed.as_ref());
+            let pilots = sessions
+                .as_ref()
+                .zip(remote.daemon())
+                .map(|(sessions, daemon)| pilots_of(&daemon, sessions));
             (
                 remote.offers_here(listed.as_ref()),
-                remote.sessions_here(listed.as_ref()),
+                sessions,
+                remote.projects_here(listed.as_ref()),
+                pilots,
             )
         })
         .await
@@ -841,6 +905,16 @@ impl Remote {
         self.sessions.send_if_modified(|current| {
             let changed = *current != sessions;
             *current = sessions;
+            changed
+        });
+        self.projects.send_if_modified(|current| {
+            let changed = *current != projects;
+            *current = projects;
+            changed
+        });
+        self.pilots.send_if_modified(|current| {
+            let changed = *current != pilots;
+            *current = pilots;
             changed
         });
     }
@@ -1046,9 +1120,38 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .filter(|agent| matches!(agent.state, AgentState::Working | AgentState::Starting))
         .map(|agent| root_of(&agent.id))
         .collect();
+    // The trees a request held for the user waits in, by their root: a launch held for the user
+    // among them, as the session's own window says it (`needs_user`), and those whose agent asked
+    // for a vault entry, as the window counts them.
+    let mut held: HashSet<String> = daemon
+        .read(|store| store.pending_requests(flottille_core::approval::USER))
+        .unwrap_or_default()
+        .iter()
+        .map(|request| root_of(&request.agent))
+        .collect();
+    held.extend(
+        daemon
+            .read(crate::vault::asking)
+            .unwrap_or_default()
+            .iter()
+            .map(|agent| root_of(agent)),
+    );
+    // Only the projects this machine's own window shows, those whose file can be used: a session
+    // of a project whose file is gone or has a typo is shown by no window here, and the machine
+    // it is listed on could not act on it. It is listed again once the file is back. A folder
+    // that cannot be read says nothing of any project: then none is left out.
+    let projects = crate::projects::usable_names(daemon);
     let mut sessions: Vec<flottille_link::LightSession> = agents
         .iter()
-        .filter(|agent| agent.parent.is_none() && !agent.state.is_final())
+        // A child an agent of another machine launched here is that agent's, no session to list.
+        .filter(|agent| {
+            agent.parent.is_none()
+                && !agent.state.is_final()
+                && projects
+                    .as_ref()
+                    .is_none_or(|known| known.contains(&agent.project))
+                && !crate::across::remote_child(daemon, agent)
+        })
         .map(|agent| {
             let title = agent
                 .title
@@ -1062,7 +1165,8 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
                 })
                 .unwrap_or_default();
             let busy = busy.contains(&agent.id);
-            let state = if agent.waiting_on_answer {
+            // A question to its pilot is the pilot's to answer, not the user's.
+            let state = if crate::tree::asks_the_user(daemon, agent) || held.contains(&agent.id) {
                 "needs you"
             } else if busy {
                 "running"
@@ -1080,6 +1184,8 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
                     .launched_by
                     .as_deref()
                     .filter(|_| agent.led)
+                    // A pilot of another machine is no session of this one's list.
+                    .filter(|pilot| !crate::across::is_stand_in(pilot))
                     .filter(|pilot| parents.contains_key(pilot))
                     .map(root_of),
             }
@@ -1088,6 +1194,115 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
     sessions.sort_by(|a, b| b.exchanged_at.cmp(&a.exchanged_at).then(a.id.cmp(&b.id)));
     sessions.truncate(flottille_link::MOST_SESSIONS);
     flottille_link::SessionList { sessions }
+}
+
+/// The pilots of another machine of the led sessions of `list`, this machine's: each session led by
+/// an agent of another machine stood in for here, as `agent.list` says it (`launched_from`), by
+/// that machine's name and the agent's id there. Its window draws such a session under its pilot,
+/// and every other machine's does from this (`docs/remote.md`, "One list of every machine").
+pub(crate) fn pilots_of(
+    daemon: &Daemon,
+    list: &flottille_link::SessionList,
+) -> flottille_link::PilotList {
+    let pilots = list
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            let agent = daemon.read(|store| store.agent(&session.id)).ok()??;
+            let stand_in = agent.launched_by.as_deref().filter(|_| agent.led)?;
+            let (caller, machine, kind) = crate::launches::launched_from(daemon, &agent.id)?;
+            // Still led, by that agent: a session detached is the user's, under no row.
+            (kind == "led" && stand_in.split_once('@').map(|(id, _)| id) == Some(caller.as_str()))
+                .then_some(flottille_link::LightPilot {
+                    session: session.id.clone(),
+                    machine,
+                    pilot: caller,
+                })
+        })
+        // What would make the other machine refuse the list is not sent: that session stays a
+        // root there.
+        .filter(|pilot| {
+            flottille_link::PilotList {
+                pilots: vec![pilot.clone()],
+            }
+            .check()
+            .is_ok()
+        })
+        .collect();
+    flottille_link::PilotList { pilots }
+}
+
+/// Says beside each session of the list of the machine `name` its pilot of another machine, as
+/// that machine said it (`pilot_elsewhere`, `{machine, agent}`, or `null`): a pilot is said only
+/// of a session of that same list, and only on a member machine other than `name`. Where it
+/// draws the row is the window's to judge.
+fn with_pilots(
+    sessions: &mut [Value],
+    pilots: &[flottille_link::LightPilot],
+    name: &str,
+    members: &[String],
+) {
+    for session in sessions {
+        let pilot = pilots
+            .iter()
+            .find(|pilot| session["id"].as_str() == Some(pilot.session.as_str()))
+            .filter(|pilot| pilot.machine != name && members.contains(&pilot.machine))
+            .map(|pilot| json!({"machine": pilot.machine, "agent": pilot.pilot}));
+        session["pilot_elsewhere"] = pilot.unwrap_or(Value::Null);
+    }
+}
+
+/// This machine's projects as a list shows them: each one's name and the remotes of its
+/// repositories, normalised, so that another machine can tell it holds the same project
+/// (`docs/remote.md`, "One list of every machine"). A repository with no remote says nothing, and
+/// its project then matches none. It runs `git remote get-url` for each repository: called on a
+/// blocking thread.
+fn projects_of(daemon: &Daemon) -> flottille_link::ProjectList {
+    let mut projects: Vec<flottille_link::LightProject> = crate::projects::all(daemon)
+        .into_iter()
+        .map(|project| {
+            let remotes: Vec<Option<String>> = project
+                .repositories
+                .iter()
+                .map(|repository| {
+                    let folder = match repository.path.as_str() {
+                        "." => project.folder.clone(),
+                        path => project.folder.join(path),
+                    };
+                    repository_url(&folder, &repository.remote)
+                })
+                .collect();
+            flottille_link::LightProject {
+                name: shown_text(&project.name, 64),
+                remotes: flottille_core::remote_key::project_key(
+                    remotes.iter().map(Option::as_deref),
+                )
+                .unwrap_or_default(),
+            }
+        })
+        .collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects.truncate(flottille_link::MOST_PROJECTS);
+    flottille_link::ProjectList { projects }
+}
+
+/// The address the remote `remote` of the repository in `folder` leads to, when it has one; never
+/// read for a folder that is not its own repository (git would answer for the one around it).
+fn repository_url(folder: &Path, remote: &str) -> Option<String> {
+    if !folder.join(".git").exists() {
+        return None;
+    }
+    let output = crate::children::spawn_std(&mut crate::git::blocking(
+        crate::git::own(),
+        folder,
+        &["remote", "get-url", "--end-of-options", remote],
+    ))
+    .and_then(std::process::Child::wait_with_output)
+    .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// `text` as another machine may show it: its first `most` characters, without a control
@@ -1107,10 +1322,16 @@ const OFFER_RETRY_MOST: Duration = Duration::from_secs(60);
 /// Sends a machine what this one offers (or its list of sessions) when the link is made, then
 /// each time it changes, in order, until the link ends, as the message `message` makes. One it
 /// did not take is sent again, waiting longer each time.
+///
+/// `older` names the machine, and what it does not take, when the message is one a machine of
+/// before does not know: its refusal of the kind (`UNKNOWN_MESSAGE`) is said once, as that machine
+/// running an older Flottille, and ends the offer on this link, rather than being sent again for
+/// ever. The link and the other messages go on.
 async fn offer<T: Clone>(
     link: Link,
     mut offered: tokio::sync::watch::Receiver<Option<T>>,
     message: fn(T) -> MachineMessage,
+    older: Option<(String, &'static str)>,
 ) {
     let mut wait = OFFER_RETRY;
     loop {
@@ -1120,6 +1341,16 @@ async fn offer<T: Clone>(
             let sent = link.send(&Message::Machine(message(offers))).await;
             match sent {
                 Ok(_) => wait = OFFER_RETRY,
+                Err(flottille_link::LinkError::Declined { reason, .. })
+                    if older.is_some() && reason == flottille_link::UNKNOWN_MESSAGE =>
+                {
+                    let (name, what) = older.unwrap_or_default();
+                    eprintln!(
+                        "flottille daemon: {name} runs an older Flottille, which does not take \
+                         {what} until it is updated (flottille update)"
+                    );
+                    return;
+                }
                 Err(_) => {
                     again = Some(wait);
                     wait = (wait * 2).min(OFFER_RETRY_MOST);
@@ -1243,6 +1474,29 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 .unwrap_or_else(|_| Err("the list could not be taken".to_owned()));
                 if let Err(why) = &answer {
                     eprintln!("flottille daemon: the sessions {name} lists were not kept: {why}");
+                }
+                received.answer(answer);
+            }
+            Message::Machine(MachineMessage::Projects(list)) => {
+                let (taking, key, list) = (remote.clone(), link.peer(), list.clone());
+                let answer = tokio::task::spawn_blocking(move || {
+                    taking.took_projects(&key, generation, list)
+                })
+                .await
+                .unwrap_or_else(|_| Err("the projects could not be taken".to_owned()));
+                if let Err(why) = &answer {
+                    eprintln!("flottille daemon: the projects {name} lists were not kept: {why}");
+                }
+                received.answer(answer);
+            }
+            Message::Machine(MachineMessage::Pilots(list)) => {
+                let (taking, key, list) = (remote.clone(), link.peer(), list.clone());
+                let answer =
+                    tokio::task::spawn_blocking(move || taking.took_pilots(&key, generation, list))
+                        .await
+                        .unwrap_or_else(|_| Err("the pilots could not be taken".to_owned()));
+                if let Err(why) = &answer {
+                    eprintln!("flottille daemon: the pilots {name} lists were not kept: {why}");
                 }
                 received.answer(answer);
             }
@@ -1400,6 +1654,85 @@ impl Remote {
         Ok(json!({}))
     }
 
+    /// The projects the machine of key `key` lists, said over its link: kept beside its sessions
+    /// under the same conditions as them (`took_sessions`).
+    fn took_projects(
+        &self,
+        key: &PublicKey,
+        generation: u64,
+        list: flottille_link::ProjectList,
+    ) -> Result<Value, String> {
+        let (members, _) = self.listed()?;
+        let member = members
+            .by_machine(key)
+            .ok_or_else(|| "this machine is no member's".to_owned())?;
+        if member.role != Role::Runner {
+            return Err(format!(
+                "{} is a {}: only a runner lists projects",
+                member.name,
+                member.role.word()
+            ));
+        }
+        list.check()?;
+        if !self.on_link(key, generation) {
+            return Ok(json!({}));
+        }
+        let daemon = self
+            .daemon()
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        let machine = hex_of(key);
+        let projects = serde_json::to_value(&list.projects).map_err(|error| error.to_string())?;
+        daemon
+            .write(|store| {
+                store
+                    .keep_machine_projects(&machine, &member.name, &projects, now())
+                    .map(|()| ((), None))
+            })
+            .map_err(|error| error.to_string())?;
+        (self.emit)("remote.sessions", json!({"name": member.name}));
+        Ok(json!({}))
+    }
+
+    /// The pilots of another machine of the led sessions the machine of key `key` lists, said over
+    /// its link: kept beside its sessions under the same conditions as them (`took_sessions`).
+    /// `remote.sessions` says each beside its session, never anywhere else.
+    fn took_pilots(
+        &self,
+        key: &PublicKey,
+        generation: u64,
+        list: flottille_link::PilotList,
+    ) -> Result<Value, String> {
+        let (members, _) = self.listed()?;
+        let member = members
+            .by_machine(key)
+            .ok_or_else(|| "this machine is no member's".to_owned())?;
+        if member.role != Role::Runner {
+            return Err(format!(
+                "{} is a {}: only a runner lists pilots",
+                member.name,
+                member.role.word()
+            ));
+        }
+        list.check()?;
+        if !self.on_link(key, generation) {
+            return Ok(json!({}));
+        }
+        let daemon = self
+            .daemon()
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        let machine = hex_of(key);
+        let pilots = serde_json::to_value(&list.pilots).map_err(|error| error.to_string())?;
+        daemon
+            .write(|store| {
+                store
+                    .keep_machine_part(&machine, &member.name, "pilots", &pilots, now())
+                    .map(|()| ((), None))
+            })
+            .map_err(|error| error.to_string())?;
+        (self.emit)("remote.sessions", json!({"name": member.name}));
+        Ok(json!({}))
+    }
+
     /// The user's close of a session of this machine, kept by the machine of `from` while this one
     /// was off (`docs/remote.md`, "One list of every machine"): checked (`kept_close`), then
     /// served as that device's `agent.stop`, once: a close sent again, or played by a member that
@@ -1516,6 +1849,40 @@ impl Remote {
         });
     }
 
+    /// The keys of the other machines the member list trusts; none while the list was never read
+    /// whole (a broken file at the start), which is not a list of nobody.
+    pub(crate) fn trusted_keys(&self) -> Option<Vec<PublicKey>> {
+        let peers = self.peers();
+        let whole = self.peers.lock().unwrap().whole;
+        whole.then(|| peers.machines.into_iter().map(|peer| peer.key).collect())
+    }
+
+    /// The live root sessions each other machine of the user's last listed, without those whose
+    /// close waits to be sent: each with its machine's key, as hex, and name. It reads the store.
+    pub(crate) fn sessions_elsewhere(
+        &self,
+        daemon: &Daemon,
+    ) -> Vec<(String, String, flottille_link::LightSession)> {
+        let closing = crate::across::closing(daemon);
+        let kept = daemon
+            .read(|store| store.machine_sessions())
+            .unwrap_or_default();
+        let peers = self.peers().machines;
+        kept.into_iter()
+            .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
+            .flat_map(|(machine, name, list, _)| {
+                // The list kept may hold more than its sessions (its machine's projects).
+                let sessions: Vec<flottille_link::LightSession> =
+                    serde_json::from_value(list["sessions"].clone()).unwrap_or_default();
+                sessions
+                    .into_iter()
+                    .filter(|session| !closing.contains(&(machine.clone(), session.id.clone())))
+                    .map(|session| (machine.clone(), name.clone(), session))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// `remote.sessions`: this machine's live root sessions, and each other machine's as it last
     /// listed them, without those whose close waits to be sent. It reads the store: called on a
     /// blocking thread.
@@ -1526,11 +1893,17 @@ impl Remote {
             .read(|store| store.machine_sessions())
             .map_err(|error| error.to_string())?;
         let peers = self.peers().machines;
+        let members: Vec<String> = self
+            .listed()
+            .map(|(members, _)| members.members().iter().map(|m| m.name.clone()).collect())
+            .unwrap_or_default();
         let machines: Vec<Value> = kept
             .into_iter()
             // A machine no longer among the user's lists nothing.
             .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
             .map(|(machine, name, mut list, at)| {
+                let pilots: Vec<flottille_link::LightPilot> =
+                    serde_json::from_value(list["pilots"].clone()).unwrap_or_default();
                 if let Some(sessions) = list["sessions"].as_array_mut() {
                     sessions.retain(|session| {
                         !closing.contains(&(
@@ -1538,13 +1911,24 @@ impl Remote {
                             session["id"].as_str().unwrap_or_default().to_owned(),
                         ))
                     });
+                    with_pilots(sessions, &pilots, &name, &members);
                 }
-                json!({"name": name, "sessions": list["sessions"], "at": at})
+                json!({
+                    "name": name,
+                    "sessions": list["sessions"],
+                    "projects": list["projects"],
+                    "at": at,
+                })
             })
             .collect();
-        let this = serde_json::to_value(sessions_of(daemon).sessions)
+        let listed = sessions_of(daemon);
+        let mut this = serde_json::to_value(&listed.sessions).map_err(|error| error.to_string())?;
+        if let (Some(sessions), Ok((_, own))) = (this.as_array_mut(), self.listed()) {
+            with_pilots(sessions, &pilots_of(daemon, &listed).pilots, &own, &members);
+        }
+        let projects = serde_json::to_value(projects_of(daemon).projects)
             .map_err(|error| error.to_string())?;
-        Ok(json!({"this": this, "machines": machines}))
+        Ok(json!({"this": this, "projects": projects, "machines": machines}))
     }
 
     /// `remote.close`: keeps the user's close of a session of another machine (`agent.stop`,
@@ -2882,7 +3266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_ends, ours, theirs) = linked(dir.path()).await;
         let (_offered, receiver) = tokio::sync::watch::channel(Some(app()));
-        tokio::spawn(offer(ours, receiver, MachineMessage::Capabilities));
+        tokio::spawn(offer(ours, receiver, MachineMessage::Capabilities, None));
         let is_offer = |message: &Message| matches!(message, Message::Machine(MachineMessage::Capabilities(offers)) if *offers == app());
 
         // Refused, as by a machine whose list does not say yet that this one is a runner.
@@ -2899,6 +3283,42 @@ mod tests {
         assert!(is_offer(again.message()));
         again.answer(Ok(json!({})));
         // Taken: not sent again.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), theirs.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_projects_a_machine_of_before_does_not_know_are_not_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ends, ours, theirs) = linked(dir.path()).await;
+        let list = flottille_link::ProjectList {
+            projects: vec![flottille_link::LightProject {
+                name: "app".to_owned(),
+                remotes: vec!["github.com/acme/app".to_owned()],
+            }],
+        };
+        let (offered, receiver) = tokio::sync::watch::channel(Some(list.clone()));
+        tokio::spawn(offer(
+            ours.clone(),
+            receiver,
+            MachineMessage::Projects,
+            Some(("server".to_owned(), "this machine's projects")),
+        ));
+        let first = tokio::time::timeout(Duration::from_secs(5), theirs.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first.message(),
+            Message::Machine(MachineMessage::Projects(sent)) if *sent == list
+        ));
+        // As a machine of before answers a kind it does not know.
+        first.answer(Err(flottille_link::UNKNOWN_MESSAGE.to_owned()));
+        // Neither again at once nor after a change: that machine is told no more of them.
+        offered.send_modify(|current| *current = Some(flottille_link::ProjectList::default()));
         assert!(
             tokio::time::timeout(Duration::from_secs(3), theirs.next())
                 .await

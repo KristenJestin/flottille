@@ -173,9 +173,17 @@ pub struct Member {
     /// How the list signs it; `None` for a member added before pair mode.
     pub icon: Option<String>,
     pub colour: Option<String>,
+    /// What the device said it is to the hub (`computer`, `phone`), once it did.
+    pub kind: Option<String>,
 }
 
 impl Member {
+    /// Whether the device could run agents if it were given the role: a phone's app has no
+    /// daemon, so what it said it is is the one fact that tells it, never its icon nor its name.
+    pub fn could_run_agents(&self) -> bool {
+        self.kind.as_deref() != Some("phone")
+    }
+
     /// Its icon and its colour, as words: what the list signs, else the defaults of its key (a
     /// desktop, and the colour its key proposes), as the command line draws it.
     pub fn look(&self) -> (String, String) {
@@ -234,6 +242,9 @@ pub struct Launched {
     pub heard: Option<String>,
     pub heard_at: Option<u64>,
     pub at: u64,
+    /// The project its machine made for it, by that machine's name of it: `None` when it runs in
+    /// one that machine had.
+    pub making: Option<String>,
 }
 
 impl Launched {
@@ -248,6 +259,10 @@ impl Launched {
             heard: value["heard"].as_str().map(str::to_owned),
             heard_at: value["heard_at"].as_u64(),
             at: value["at"].as_u64().unwrap_or_default(),
+            making: value["there"]["project"]
+                .as_str()
+                .filter(|_| value["there"]["made"] == true)
+                .map(str::to_owned),
         }
     }
 }
@@ -265,6 +280,10 @@ pub struct Listed {
     pub created_at: u64,
     /// The session of the agent that leads it, on the same machine.
     pub pilot: Option<String>,
+    /// The agent of another machine that leads it, as its machine says it: that machine's name
+    /// and the agent's id there. Its row goes under that agent's only where the window can tell
+    /// that row is that machine's (`Snapshot::with_lists`).
+    pub pilot_elsewhere: Option<(String, String)>,
 }
 
 impl Listed {
@@ -277,6 +296,10 @@ impl Listed {
             exchanged_at: value["exchanged_at"].as_u64().unwrap_or_default(),
             created_at: value["created_at"].as_u64().unwrap_or_default(),
             pilot: value["pilot"].as_str().map(str::to_owned),
+            pilot_elsewhere: value["pilot_elsewhere"]["machine"]
+                .as_str()
+                .zip(value["pilot_elsewhere"]["agent"].as_str())
+                .map(|(machine, agent)| (machine.to_owned(), agent.to_owned())),
         }
     }
 
@@ -297,6 +320,39 @@ pub struct Lists {
     pub this: Vec<Listed>,
     /// Each other machine's, by its name.
     pub machines: Vec<(String, Vec<Listed>)>,
+    /// The projects of this machine, by the remotes of their repositories.
+    pub this_projects: Vec<MachineProject>,
+    /// The projects of each other machine as it last listed them, kept while it is off; a machine
+    /// whose list came before projects were listed has none.
+    pub projects: Vec<(String, Vec<MachineProject>)>,
+}
+
+/// A project of a machine, as its list says it (`remote.sessions`): its name there and its
+/// repositories' remotes, normalised. Two projects of two machines are the same one when their
+/// remotes are equal; one with none (a repository that has no remote) is the same as no other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineProject {
+    pub name: String,
+    pub remotes: Vec<String>,
+}
+
+impl MachineProject {
+    fn all(value: &Value) -> Vec<MachineProject> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|project| MachineProject {
+                name: text(&project["name"]),
+                remotes: project["remotes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(text)
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 impl Hub {
@@ -386,6 +442,8 @@ pub struct Machines {
     pub lists: Lists,
     /// The projects this machine offers, by name, when it says them.
     pub this_projects: Option<Vec<String>>,
+    /// When the phones are told (`remote.settings`): `away`, the default, or `always`.
+    pub notify: String,
 }
 
 impl Machines {
@@ -406,6 +464,15 @@ impl Machines {
 
     pub fn machine(&self, name: &str) -> Option<&Machine> {
         self.machines.iter().find(|machine| machine.name == name)
+    }
+
+    /// The session `launched` as its machine's light list says it now, when it lists it.
+    pub fn listed(&self, launched: &Launched) -> Option<&Listed> {
+        self.lists
+            .machines
+            .iter()
+            .find(|(name, _)| *name == launched.machine)
+            .and_then(|(_, listed)| listed.iter().find(|session| session.id == launched.agent))
     }
 
     /// When the member `name` was last seen, as its machine's state says it.
@@ -454,6 +521,10 @@ pub enum Ask {
     Configure {
         on: bool,
     },
+    /// When the phones are told, `away` or `always` (`remote.configure`).
+    Notify {
+        notify: String,
+    },
     /// A member's icon and colour, signed with this device's key as `flottille remote icon` and
     /// `colour` do.
     Look {
@@ -470,6 +541,7 @@ impl Ask {
             Ask::Rename { new_name, .. } => Asked::Rename(new_name.clone()),
             Ask::Remove { name } => Asked::Remove(name.clone()),
             Ask::Configure { on } => Asked::Configure { on: *on },
+            Ask::Notify { notify } => Asked::Notify(notify.clone()),
             Ask::Look { name, .. } => Asked::Look(name.clone()),
         }
     }
@@ -482,6 +554,7 @@ pub enum Asked {
     Rename(String),
     Remove(String),
     Configure { on: bool },
+    Notify(String),
     Look(String),
 }
 
@@ -584,6 +657,26 @@ impl Remote {
                 return Ok(());
             }
         }
+    }
+
+    /// Tells this machine's daemon whether the user is at the window and gave it an input
+    /// (`client.presence`), off the UI's thread: the hub tells the runners, which tell the phone
+    /// only while the user is away. Nothing comes back.
+    pub fn presence(&self, focused: bool, input: bool) {
+        let local = self.local.clone();
+        let _ = std::thread::Builder::new()
+            .name("flottille-presence".into())
+            .spawn(move || {
+                if let Ok(stream) = local()
+                    && let Ok(mut conn) = Conn::new(stream)
+                {
+                    let _ = conn.ask_within(
+                        "client.presence",
+                        json!({"focused": focused, "input": input}),
+                        BOUND,
+                    );
+                }
+            });
     }
 
     /// Asks `ask` of this machine's daemon, off the UI's thread: the answer comes back as news.
@@ -738,6 +831,10 @@ impl Remote {
                 request("remote.configure", json!({"on": on}))?;
                 Ok(())
             }
+            Ask::Notify { notify } => {
+                request("remote.configure", json!({"notify": notify}))?;
+                Ok(())
+            }
             Ask::Look { name, icon, colour } => {
                 let key = self.key()?;
                 let members = request("remote.members", json!({}))?;
@@ -798,7 +895,11 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         launches: Vec::new(),
         lists: Lists::default(),
         this_projects: offered(&machines["this"]["offers"]),
+        notify: "away".to_owned(),
     };
+    if let Ok(settings) = conn.ask_within("remote.settings", json!({}), BOUND)? {
+        read.notify = settings["notify"].as_str().unwrap_or("away").to_owned();
+    }
     if let Ok(lists) = conn.ask_within("remote.sessions", json!({}), BOUND)? {
         read.lists = Lists {
             this: Listed::all(&lists["this"]),
@@ -807,6 +908,13 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 .into_iter()
                 .flatten()
                 .map(|list| (text(&list["name"]), Listed::all(&list["sessions"])))
+                .collect(),
+            this_projects: MachineProject::all(&lists["projects"]),
+            projects: lists["machines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|list| (text(&list["name"]), MachineProject::all(&list["projects"])))
                 .collect(),
         };
     }
@@ -836,6 +944,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 machine: member["machine"].as_str().map(str::to_owned),
                 icon: member["icon"].as_str().map(str::to_owned),
                 colour: member["colour"].as_str().map(str::to_owned),
+                kind: member["kind"].as_str().map(str::to_owned),
             })
             .collect();
     }
@@ -1024,6 +1133,15 @@ impl Machines {
     }
 }
 
+/// Machines named in a sentence: `server`, `server or laptop`, `server, laptop or pi`.
+pub fn said_or(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// The machines that have `project`, as the composer's picker lists them: this one first, each
 /// with its state. The machine in front (`front`, `None` for this one) is always one of them.
 pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
@@ -1148,11 +1266,14 @@ pub fn narrowing(
     )
     .absolute()
     .size_full();
-    // Clipped only while it moves, so that a list the content opens is not.
+    // Clipped only while it moves, so that a list the content opens is not. A row, so that the
+    // content keeps its own width under the clip and the measure reads it whole: in a block it
+    // would shrink with the clip, and widen in again from nothing.
     let moving = t < 1.0;
     Some(
         div()
             .id(id)
+            .flex()
             .flex_none()
             .when(moving, |d| {
                 d.overflow_hidden().w(px(width.get() * t)).opacity(t)
@@ -1250,56 +1371,16 @@ pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holdi
         })
 }
 
+/// Why this device signs no share of what the machine `from` holds, when it signs none: `from` is
+/// off, or this device may only view it. This machine's own are this device's.
+pub fn sharing_held(from: &str, machines: Option<&Machines>) -> Option<Holding> {
+    let this = machines.and_then(|machines| machines.this.as_deref());
+    holding(Some(from).filter(|from| this != Some(*from)), machines)
+}
+
 /// What [`Held`] says now.
 pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
     cx.try_global::<Held>().and_then(|held| held.0.clone())
-}
-
-/// The line at the top of a page of another machine that names it, then where the page is:
-/// `server / Settings / Agents`; nothing on this machine. It unfolds and fades in when another
-/// machine comes in front, and folds away with its words when this one comes back.
-pub fn where_line(
-    id: &'static str,
-    parts: &[&str],
-    cx: &gpui_kit::App,
-) -> gpui_design_system::PresenceOf {
-    use gpui_design_system::{Type as _, palette, presence_of};
-    use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
-    use gpui_kit::{SharedString, StatefulInteractiveElement as _, TestSupportExt as _, div, px};
-    let p = palette(cx);
-    let said = shown_machine(cx).map(|machine| {
-        SharedString::from(
-            std::iter::once(machine.as_str())
-                .chain(parts.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" / "),
-        )
-    });
-    presence_of(format!("{id}-block"), said, move |said| {
-        let (machine, rest) = said.split_once(" / ").unwrap_or((said.as_ref(), ""));
-        div()
-            .id(id)
-            .aria_label(said.clone())
-            .flex()
-            .items_center()
-            .gap(gpui_design_system::space::XS)
-            .text_size(px(13.))
-            .child(
-                div()
-                    .medium()
-                    .text_color(p.text)
-                    .child(SharedString::from(machine.to_owned())),
-            )
-            .when(!rest.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_color(p.faint)
-                        .child(SharedString::from(format!("/ {rest}"))),
-                )
-            })
-            .test_support()
-            .into_any_element()
-    })
 }
 
 /// `page`, the controls of a page of the machine in front, held while [`Held`] says so: its ink
@@ -1491,6 +1572,7 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
 mod tests {
     use super::{
         Holding, Listed, Lists, Machine, Machines, Member, front_choice, holding, project_choices,
+        sharing_held,
     };
     use serde_json::Value;
 
@@ -1516,6 +1598,7 @@ mod tests {
                 machine: None,
                 icon: None,
                 colour: None,
+                kind: None,
             }],
             ..Machines::default()
         }
@@ -1551,6 +1634,27 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn a_viewer_device_signs_no_share_from_the_machine_it_views() {
+        // In front: this machine, where the launch is held. The files are server's.
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "viewer"))),
+            Some(Holding {
+                line: "This device may only view server".to_owned(),
+                offline: false,
+            })
+        );
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "controller"))),
+            None
+        );
+        // This machine's own files are this device's to share.
+        assert_eq!(
+            sharing_held("pc", Some(&machines("online", "viewer"))),
+            None
+        );
+    }
+
     fn listing(project: &str) -> Listed {
         Listed {
             id: "s1".to_owned(),
@@ -1560,6 +1664,7 @@ mod tests {
             exchanged_at: 1,
             created_at: 1,
             pilot: None,
+            pilot_elsewhere: None,
         }
     }
 
@@ -1580,6 +1685,7 @@ mod tests {
         read.lists = Lists {
             this: Vec::new(),
             machines: vec![("server".to_owned(), vec![listing("site")])],
+            ..Lists::default()
         };
         read
     }
