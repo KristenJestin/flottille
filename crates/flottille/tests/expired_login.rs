@@ -7,8 +7,9 @@ use crate::common;
 use common::User;
 use serde_json::{Value, json};
 
-/// What Claude Code says when its login expired, as the bridge fails the prompt with it.
-const EXPIRED: &str = "Failed to authenticate: OAuth session expired and could not be refreshed";
+/// What Claude Code 2.1.325 says with no login, as the bridge fails the prompt with it (seen on a
+/// real run, #875).
+const EXPIRED: &str = "Not logged in · Please run /login";
 
 /// What the session's state line says then.
 const LOGIN_LINE: &str = "Claude's login expired: sign in again (run claude and /login)";

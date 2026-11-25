@@ -1459,3 +1459,26 @@ fn a_session_stopped_before_its_pull_request_is_merged_is_not_checked_again() {
     assert_eq!(user.gh_received().len(), reads);
     assert!(reminders(&user, &lead).is_empty());
 }
+
+#[test]
+fn a_led_session_s_created_event_names_its_pilot() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+
+    let (session, _session_mcp) = led(&user, &mcp, "Fix the login.");
+
+    // A client that only watches the events (the phone) puts the row under its pilot at once.
+    let created = store(&user)
+        .last_agent_events(&session, "agent.created", 1)
+        .unwrap();
+    assert_eq!(
+        created[0].data["led_by"],
+        lead.as_str(),
+        "{:?}",
+        created[0].data
+    );
+    let own = store(&user)
+        .last_agent_events(&lead, "agent.created", 1)
+        .unwrap();
+    assert!(own[0].data["led_by"].is_null(), "{:?}", own[0].data);
+}
