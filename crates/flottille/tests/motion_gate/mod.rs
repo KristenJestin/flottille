@@ -74,7 +74,7 @@ impl Sample {
 type Frame = HashMap<String, Sample>;
 
 fn sample(cx: &mut VisualTestContext) -> Frame {
-    cx.update(|window, _| {
+    let frame: Frame = cx.update(|window, _| {
         window
             .elements()
             .into_iter()
@@ -96,13 +96,29 @@ fn sample(cx: &mut VisualTestContext) -> Frame {
                 (path, sample)
             })
             .collect()
-    })
+    });
+    // GPUI says whether an element's own opacity is above 0; a parent's applies to its
+    // children too (an `enter` waiting for its turn holds a button drawn at 0).
+    let hidden: Vec<String> = frame
+        .keys()
+        .filter(|key| ancestors(key).any(|above| frame.get(above).is_some_and(|s| !s.visible)))
+        .cloned()
+        .collect();
+    let mut frame = frame;
+    for key in hidden {
+        if let Some(s) = frame.get_mut(&key) {
+            s.visible = false;
+        }
+    }
+    frame
 }
 
 /// Plays a scenario frame by frame and keeps every frame.
 pub struct Recorder {
     scenario: &'static str,
     frames: Vec<Frame>,
+    /// The time spent reading the elements, all frames together.
+    sampling: Duration,
     /// What the window must do before each frame besides its clock (a shell polls its link).
     before: Option<Box<dyn Fn(&mut VisualTestContext)>>,
 }
@@ -113,6 +129,7 @@ impl Recorder {
         Self {
             scenario,
             frames: vec![sample(cx)],
+            sampling: Duration::ZERO,
             before: None,
         }
     }
@@ -132,7 +149,9 @@ impl Recorder {
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
+        let began = std::time::Instant::now();
         self.frames.push(sample(cx));
+        self.sampling += began.elapsed();
     }
 
     /// Plays `by` of the window's clock, a frame at a time.
@@ -159,6 +178,7 @@ impl Recorder {
             scenario: self.scenario,
             frames: self.frames,
             asked_at_end: asked,
+            sampling: self.sampling,
         }
     }
 }
@@ -168,11 +188,17 @@ pub struct Recording {
     scenario: &'static str,
     frames: Vec<Frame>,
     asked_at_end: usize,
+    sampling: Duration,
 }
 
 impl Recording {
     pub fn frames(&self) -> usize {
         self.frames.len()
+    }
+
+    /// The time spent reading the elements, all frames together.
+    pub fn sampling(&self) -> Duration {
+        self.sampling
     }
 
     /// The most elements one frame held.
@@ -224,9 +250,18 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// Whether this finding is about `element`: its whole path, or its last ids.
+    /// Whether this finding is about `element` or something inside it: `element` is ids of its
+    /// path that follow each other (`project-page`, `rail > rail-agents`), an id ending in `*`
+    /// standing for every id it starts (`conversation-empty-*`, whose end is a session's).
     pub fn is_about(&self, element: &str) -> bool {
-        self.element == element || self.element.ends_with(&format!("{SEP}{element}"))
+        let path: Vec<&str> = self.element.split(SEP).collect();
+        let wanted: Vec<&str> = element.split(SEP).collect();
+        let fits = |id: &str, want: &str| match want.strip_suffix('*') {
+            Some(start) => id.starts_with(start),
+            None => id == want,
+        };
+        path.windows(wanted.len())
+            .any(|ids| ids.iter().zip(&wanted).all(|(id, want)| fits(id, want)))
     }
 }
 
@@ -272,8 +307,31 @@ impl Verdict {
 
 /// Lists what a person would notice in `recording`, less what `allow` says is intended.
 pub fn check(recording: &Recording, allow: &[Allow]) -> Verdict {
-    let _ = (recording, allow);
-    Verdict::default()
+    let mut found = Gate::new(&recording.frames).findings();
+    found.extend(never_settles(recording));
+    let mut verdict = Verdict::default();
+    let mut used = HashSet::new();
+    for finding in found {
+        let entry = allow.iter().enumerate().find(|(_, entry)| {
+            entry.scenario == recording.scenario
+                && entry.kind == finding.kind
+                && finding.is_about(entry.element)
+        });
+        match entry {
+            Some((at, entry)) => {
+                used.insert(at);
+                verdict.allowed.push((finding, entry.why));
+            }
+            None => verdict.findings.push(finding),
+        }
+    }
+    verdict.unused = allow
+        .iter()
+        .enumerate()
+        .filter(|(at, entry)| entry.scenario == recording.scenario && !used.contains(at))
+        .map(|(_, entry)| *entry)
+        .collect();
+    verdict
 }
 
 /// The frames of a recording, read element by element.
@@ -340,7 +398,9 @@ impl<'a> Gate<'a> {
     }
 
     /// What carries an arrival at `frame` in: the element itself, moving in the frames that
-    /// follow, or a fold above it that arrived not long before and grows.
+    /// follow; a fold above it that arrived not long before and grows; or what it holds, which
+    /// arrives at an opacity of 0 or moves in (a page whose sections enter: the page itself is a
+    /// frame the gate cannot tell from a painted block).
     fn carried_in(&self, key: &str, frame: usize) -> bool {
         let after = frame + NEAR;
         self.moves_within(key, frame + 1, after)
@@ -351,6 +411,11 @@ impl<'a> Gate<'a> {
                         && self.hidden(above, came - 1)
                         && self.moves_within(above, came + 1, after)
                 })
+            })
+            || self.frames[frame].iter().any(|(inside, s)| {
+                inside.starts_with(key)
+                    && inside[key.len()..].starts_with(SEP)
+                    && (s.faded() || self.moves_within(inside, frame + 1, after))
             })
     }
 
