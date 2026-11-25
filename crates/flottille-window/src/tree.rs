@@ -2990,7 +2990,7 @@ impl Render for SessionRow {
         if let Some(key) = self.key_chip(false, window, cx) {
             row = row.leading(key);
         }
-        if self.scope.is_none() {
+        if self.scope.is_none() || self.blocked_line() {
             row = row.second(self.second_line(window, cx));
         }
         // The connector to the row above, and the indent it runs into, fade with the row.
@@ -3003,6 +3003,7 @@ impl Render for SessionRow {
         );
         let first_line = match self.scope {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
+            Some(_) if self.blocked_line() => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
         // A session whose machine is off fades its ink, and takes it back when the machine is.
@@ -3081,6 +3082,51 @@ const LINE: f32 = 16.;
 const FIRST: f32 = 18.;
 
 impl SessionRow {
+    /// Whether it is a row of the "Blocked by others" group, which says on its second line who it
+    /// waits for: a scoped row (its project is in its meta) that waits. An ended row waits for
+    /// nothing and has no second line.
+    fn blocked_line(&self) -> bool {
+        self.scope.is_some() && !self.waits.is_empty()
+    }
+
+    /// The second line of a row of the "Blocked by others" group: `waits for Maya · review of
+    /// #123` in the `away` ink, cut with an ellipsis inside the row and whole in a tooltip; its
+    /// words fade as they change.
+    fn blocked_line_of(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let waits = self.waits.clone();
+        let line = div()
+            .id(session_line_id(&self.id))
+            .flex()
+            .items_center()
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.away)
+            .child(
+                div()
+                    .id(session_waits_id(&self.id))
+                    .aria_label(waits.clone())
+                    .min_w_0()
+                    .h(px(LINE))
+                    .child(changing(
+                        ElementId::Name(format!("session-waits-words-{}", self.id).into()),
+                        waits.clone(),
+                        move |waits| {
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(waits)
+                                .into_any_element()
+                        },
+                    ))
+                    .test_support(),
+            );
+        tipped(line, waits, LINE, window, cx).into_any_element()
+    }
+
     /// Under the title, faint: the place's icon and name, then, when there is room, its pull
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
     /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
@@ -3089,6 +3135,7 @@ impl SessionRow {
         // lists it after it was drawn), goes, or changes: the new one fades in, as the kit's
         // `changing` fades words.
         let kind = match (&self.elsewhere, &self.tag) {
+            _ if self.blocked_line() => "blocked".to_owned(),
             (Some(there), _) if !there.listed => format!("machine {}", there.machine),
             (_, Some(tag)) => format!("tag {tag}"),
             _ => "place".to_owned(),
@@ -3105,6 +3152,9 @@ impl SessionRow {
 
     /// The line itself, [`SessionRow::second_line`] without its fade.
     fn line_of(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if self.blocked_line() {
+            return self.blocked_line_of(window, cx);
+        }
         let p = palette(cx);
         let (name, icon, said) = match &self.place {
             None => ("main".to_owned(), Icon::Folder, "Project folder"),
