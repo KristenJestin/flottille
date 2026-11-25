@@ -275,7 +275,7 @@ const SERVED: [Definition; 33] = [
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
                 "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."},
-                "exception": {"type": "string", "description": "A forced push of your own branch held for good: ask the user to lift that rule for this session; say what it refuses and why it is wrong here."}
+                "exception": {"type": "string", "description": "A forced push of your own branch held for good, its destination named (git push --force origin HEAD:refs/heads/<your branch>): ask the user to lift that rule for this session; say what it refuses and why it is wrong here."}
             }, "additionalProperties": false})
         },
     },

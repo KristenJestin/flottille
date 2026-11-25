@@ -218,7 +218,9 @@ pub struct Exception {
 }
 
 /// What an exception covers, read when it was asked: the repository (its path in the project)
-/// and the branch it is for, and for a merge the pull request; empty for a rule that names none.
+/// and the branch it is for, and for a merge the pull request, its head commit and what blocked
+/// it as the card said: a merge whose head or blockers changed since is not covered. Empty for a
+/// rule that names none.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Scope {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -227,6 +229,10 @@ pub struct Scope {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<String>,
 }
 
 impl Exception {

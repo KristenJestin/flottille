@@ -67,9 +67,10 @@ impl Rule {
 pub const ASKS: &str = "it asks an exception for the rest of this session";
 
 /// What can be asked for, said where an ask is refused.
-const ASKABLE: &str = "an exception is asked only for a forced push of the agent's own branch, a \
-    merge of its pull request past failing checks or a branch protection, or closing, reopening \
-    or relabelling an issue or a pull request";
+const ASKABLE: &str = "an exception is asked only for a forced push of the agent's own branch, \
+    its destination named (git push --force origin HEAD:refs/heads/<its branch>), a merge of its \
+    pull request past failing checks or a branch protection, or closing, reopening or relabelling \
+    an issue or a pull request, with no comment";
 
 /// Branches no exception ever lets an agent force a push to, whatever the project.
 const PROTECTED: [&str; 5] = ["main", "master", "dev", "develop", "trunk"];
@@ -174,7 +175,7 @@ pub fn push_scope(place: &Place, guarded: &[String], args: &Value) -> Option<Sco
     Some(Scope {
         repository,
         branch,
-        pull: None,
+        ..Scope::default()
     })
 }
 
@@ -197,7 +198,8 @@ fn keys_within(args: &Value, keys: &[&str]) -> bool {
     })
 }
 
-/// Whether a forge or tickets call closes, reopens or relabels, and does nothing else.
+/// Whether a forge or tickets call closes, reopens or relabels, and does nothing else: a comment's
+/// text is judged, whatever exception the session holds.
 fn changes_state(tool: &str, args: &Value) -> bool {
     let labels: &[&str] = match tool {
         "forge" => &["labels_add", "labels_remove"],
@@ -210,7 +212,6 @@ fn changes_state(tool: &str, args: &Value) -> bool {
     match args["action"].as_str() {
         Some("close" | "reopen") => {
             let mut keys = target.to_vec();
-            keys.push("comment");
             if tool == "tickets" {
                 keys.push("reason");
             }
@@ -226,7 +227,8 @@ fn changes_state(tool: &str, args: &Value) -> bool {
 
 /// The branch a line forces a push of when it is a forced push of the agent's own branch to a
 /// named remote, and nothing else: `git push` with forcing options, a remote and one refspec
-/// whose destination is the workspace's branch, never a protected one, never a deletion.
+/// whose destination is the workspace's branch named in full (`:refs/heads/<branch>`), so that no
+/// `remote.<name>.push` setting sends it elsewhere; never a protected one, never a deletion.
 fn forces_own_branch<'a>(place: &'a Place, line: &str) -> Option<&'a str> {
     let own = place.branch.as_str();
     if place.workspace.is_none() || own.is_empty() || protected(own) {
@@ -255,10 +257,8 @@ fn forces_own_branch<'a>(place: &'a Place, line: &str) -> Option<&'a str> {
         .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
     let plus = target.starts_with('+');
     let pair = target.trim_start_matches('+');
-    let (source, destination) = pair.split_once(':').unwrap_or((pair, pair));
-    let destination = destination
-        .strip_prefix("refs/heads/")
-        .unwrap_or(destination);
+    let (source, destination) = pair.split_once(':')?;
+    let destination = destination.strip_prefix("refs/heads/")?;
     let forced = plus
         || options
             .iter()
@@ -421,6 +421,8 @@ pub async fn asked(
                 repository: read.repository.clone(),
                 branch: read.branch.clone(),
                 pull: Some(read.number),
+                head: read.head.clone(),
+                blocks: Some(blocks.clone()),
             };
             if held(daemon, &grant.agent, rule).is_some_and(|held| held.scope == scope) {
                 let verdict = ask.map_or(Verdict::Allow, Verdict::Ask);
@@ -430,9 +432,12 @@ pub async fn asked(
                 true => "its branch protection bypassed (gh pr merge --admin)",
                 false => "Flottille's refusal lifted; Bitbucket's own merge checks still answer",
             };
+            let at = read.head.as_deref().map_or(String::new(), |head| {
+                format!(" at {}", head.chars().take(7).collect::<String>())
+            });
             let exact = format!(
-                "merge the pull request #{} of {} into {} in {} (repository {}) although {blocks}, \
-                 {bypass}",
+                "merge the pull request #{} of {}{at} into {} in {} (repository {}) although \
+                 {blocks}, {bypass}; a commit pushed or a blocker come since asks again",
                 read.number, read.branch, read.base, read.slug, read.repository
             );
             let (reasons, kind) = match ask {
@@ -468,15 +473,29 @@ pub async fn asked(
                     ),
                     scope,
                 ),
-                _ => ("as the call says".to_owned(), Scope::default()),
+                _ => (
+                    "as the call says, then any issue or pull request of the project: this \
+                     exception has no scope"
+                        .to_owned(),
+                    Scope::default(),
+                ),
             };
             (exact, scope, ask.reasons, lifted, ask.kind)
         }
     };
+    // A session holds one exception of a rule: allowed, this one replaces the one it holds.
+    let replaces = match held(daemon, &grant.agent, rule) {
+        Some(held) => format!("; it replaces the exception {}", covered(&held.scope)),
+        None => String::new(),
+    };
     // What the call becomes once allowed is on the card too: its check again, once the
     // exception is the session's, finds nothing the user did not read.
     let mut card = vec![
-        format!("{ASKS}: {} ({}): {exact}", rule.name(), rule.said()),
+        format!(
+            "{ASKS}: {} ({}): {exact}{replaces}",
+            rule.name(),
+            rule.said()
+        ),
         format!("{REASON} {why}"),
     ];
     for reason in reasons.into_iter().chain(lifted) {
@@ -492,6 +511,16 @@ pub async fn asked(
         kind,
     };
     (Verdict::Ask(ask), digest)
+}
+
+/// What a held exception is for, said on the card of the one that replaces it: `for #12 of
+/// app/login`, `for app/w in api`.
+fn covered(scope: &Scope) -> String {
+    match (scope.pull, scope.branch.as_str()) {
+        (Some(pull), branch) => format!("for #{pull} of {branch}"),
+        (None, "") => "the session holds".to_owned(),
+        (None, branch) => format!("for {branch} in {}", scope.repository),
+    }
 }
 
 /// Whether a held call asks an exception: only the user answers it, in every mode.

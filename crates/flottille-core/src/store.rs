@@ -1038,6 +1038,9 @@ const MIGRATIONS: &[&str] = &[
         repository TEXT NOT NULL,
         branch     TEXT NOT NULL,
         pull       INTEGER,
+        -- A merge's: the head commit and what blocked it, as the card said.
+        head       TEXT,
+        blocks     TEXT,
         PRIMARY KEY (agent, rule)
     ) STRICT;
 ",
@@ -3089,8 +3092,8 @@ impl Store {
     }
 
     /// The user lifts `rule` for the session `agent`, for what `scope` covers, with the request
-    /// it was asked in, and its `exception.granted` event; `None` when it holds it already or has
-    /// ended.
+    /// it was asked in, and its `exception.granted` event; `None` when the session has ended. One
+    /// the session held for that rule is replaced: the card of the ask said so.
     pub fn grant_exception(
         &mut self,
         agent: &str,
@@ -3111,9 +3114,9 @@ impl Store {
         // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
         // approval and here never keeps an exception a resume would find.
         let added = transaction.execute(
-            "INSERT OR IGNORE INTO session_exceptions \
-             (agent, rule, why, request, granted_at, repository, branch, pull) \
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE EXISTS (SELECT 1 FROM agents \
+            "INSERT OR REPLACE INTO session_exceptions \
+             (agent, rule, why, request, granted_at, repository, branch, pull, head, blocks) \
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE EXISTS (SELECT 1 FROM agents \
              WHERE id = ?1 AND state NOT IN ('ended', 'failed'))",
             params![
                 agent,
@@ -3123,7 +3126,9 @@ impl Store {
                 exception.granted_at,
                 scope.repository,
                 scope.branch,
-                scope.pull
+                scope.pull,
+                scope.head,
+                scope.blocks
             ],
         )?;
         if added == 0 {
@@ -3150,7 +3155,7 @@ impl Store {
     /// The exceptions the session `agent` holds, oldest first.
     pub fn exceptions_of(&self, agent: &str) -> Result<Vec<Exception>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT rule, why, request, granted_at, repository, branch, pull \
+            "SELECT rule, why, request, granted_at, repository, branch, pull, head, blocks \
              FROM session_exceptions WHERE agent = ?1 ORDER BY granted_at, rowid",
         )?;
         let rows = statement.query_map(params![agent], |row| exception_row(agent, row))?;
@@ -5483,7 +5488,8 @@ fn append_agent_event(
     Ok(event)
 }
 
-/// An exception of `agent`'s from `rule, why, request, granted_at, repository, branch, pull`.
+/// An exception of `agent`'s from `rule, why, request, granted_at, repository, branch, pull,
+/// head, blocks`.
 fn exception_row(agent: &str, row: &rusqlite::Row) -> rusqlite::Result<Exception> {
     Ok(Exception {
         agent: agent.to_owned(),
@@ -5495,6 +5501,8 @@ fn exception_row(agent: &str, row: &rusqlite::Row) -> rusqlite::Result<Exception
             repository: row.get(4)?,
             branch: row.get(5)?,
             pull: row.get(6)?,
+            head: row.get(7)?,
+            blocks: row.get(8)?,
         },
     })
 }
@@ -6931,7 +6939,7 @@ mod tests {
         let scope = Scope {
             repository: ".".into(),
             branch: "app/login".into(),
-            pull: None,
+            ..Scope::default()
         };
         let (granted, event) = store
             .grant_exception(&agent.id, "force-push", "a check refuses it", 4, &scope)
@@ -6946,15 +6954,20 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        // Given twice, it is the first.
-        let again = store
-            .grant_exception(&agent.id, "force-push", "again", 5, &Scope::default())
+        // Given again for that rule, the new one replaces it: its Allow is never lost.
+        let wider = Scope {
+            branch: "app/other".into(),
+            ..scope.clone()
+        };
+        let (again, event) = store
+            .grant_exception(&agent.id, "force-push", "again", 5, &wider)
             .unwrap();
-        assert_eq!(again, (None, None));
+        assert_eq!(again.map(|e| e.request), Some(5));
+        assert_eq!(event.unwrap().name, "exception.granted");
         let listed = store.exceptions_of(&agent.id).unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].why, "a check refuses it");
-        assert_eq!(listed[0].scope, scope);
+        assert_eq!(listed[0].why, "again");
+        assert_eq!(listed[0].scope, wider);
 
         let (withdrawn, event) = store.withdraw_exception(&agent.id, "force-push").unwrap();
         assert_eq!(withdrawn.map(|e| e.rule).as_deref(), Some("force-push"));
