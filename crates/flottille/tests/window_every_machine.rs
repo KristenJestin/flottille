@@ -2553,3 +2553,89 @@ fn a_project_draft_of_another_machine_is_not_this_machine_s_draft_of_the_same_na
         })
     });
 }
+
+/// What the server was asked since the last take that reads it whole or connects to it again.
+fn whole_or_again(relay: &Relay) -> Vec<String> {
+    relay
+        .take()
+        .into_iter()
+        .map(|(method, _)| method)
+        .filter(|method| WHOLE_MACHINE.contains(&method.as_str()) || method == "events.watch")
+        .collect()
+}
+
+#[gpui_kit::test]
+fn another_machine_s_settings_follow_a_change_made_there(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    set_settings(&server.user, "Server person", false);
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    the_server_s_settings(&shell, cx);
+    click(cx, "settings-tabs-general");
+    until(&shell, cx, "the server's settings are read", |cx| {
+        settings_shown(&shell, cx).0.as_deref() == Some("Server person")
+    });
+    settle(&shell, cx);
+    relay.take();
+
+    // Another client of the server changes them there: the page shown follows.
+    set_settings(&server.user, "Server friend", true);
+    until(
+        &shell,
+        cx,
+        "the server's settings follow the change",
+        |cx| {
+            settings_shown(&shell, cx)
+                == (
+                    Some("Server friend".to_owned()),
+                    Some(true),
+                    Some("Rules of Server friend.".to_owned()),
+                )
+        },
+    );
+    // By the connection kept to the server: no second one, no read of the whole server.
+    settle(&shell, cx);
+    let asked = whole_or_again(&relay);
+    assert!(asked.is_empty(), "the server was read again: {asked:?}");
+}
+
+#[gpui_kit::test]
+fn another_machine_s_bell_follows_its_new_notices(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    settle(&shell, cx);
+    let order =
+        |cx: &mut VisualTestContext| shell.read_with(cx, |s, cx| s.bell_list().read(cx).order());
+    let before = order(cx);
+    relay.take();
+
+    // A session of the server reports there, started by another client: its notice comes into
+    // the open list.
+    server.user.fake_script(json!({"turns": [
+        {"when": "REPORT", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The notes are filed."}}},
+            {"say": REPLY}]},
+        {"when": "", "do": [{"say": REPLY}]}
+    ]}));
+    server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "message": "REPORT the notes"}),
+        )
+        .unwrap();
+    until(&shell, cx, "the bell lists the server's new notice", |cx| {
+        order(cx)
+            .iter()
+            .any(|key| key.ends_with("@server") && !before.contains(key))
+    });
+    settle(&shell, cx);
+    let asked = whole_or_again(&relay);
+    let again: Vec<&String> = asked
+        .iter()
+        .filter(|m| *m != "notifications.list")
+        .collect();
+    assert!(again.is_empty(), "the server was read again: {asked:?}");
+}
