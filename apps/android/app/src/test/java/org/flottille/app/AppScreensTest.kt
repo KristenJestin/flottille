@@ -232,6 +232,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
 
         // One list, grouped by project; in a project the ones that wait for the user come first.
         assertEquals(
@@ -262,6 +263,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
 
         rule.onNodeWithTag("session:laptop:l1").assertIsNotEnabled()
         rule.onNodeWithTag("session:laptop:l1").assert(
@@ -284,6 +286,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
         rule.waitForIdle()
         rule.mainClock.autoAdvance = false
 

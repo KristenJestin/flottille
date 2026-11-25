@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -34,6 +36,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
@@ -58,17 +68,19 @@ import org.flottille.core.Phone
 import org.flottille.core.PhoneException
 import org.flottille.core.Picture
 
-private enum class Tab(val label: String) {
-    Sessions("Sessions"),
-    Machines("Machines"),
+/** The bottom bar's destinations (`docs/remote.md`, "The Android app"); the app opens on the first. */
+private enum class Tab(val label: String, val tag: String) {
+    NeedsYou("Needs you", "needs-you"),
+    Sessions("Sessions", "sessions"),
+    Machines("Machines", "machines"),
 }
 
 /**
  * The app (`docs/remote.md`, "The Android app"). A phone that joined no hub is asked to connect to
- * one; one that did lists its sessions (one list, every machine) and its machines, and has
- * Settings. The view is the core's, followed while the app is on screen; the screens compute
- * nothing of their own. Tapping a session opens its page (`SessionPage`); Needs you and the
- * notifications come with the issues after #826.
+ * one; one that did opens on Needs you (what waits for the user on every machine), and has its
+ * sessions (one list, every machine), its machines and Settings. The view is the core's, followed
+ * while the app is on screen; the screens compute nothing of their own. Tapping a session or a
+ * card opens its page (`SessionPage`); the notifications come with the issues after #826.
  */
 @Composable
 fun FlottilleApp(
@@ -92,7 +104,7 @@ fun FlottilleApp(
         // Joining ends when the user says so (the result is shown first), and starts again when the
         // phone is no member: it was removed.
         var joining by rememberSaveable { mutableStateOf(!phone.view.joined) }
-        var tab by rememberSaveable { mutableStateOf(Tab.Sessions) }
+        var tab by rememberSaveable { mutableStateOf(Tab.NeedsYou) }
         var settings by rememberSaveable { mutableStateOf(false) }
         var toast by remember { mutableStateOf<String?>(null) }
         // The session page on screen: one entry point, by machine and session id, for the list and
@@ -140,6 +152,7 @@ fun FlottilleApp(
                 )
             } else {
                 Main(
+                    phone = phone,
                     view = view,
                     zone = zone,
                     tab = tab,
@@ -154,6 +167,7 @@ fun FlottilleApp(
                         carried = emptyList()
                         onSharedPlaced()
                     },
+                    onToast = { toast = it },
                 )
                 AnimatedVisibility(
                     visible = page != null,
@@ -215,6 +229,7 @@ private const val TOAST_MILLIS = 5_000L
 
 @Composable
 private fun Main(
+    phone: Phone,
     view: org.flottille.core.PhoneView,
     zone: ZoneId,
     tab: Tab,
@@ -223,6 +238,7 @@ private fun Main(
     onOpenSession: (String, String) -> Unit,
     sharing: Boolean,
     onDiscard: () -> Unit,
+    onToast: (String) -> Unit,
 ) {
     val palette = LocalPalette.current
     Column(Modifier.fillMaxSize()) {
@@ -256,6 +272,7 @@ private fun Main(
                 label = "tab",
             ) { shown ->
                 when (shown) {
+                    Tab.NeedsYou -> NeedsYouScreen(phone, view, onOpenSession, onToast)
                     Tab.Sessions -> SessionsScreen(view, onOpenSession)
                     Tab.Machines -> MachinesScreen(view, zone)
                 }
@@ -266,7 +283,7 @@ private fun Main(
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
             Tab.entries.forEach { entry ->
-                TabButton(entry.label, selected = entry == tab, tag = "tab:${entry.name.lowercase()}", modifier = Modifier.weight(1f)) {
+                TabButton(entry, selected = entry == tab, modifier = Modifier.weight(1f)) {
                     onTab(entry)
                 }
             }
@@ -275,7 +292,7 @@ private fun Main(
 }
 
 @Composable
-private fun TabButton(text: String, selected: Boolean, tag: String, modifier: Modifier, onClick: () -> Unit) {
+private fun TabButton(entry: Tab, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val palette = LocalPalette.current
     val fill by animateColorAsState(if (selected) palette.sel else palette.side, Motion.spec(Motion.PANEL), label = "tab fill")
     val ink by animateColorAsState(if (selected) palette.text else palette.mute, Motion.spec(Motion.PANEL), label = "tab ink")
@@ -283,12 +300,52 @@ private fun TabButton(text: String, selected: Boolean, tag: String, modifier: Mo
         modifier
             .padding(Space.Xs)
             .background(fill, RoundedCornerShape(10.dp))
-            .testTag(tag)
+            .testTag("tab:${entry.tag}")
             .semantics { this.selected = selected }
             .clickable(role = Role.Tab, indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
-            .padding(vertical = Space.Md),
+            .padding(vertical = Space.Sm),
         contentAlignment = Alignment.Center,
     ) {
-        Label(text, color = ink)
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.Xs)) {
+            TabIcon(entry, ink, Modifier.size(20.dp).testTag("tab-icon:${entry.tag}"))
+            Label(entry.label, style = Type.Label, color = ink)
+        }
+    }
+}
+
+/**
+ * A destination's icon, drawn in its ink (which moves with the selection): a bell for Needs you,
+ * lines of a list for Sessions, a screen on its stand for Machines.
+ */
+@Composable
+private fun TabIcon(entry: Tab, ink: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        when (entry) {
+            Tab.NeedsYou -> {
+                val bell = Path().apply {
+                    moveTo(w * 0.18f, h * 0.74f)
+                    lineTo(w * 0.82f, h * 0.74f)
+                    cubicTo(w * 0.72f, h * 0.62f, w * 0.74f, h * 0.5f, w * 0.74f, h * 0.42f)
+                    cubicTo(w * 0.74f, h * 0.24f, w * 0.62f, h * 0.14f, w * 0.5f, h * 0.14f)
+                    cubicTo(w * 0.38f, h * 0.14f, w * 0.26f, h * 0.24f, w * 0.26f, h * 0.42f)
+                    cubicTo(w * 0.26f, h * 0.5f, w * 0.28f, h * 0.62f, w * 0.18f, h * 0.74f)
+                    close()
+                }
+                drawPath(bell, ink, style = stroke)
+                drawLine(ink, Offset(w * 0.42f, h * 0.88f), Offset(w * 0.58f, h * 0.88f), stroke.width, StrokeCap.Round)
+            }
+            Tab.Sessions -> listOf(0.25f, 0.5f, 0.75f).forEach { y ->
+                drawCircle(ink, w * 0.06f, Offset(w * 0.16f, h * y))
+                drawLine(ink, Offset(w * 0.34f, h * y), Offset(w * 0.86f, h * y), stroke.width, StrokeCap.Round)
+            }
+            Tab.Machines -> {
+                drawRoundRect(ink, Offset(w * 0.12f, h * 0.16f), Size(w * 0.76f, h * 0.52f), CornerRadius(w * 0.08f), style = stroke)
+                drawLine(ink, Offset(w * 0.5f, h * 0.68f), Offset(w * 0.5f, h * 0.84f), stroke.width, StrokeCap.Round)
+                drawLine(ink, Offset(w * 0.32f, h * 0.86f), Offset(w * 0.68f, h * 0.86f), stroke.width, StrokeCap.Round)
+            }
+        }
     }
 }
