@@ -233,6 +233,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
 
         // Each machine in the list's order, said once; its projects by name, their sessions newest
         // first, whatever waits for the user.
@@ -264,6 +265,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
 
         // An offline machine's projects are folded: unfolded, its rows are greyed.
         rule.onNodeWithTag("machine:laptop").performClick()
@@ -289,6 +291,7 @@ class AppScreensTest {
             ),
         )
         start(phone)
+        rule.onNodeWithTag("tab:sessions").performClick()
         rule.waitForIdle()
         rule.mainClock.autoAdvance = false
 
