@@ -73,6 +73,17 @@ mod tests {
     }
 
     #[test]
+    fn claude_with_no_login_is_recognised_as_it_really_says_it() {
+        // Seen on a real run of Claude Code 2.1.325 in an empty home (#875): its kind and its words.
+        let words = "Not logged in · Please run /login";
+        assert_eq!(
+            recognise("claude", Some("authentication_failed"), words),
+            Some(CLAUDE_LOGIN)
+        );
+        assert_eq!(recognise("claude", None, words), Some(CLAUDE_LOGIN));
+    }
+
+    #[test]
     fn any_other_reason_or_provider_is_not_recognised() {
         assert_eq!(recognise("claude", None, "claude ended: exit code 1"), None);
         assert_eq!(recognise("claude", None, "API Error: 529 Overloaded"), None);
