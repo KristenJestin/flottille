@@ -261,9 +261,9 @@ impl Sealed {
         self.boxes.iter().map(|sealed| &sealed.to)
     }
 
-    /// Whether the hub may keep it: a name of letters, digits, `.` and `_`, the size bound, and
-    /// the signature of a member's machine whose role may change settings (a runner's or a
-    /// controller's). Why not, in a sentence.
+    /// Whether the hub may keep it: a name of letters, digits, `.` and `_` among `SHARED_NAMES`, a
+    /// seal's key of 32 bytes, the size bound, and the signature of a member's machine whose role
+    /// may change settings (a runner's or a controller's). Why not, in a sentence.
     pub fn check_for_hub(&self, members: &Members) -> Result<(), String> {
         let named = (1..=NAME_LIMIT).contains(&self.name.len())
             && self
@@ -272,6 +272,12 @@ impl Sealed {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_');
         if !named {
             return Err("a value's name is 1 to 64 letters, digits, . or _".to_owned());
+        }
+        if !SHARED_NAMES.contains(&self.name.as_str()) {
+            return Err(format!("{} is no value of all machines", self.name));
+        }
+        if self.ephemeral.0.len() != 32 {
+            return Err("a value's seal holds a key of 32 bytes".to_owned());
         }
         if self.size() > SEALED_LIMIT {
             return Err(format!(
