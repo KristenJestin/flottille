@@ -39,8 +39,10 @@ const HANDSHAKES: usize = 256;
 const HANDSHAKES_FROM_ONE: usize = 2;
 /// The most of them from one IPv6 /48.
 const HANDSHAKES_FROM_SITE: usize = 8;
-/// How long a link let go (`Link::retire`) still answers: what the other side sent on it before
-/// it let it go too reaches this side within it, and is served or turned away, never lost.
+/// How long a link let go (`Link::retire`) stays open at the least: what the other side sent on
+/// it before it let it go too reaches this side within it, and is served or turned away. A frame
+/// still being read when the link closes, or a turn-away not yet sent, is lost: its sender reads
+/// a loss after it wrote the frame, and does not send it again.
 const GRACE: Duration = Duration::from_secs(1);
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
@@ -439,6 +441,9 @@ pub enum LinkError {
         said: String,
         reason: Option<String>,
     },
+    /// The other side let the link go for another to this machine (`Link::retire`), and turned
+    /// the message away unserved.
+    TurnedAway(String),
 }
 
 impl LinkError {
@@ -470,6 +475,12 @@ impl fmt::Display for LinkError {
             LinkError::Declined { peer, reason } => write!(f, "{peer} refused: {reason}"),
             LinkError::Closed(why) => f.write_str(why),
             LinkError::NotSent { said, .. } => f.write_str(said),
+            LinkError::TurnedAway(peer) => {
+                write!(
+                    f,
+                    "{peer} let this link go for another, and did not serve the message"
+                )
+            }
         }
     }
 }
@@ -928,8 +939,9 @@ pub struct Link {
 /// How this side ends a link: why, and what is under way on it meanwhile.
 #[derive(Default)]
 struct Ended {
-    /// Why this side closed the link, or lets it go.
-    why: std::sync::OnceLock<String>,
+    /// Why this side closed the link, or lets it go: a close said after the letting go is the
+    /// last word.
+    why: std::sync::Mutex<Option<String>>,
     /// Let go (`Link::retire`): it sends nothing more, and turns away what comes.
     retiring: AtomicBool,
     /// The messages under way on it, sent and served.
@@ -997,7 +1009,7 @@ impl Link {
                 Unanswered::Unsent(failure) => {
                     let reason = match &failure {
                         Failure::Closed(reason) => Some(reason.clone()),
-                        Failure::Lost(_) => self.ended.why.get().cloned(),
+                        Failure::Lost(_) => self.ended.why.lock().unwrap().clone(),
                     };
                     LinkError::NotSent {
                         said: self.lost(failure).to_string(),
@@ -1005,6 +1017,7 @@ impl Link {
                     }
                 }
                 Unanswered::Sent(failure) => self.lost(failure),
+                Unanswered::TurnedAway => LinkError::TurnedAway(self.name.clone()),
             })?;
         match serde_json::from_slice::<Answered>(&bytes) {
             Ok(Answered::Ok(value)) => Ok(value),
@@ -1044,12 +1057,8 @@ impl Link {
                     // A frame may carry a vault entry's secret (`share`): wiped once it is read.
                     let bytes = Zeroizing::new(bytes);
                     // Let go: what comes is turned away unserved, which its sender is told.
-                    if let Some(why) = self.retiring() {
-                        let busy = Busy::on(&self.ended);
-                        tokio::spawn(async move {
-                            reply.send_owned(answer(Err(why))).await;
-                            drop(busy);
-                        });
+                    if self.retiring().is_some() {
+                        reply.turn_away();
                         continue;
                     }
                     match self.judge(&bytes) {
@@ -1109,19 +1118,25 @@ impl Link {
 
     /// Closes the link, telling the other side why.
     pub fn close(&self, reason: &str) {
-        let _ = self.ended.why.set(reason.to_owned());
+        *self.ended.why.lock().unwrap() = Some(reason.to_owned());
+        self.ended.retiring.store(false, Ordering::SeqCst);
         self.conn.close(CLOSE_DONE, reason);
     }
 
-    /// Lets the link go for another to the same machine: it sends nothing more, and what comes on
-    /// it is turned away with `reason`, unserved; what is under way either way is finished. It
-    /// closes with `reason` once nothing is, `GRACE` at the soonest and `WAIT` at the latest.
-    /// Within a Tokio runtime.
+    /// Lets the link go for another to the same machine: it sends nothing more, and a frame that
+    /// comes on it is turned away unserved (`Reply::turn_away`); a request and its one answer
+    /// under way either way are finished. It closes with `reason` once none is, `GRACE` at the
+    /// soonest and `WAIT` at the latest: an answer given frame by frame (a client's request, a git
+    /// fetch) or a tunnel's connection is cut then. Within a Tokio runtime.
     pub fn retire(&self, reason: &str) {
-        if self.ended.why.set(reason.to_owned()).is_err() {
-            return;
+        {
+            let mut why = self.ended.why.lock().unwrap();
+            if why.is_some() {
+                return;
+            }
+            *why = Some(reason.to_owned());
+            self.ended.retiring.store(true, Ordering::SeqCst);
         }
-        self.ended.retiring.store(true, Ordering::SeqCst);
         let (conn, ended, reason) = (self.conn.clone(), self.ended.clone(), reason.to_owned());
         tokio::spawn(async move {
             let settled = async {
@@ -1149,7 +1164,7 @@ impl Link {
         self.ended
             .retiring
             .load(Ordering::SeqCst)
-            .then(|| self.ended.why.get().cloned())
+            .then(|| self.ended.why.lock().unwrap().clone())
             .flatten()
     }
 

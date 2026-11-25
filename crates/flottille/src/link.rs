@@ -223,7 +223,7 @@ fn unserved_for_another(error: &LinkError) -> bool {
             reason: Some(reason),
             ..
         } => reason == LINKED_ALREADY,
-        LinkError::Declined { reason, .. } => reason == LINKED_ALREADY,
+        LinkError::TurnedAway(_) => true,
         _ => false,
     }
 }
@@ -684,6 +684,8 @@ impl Remote {
                 // is turned away unserved, and goes on the link kept (`Remote::send`).
                 if !keep_new {
                     link.retire(LINKED_ALREADY);
+                    // Read still, so that what comes on it is turned away, never left unread.
+                    tokio::spawn(async move { while link.next().await.is_some() {} });
                     return;
                 }
                 old.retire(LINKED_ALREADY);
@@ -2143,7 +2145,8 @@ impl Remote {
     /// Sends `message` on `link`, a machine link this machine holds. When the two machines
     /// dialled each other at once and `link` is the one let go (`linked`), the message goes on
     /// the link kept, once, if it is known not to have been served: it was never written whole
-    /// on `link`, or the other machine turned it away unserved as "linked already". One that may
+    /// on `link`, or the other machine turned it away unserved. It waits `WAIT_KEPT` at most for
+    /// that link, said then as a machine that cannot be reached now. One that may
     /// have been served (its link cut once it was written, by a machine of before) is not sent
     /// again, and its failure is said as any other.
     pub(crate) async fn send(&self, link: &Link, message: &Message) -> Result<Value, LinkError> {

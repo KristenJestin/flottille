@@ -56,12 +56,15 @@ pub(crate) enum Unanswered {
     Unsent(Failure),
     /// Gone after the frame was written: the other side may have served it.
     Sent(Failure),
+    /// The other side turned the frame away unserved (`Reply::turn_away`).
+    TurnedAway,
 }
 
 impl Unanswered {
     pub(crate) fn failure(self) -> Failure {
         match self {
             Unanswered::Unsent(failure) | Unanswered::Sent(failure) => failure,
+            Unanswered::TurnedAway => Failure::Lost("the frame was turned away".to_owned()),
         }
     }
 }
@@ -494,9 +497,14 @@ impl Conn {
             .await
             .map_err(|error| Unanswered::Unsent(write_failure(error)))?;
         let _ = send.finish();
-        recv.read_to_end(limit)
-            .await
-            .map_err(|error| Unanswered::Sent(read_failure(error)))
+        recv.read_to_end(limit).await.map_err(|error| match error {
+            quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))
+                if code.into_inner() == u64::from(TURNED_AWAY) =>
+            {
+                Unanswered::TurnedAway
+            }
+            error => Unanswered::Sent(read_failure(error)),
+        })
     }
 
     /// Sends `frame` on a stream of its own, and gives the stream the other side answers on, read
@@ -646,6 +654,8 @@ impl Raw {
 
 /// The code a raw stream refused is reset with.
 const REFUSED: u32 = 1;
+/// The code the answer stream of a frame turned away unserved is reset with.
+const TURNED_AWAY: u32 = 2;
 
 impl AsyncRead for Raw {
     fn poll_read(
@@ -695,6 +705,13 @@ impl Reply {
 
     pub(crate) async fn send_owned(self, frame: Vec<u8>) {
         self.send(&frame).await;
+    }
+
+    /// Turns the frame away unserved: its answer stream is reset with `TURNED_AWAY`, which the
+    /// sender reads as such (`Unanswered::TurnedAway`), and a sender of before as a loss, never
+    /// as a refusal: it keeps what it would drop on a refusal, and sends it again.
+    pub(crate) fn turn_away(mut self) {
+        let _ = self.0.reset(TURNED_AWAY.into());
     }
 
     /// Writes one frame of an answer given frame by frame, a newline after it; `false` once the
