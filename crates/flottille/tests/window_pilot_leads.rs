@@ -1031,9 +1031,12 @@ fn the_title_and_ticket_of_a_row_of_leads_fade_as_they_come(cx: &mut TestAppCont
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         fading.push(seen(ElementId::Name("session-lead-k1-title".into())).unwrap_or(0.0));
+        // The room it unfolds in, which clips it while it moves; its own once it rests.
         widths.push(cx.update(|window, _| {
+            let id = lead_ticket_id("k1");
             window
-                .try_find(lead_ticket_id("k1"))
+                .try_find(ElementId::Name("session-lead-k1-tag-0-slot".into()))
+                .or_else(|| window.try_find(id))
                 .map_or(0.0, |found| f32::from(found.bounds().size.width))
         }));
     }
