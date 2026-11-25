@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use flottille_link::{
     Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
-    MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Role, Session,
-    Tls,
+    MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Role, Sealed,
+    Session, Tls,
 };
 use serde_json::{Value, json};
 
@@ -81,6 +81,8 @@ pub struct Control {
     /// last input was (the daemon's clock, in milliseconds), told to the hub in each session.
     here: Mutex<Option<(bool, Option<u64>)>>,
     pairing: tokio::sync::Mutex<Option<Pairing>>,
+    /// The values of all machines as the hub last sent them in this session: none before it did.
+    hub_shared: Mutex<Option<Vec<Sealed>>>,
     emit: Emit,
 }
 
@@ -102,8 +104,78 @@ impl Control {
             presence: Mutex::new(Vec::new()),
             here: Mutex::new(None),
             pairing: tokio::sync::Mutex::new(None),
+            hub_shared: Mutex::new(None),
             emit,
         }
+    }
+
+    /// The values of all machines this machine last checked (`crate::shared`), while it is a
+    /// member of the user's: none without a hub.
+    pub(crate) fn shared(&self) -> Option<crate::shared::Values> {
+        self.checked().ok()?;
+        Some(crate::shared::read(&self.folder))
+    }
+
+    /// The user's change of values of all machines made on this machine, checked already: kept,
+    /// then given to the hub now, or once a session to it is open again.
+    pub(crate) fn share(&self, text: &str) -> Result<(), String> {
+        let (_, members) = self.checked()?;
+        let changes = crate::shared::from_request(text, &members)?;
+        let changed = crate::shared::keep(&self.folder, changes);
+        self.give(&members, &changed);
+        Ok(())
+    }
+
+    /// The values `names`, sealed for every machine of `members`, given to the hub while a session
+    /// to one that keeps them is open; otherwise the next session gives them (`took_shared`).
+    fn give(&self, members: &Members, names: &[String]) {
+        let Some(asker) = self.asker.borrow().clone().filter(Asker::takes_shared) else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let values = crate::shared::read(&self.folder);
+        for name in names {
+            let Some(sealed) = values
+                .get(name)
+                .and_then(|kept| crate::shared::seal(name, kept, &self.key, members))
+            else {
+                continue;
+            };
+            let asker = asker.clone();
+            let name = name.clone();
+            runtime.spawn(async move {
+                match tokio::time::timeout(ASK_WAIT, asker.ask(Ask::Share { sealed })).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("flottille daemon: the hub did not keep {name}: {error}")
+                    }
+                    Err(_) => eprintln!("flottille daemon: the hub did not answer for {name}"),
+                }
+            });
+        }
+    }
+
+    /// What the hub holds of the values of all machines, taken: what is newer is kept, said as
+    /// `about.changed`, and what the hub lacks is given to it. `hub` is none to look again at what
+    /// it last sent in this session, once the members changed.
+    fn took_shared(&self, hub: Option<Vec<Sealed>>, members: &Members) {
+        let hub = {
+            let mut kept = self.hub_shared.lock().unwrap();
+            if let Some(hub) = hub {
+                *kept = Some(hub);
+            }
+            match kept.clone() {
+                Some(hub) => hub,
+                None => return,
+            }
+        };
+        let (changed, again) = crate::shared::took(&self.folder, &hub, &self.key, members);
+        if !changed.is_empty() {
+            (self.emit)("about.changed", json!({}));
+        }
+        self.give(members, &again);
     }
 
     /// What tells the hub the notices for the phones, while a session to a hub that takes them
@@ -811,6 +883,7 @@ async fn keep_session(
         }
     }
     let _forget = Forget(control);
+    *control.hub_shared.lock().unwrap() = None;
     // The asks on their way: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
     // The links to the other machines go through this session while it lasts.
@@ -829,6 +902,14 @@ async fn keep_session(
         });
         let _ = tokio::time::timeout(ASK_WAIT, asked).await;
     });
+    // The values of all machines, asked once a session of a hub that keeps them: it sends them at
+    // once, and at each change.
+    if asker.takes_shared() {
+        let shared = asker.clone();
+        telling.spawn(async move {
+            let _ = tokio::time::timeout(ASK_WAIT, shared.ask(Ask::Shared {})).await;
+        });
+    }
     // What this machine's clients said, told again to each session.
     let here = *control.here.lock().unwrap();
     if let Some((focused, last)) = here {
@@ -853,6 +934,8 @@ async fn keep_session(
                             }
                             control.set("connected", None);
                             control.took(members.as_ref(), &device.list);
+                            // A machine paired since is given the values sealed for it too.
+                            control.took_shared(None, &checked);
                             members = Some(checked);
                         }
                         Err(refused) => {
@@ -874,6 +957,12 @@ async fn keep_session(
                     Pushed::Notice { .. } => continue,
                     Pushed::Facts(facts) => {
                         control.told_facts(facts);
+                        continue;
+                    }
+                    Pushed::Shared(hub) => {
+                        if let Some(members) = &members {
+                            control.took_shared(Some(hub), members);
+                        }
                         continue;
                     }
                 }

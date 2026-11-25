@@ -15,7 +15,8 @@
 //! (600), written whole under a temporary name and renamed over the old one:
 //!
 //! ```json
-//! {"version": 1, "members": [/* the list's changes */], "devices": [/* `Facts` */]}
+//! {"version": 1, "members": [/* the list's changes */], "devices": [/* `Facts` */],
+//!  "shared": [/* `Sealed`: the values of all machines, opaque */]}
 //! ```
 //!
 //! A `hub.json` of before pair mode may hold a `setup_code`: it is read, and dropped at the next
@@ -29,8 +30,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use flottille_link::{
-    Action, Change, Facts, HubKey, ListError, Member, MemberList, Members, PairCode, PairSecret,
-    Proposed, PublicKey, Role,
+    Action, Change, Facts, HubKey, ListError, MOST_VALUES, Member, MemberList, Members, PairCode,
+    PairSecret, Proposed, PublicKey, Role, Sealed,
 };
 
 mod qr;
@@ -145,6 +146,10 @@ struct Stored {
     /// What the hub knows of each member's device, by its key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     devices: Vec<Facts>,
+    /// The values of all machines, sealed by the machines for each other: the latest of each
+    /// name, which the hub cannot read (`flottille_link::Sealed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared: Vec<Sealed>,
 }
 
 pub struct Hub<C: Clock = SystemClock> {
@@ -532,6 +537,37 @@ impl<C: Clock> Hub<C> {
         self.write_facts()
     }
 
+    /// A value of all machines sealed by a member's machine, kept when it is the latest of its
+    /// name (a copy of the same time replaces it: a machine sealed it again for a machine added
+    /// since). The hub reads its name, its time and its signature, never the value.
+    pub fn share(&mut self, sealed: Sealed) -> Result<bool, HubError> {
+        let members = self
+            .checked
+            .as_ref()
+            .ok_or_else(|| refused("the hub has no member yet"))?;
+        sealed.check_for_hub(members).map_err(refused)?;
+        let shared = &mut self.stored.shared;
+        match shared.iter().position(|kept| kept.name == sealed.name) {
+            Some(at) if shared[at].at > sealed.at => return Ok(false),
+            Some(at) if shared[at] == sealed => return Ok(false),
+            Some(at) => shared[at] = sealed,
+            None if shared.len() >= MOST_VALUES => {
+                return Err(refused(format!(
+                    "the hub keeps {MOST_VALUES} values of all machines at most"
+                )));
+            }
+            None => shared.push(sealed),
+        }
+        self.stored.setup_code = None;
+        write(&self.file, &self.stored)?;
+        Ok(true)
+    }
+
+    /// The values of all machines, as the machines sealed them.
+    pub fn shared(&self) -> &[Sealed] {
+        &self.stored.shared
+    }
+
     /// What the hub knows of each member's device.
     pub fn facts(&self) -> &[Facts] {
         &self.stored.devices
@@ -576,6 +612,7 @@ impl<C: Clock> Hub<C> {
                 .filter(|facts| checked.get(&facts.key).is_some())
                 .cloned()
                 .collect(),
+            shared: std::mem::take(&mut self.stored.shared),
             members,
         };
         write(&self.file, &stored)?;
