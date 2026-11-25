@@ -1142,7 +1142,12 @@ impl Inner {
                 .unwrap_or_default(),
             title: said("title"),
             excerpt: said("excerpt"),
-            request: 0,
+            // The row's own request, fixed now: Allow answers it or nothing, never another
+            // request that waits later in the same session.
+            request: match kind {
+                "request" => row["request"].as_u64().unwrap_or_default(),
+                _ => 0,
+            },
         });
         self.note(Note::Changed);
     }

@@ -247,8 +247,8 @@ pub struct NoticeView {
     /// row could not be read.
     pub title: String,
     pub excerpt: String,
-    /// For a request: the request of the session's tree that waits for the user, what Allow and
-    /// Deny answer; 0 when none waits (answered, not listed yet) or when several do.
+    /// For a request: the request the runner's row names, what Allow and Deny answer; 0 when the
+    /// row could not be read or names none.
     pub request: u64,
 }
 
@@ -502,19 +502,6 @@ impl View {
         }
         if self.dismissed.len() > NOTICES_KEPT {
             self.dismissed.remove(0);
-        }
-    }
-
-    /// The request of the session `session` of `machine`'s tree that waits for the user, when it
-    /// is the only one: a notice names its session, not its request, and Allow on a notification
-    /// must never answer another request than the one it says.
-    fn waiting_in(&self, machine: &str, session: &str) -> u64 {
-        let mut waiting = self.requests.iter().filter(|((of, _), held)| {
-            of == machine && self.root_of(machine, &held.agent) == session
-        });
-        match (waiting.next(), waiting.next()) {
-            (Some((_, held)), None) => held.number,
-            _ => 0,
         }
     }
 
@@ -936,18 +923,7 @@ impl View {
             asks: self.asks.values().cloned().collect(),
             tunnels: self.tunnels.clone(),
             tunnels_ended: self.tunnels_ended.clone(),
-            // A request's is read as the view is now: the one that waits, once it is listed.
-            notices: self
-                .notices
-                .iter()
-                .map(|notice| NoticeView {
-                    request: match notice.kind.as_str() {
-                        "request" => self.waiting_in(&notice.machine, &notice.session),
-                        _ => 0,
-                    },
-                    ..notice.clone()
-                })
-                .collect(),
+            notices: self.notices.clone(),
             dismissed: self.dismissed.clone(),
             said: self.said.clone(),
         }
