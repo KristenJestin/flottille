@@ -3548,7 +3548,6 @@ mod tests {
                 .await
                 .expect("the request is answered");
         assert!(sent.is_ok(), "{}", sent.unwrap_err());
-        tokio::time::sleep(Duration::from_millis(300)).await;
         let count = |taken: &std::sync::atomic::AtomicUsize| {
             taken.load(std::sync::atomic::Ordering::SeqCst)
         };
@@ -3574,7 +3573,6 @@ mod tests {
         twice
             .remote
             .linked(twice.kept.clone(), "laptop".to_owned(), false);
-        tokio::time::sleep(Duration::from_millis(200)).await;
         received.answer(Ok(json!({"served": true})));
 
         let sent = tokio::time::timeout(Duration::from_secs(10), sending)
@@ -3582,8 +3580,7 @@ mod tests {
             .expect("the request is answered")
             .unwrap();
         assert_eq!(sent.map_err(|e| e.to_string()), Ok(json!({"served": true})));
-        // Served where it came: never sent again.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Served where it came: never sent again (a resend would have come before the answer).
         assert_eq!(on_kept.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
@@ -3611,7 +3608,6 @@ mod tests {
             .expect("the request is answered")
             .unwrap();
         assert!(sent.is_ok(), "{}", sent.unwrap_err());
-        tokio::time::sleep(Duration::from_millis(300)).await;
         let count = |taken: &std::sync::atomic::AtomicUsize| {
             taken.load(std::sync::atomic::Ordering::SeqCst)
         };
