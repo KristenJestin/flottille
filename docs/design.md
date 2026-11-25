@@ -744,7 +744,8 @@ session an agent starts in another project is in Auto, never above its launcher'
 pilot door's `agent_start`, which an outside agent drives, starts in Auto; the session an
 extension starts for the user, a spec's writer or its developer, does not go through
 `agent.start` and stays in Auto; a launch from a tree in Full on another machine goes Auto there
-unless the user's signed switch raises it), so that a default of Full lends nothing to a tree that
+unless the user's signed switch raises it: **replaced by the rule (#1517)** ([Machines are one](remote.md#machines-are-one)), Full
+follows the tree there with no signed switch, kept until the code follows), so that a default of Full lends nothing to a tree that
 is not in Full. Choosing Full as the default
 says once, under the choice, what Full lends: a session's commands run as the user's, as in their
 terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its
@@ -1046,7 +1047,9 @@ with `exception`, its reason, saying exactly what the rule refuses and why it is
   blocks it, read on the forge when the card is made, with the protection bypassed. The agent's
   reason comes below, one line, then what else the gate says of the call. A child's ask goes to
   its parent first, as its other requests do. An ask on a call another machine answers is refused:
-  exceptions are each machine's own for now.
+  exceptions are each machine's own for now. **Replaced by the rule (#1517)** ([Machines are one](remote.md#machines-are-one)): the
+  call runs there through the code it runs through locally, its ask included. Kept until the code
+  follows.
 - Allowed, the call is done and the rule no longer stops **that session** until it ends (even to
   be resumed) or the user withdraws it, in the window (the session's rail, Exceptions) or with
   `flottille exception withdraw`. Other sessions and the session's own sub-agents still ask for
@@ -1255,7 +1258,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a new title fades in over the old one in
   the row and the header; a session an agent started says it in
-  its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
+  its page's header, "started by <agent>", not in the sidebar. **Replaced by the rule (#1517)**
+  ([Machines are one](remote.md#machines-are-one)): a session an agent launched, led or a child, on this machine or
+  another, belongs to its launcher and is shown in its launcher's Agents panel, not in the
+  sidebar, which holds the user's sessions only (those the user starts and those an agent handed
+  to the user); the look follows the prototype validated in its own issue. The led rows below are
+  kept until the code follows. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
   indented one step, tied to it by a connector (the line from the pilot turning into the row,
   ending there with no arrowhead); only a led row is indented, every root's title
@@ -1844,7 +1852,10 @@ NAT traversal, no relay of anyone else's), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and
-sharing vault entries and remote connections. The design is [`remote.md`](remote.md).
+sharing vault entries and remote connections. The design is [`remote.md`](remote.md), which
+opens with its rule, non-negotiable ("Machines are one", #1517): no distinction between the
+user's machines, every action running on its target's machine through the code it runs through
+locally, the caller a full stand-in there.
 
 ## 13. Milestones
 

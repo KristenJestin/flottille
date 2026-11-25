@@ -38,6 +38,70 @@ third party. The user runs one small program of Flottille's, the hub, which ever
 connection to; since 2026-11-20 the links between their devices go through it, encrypted end to
 end, so that nothing but the hub needs to be reachable ("The transport").
 
+## Machines are one
+
+**The rule of the remote, non-negotiable (decided with the maintainer on 2026-11-25, #1517; in
+`AGENTS.md` too).** An agent on another machine does exactly what it does on its own. Until then
+each remote feature added its own rule on top of one choice (decision 11 of "What is decided": a
+machine alone "can do only what an agent can", a caller of another machine a hollow stand-in), and
+the user met the result (#1512): the mode did not follow, a launched session asked leave to write
+to its launcher, removing a workspace made elsewhere asked leave even in Full, a remote child that
+reported stayed as a row nobody could remove. This rule replaces that choice. **A pull request or
+an issue that adds a rule of its own for another machine is sent back by the review.**
+
+### Machines
+
+1. **No distinction between machines.** A device the hub paired as a `runner` is the user, with
+   the user's powers. The hub, which signs who is a member and in which role, is the trust; the
+   pairing is the only check between machines. A `viewer` or a `controller` (a phone, a device
+   passing by) stays bounded by its role ("Roles").
+2. **Every action is caught and sent to the machine of its target**, and runs there through the
+   very code it runs through locally. No closed list of the tools that may cross: what an agent
+   may do on its own machine, it may do on another.
+3. **On the target's machine, the caller is a full stand-in**: the same mode as its tree, known as
+   the parent of what it launched, with all its tools. No leave is asked that one machine would
+   not ask; Full follows the tree without a signed switch.
+4. **On every machine, a local ghost of each session of another machine it shows**: its
+   conversation, its texts, its state, kept current from that machine's events. Opening it is
+   instant, as a local one; writing, answering or closing goes to its machine. The ghost only
+   reflects: the session's own machine alone decides.
+5. **A close follows the whole tree, across machines**: when a launcher ends, everything it
+   launched ends cleanly, wherever it runs.
+
+### Sessions
+
+6. **A session an agent launched belongs to that agent**: it is shown in its launcher's Agents
+   panel, on any machine, not in the sidebar. The user can open it, answer its questions and stop
+   it, as today; its launcher is the one who talks to it.
+7. **The sidebar holds the user's sessions only**: those the user starts, on any machine (with the
+   machine's mark), and those an agent handed to the user (a normal session, launched by an
+   agent).
+8. **One-shot and lasting launches look and behave the same**: a one-shot (a review, a child that
+   reports) ends by itself after its report; a lasting one (its own workspace, talked to, on any
+   machine) ends when its launcher closes it or ends. A child that reported is tidied away by
+   itself.
+
+### The window
+
+9. **One pass on the sidebar and the Agents panel**, from a prototype covering every case (local
+   and remote, one-shot and lasting, a review, a handed session, ended, a machine that is off); a
+   review takes the same look as the rest. The look of points 4 and 6 to 9 follows the prototype
+   validated in its own issue.
+
+### What stays
+
+One daemon per machine, each working alone when the hub is down; the hub and its end-to-end link;
+pairing and roles; code travelling as git bundles ("What travels"); what waits for a machine that
+is off, kept by the machine that sends it; tunnels; sharing (vault entries, connections); the
+phone's notifications. A machine changes only that it can be off.
+
+### What it replaces
+
+The parts of this design that say otherwise are marked **Replaced by the rule (#1517)** at their
+head, with one line of what the rule says instead. They are kept until the code follows (the
+parity test, then the rewrite of the layer between machines, then the window, each in its own
+issue), which removes them.
+
 ## The cases it serves
 
 1. **Work for the night.** A session has worked all afternoon on the computer. The user tells it
@@ -122,7 +186,12 @@ window, the command line, the tools and the docs.
    The user asks for it in words; there are no presets and no "solo" modes.
 10. **The agent knows nothing of phones or clients.** It asks (`ask`); Flottille routes: to its
     parent or pilot when reachable, to the user wherever they are otherwise.
-11. **The user's actions are signed by their device's key.** A machine may carry them, never forge
+11. **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a device the hub
+    paired as a `runner` is the user, with the user's powers; a machine sends any action of its
+    agents to the machine of its target, which runs it as locally. The user's requests stay signed
+    by their device, bounded by its role. Kept until the code follows.
+
+    **The user's actions are signed by their device's key.** A machine may carry them, never forge
     them. A machine on its own can do only what an agent can: start a session (judged by the gate),
     deliver a report, ask, forward a request.
 12. **Vault and Connections are shareable**, entry by entry, with the user's consent, end to end
@@ -180,6 +249,9 @@ window, the command line, the tools and the docs.
   equivalent): `client`, the user's requests (the methods of `protocol.md`, each signed by a
   device), and `machine`, the closed set of messages one machine sends another for its agents
   ("What a machine may send"). A message of one kind on the other is refused.
+  **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): no closed set of
+  messages; every action of an agent crosses and runs there through the code it runs through
+  locally. Kept until the code follows.
 - **The protocol is the daemon's** (`protocol.md`), unchanged in its framing: the same requests,
   answers and events, numbered, resumed with `events.watch {after}`. It was written for this.
 - **When the hub is down**, devices do not link to each other: the links open end, on both sides,
@@ -842,7 +914,9 @@ sends it in chunks.
 The command line takes `--machine <name>` on every command (`FLOTTILLE_MACHINE` too). The window
 shows the sessions of every machine in one list ("One list of every machine", decided by the
 maintainer on 2026-11-20); a led session on another machine appears under its pilot with the
-machine's name.
+machine's name. **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a session
+an agent launched is shown in its launcher's Agents panel, on any machine, not in the sidebar. Kept
+until the code follows.
 
 ### Pictures sent to another machine
 
@@ -926,11 +1000,21 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   members: a machine removed, or added again as another role, loses its list. A list that names an
   id twice or whose pilots make a cycle is refused. There is no rate limit on `sessions` (a
   follow-up).
+
+  **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): each machine keeps a
+  local ghost of every session of another machine it shows (its conversation, its texts, its state,
+  kept current from that machine's events): opening it is instant, as a local one; writing,
+  answering and closing go to its machine. Kept until the code follows.
+
   Reading, writing, answering, Allow/Deny and Stop work in any session through its machine: opening
   a session of another machine shows its page, read on that machine's own connection, every request
   signed for it and carried by this machine's daemon, its conversation watched live as a request carried
   is ("Requests from another machine's clients").
-- **Led from another machine.** A session led by an agent of another machine (`agent_launch`
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a session an agent
+  launched is in its launcher's Agents panel, on any machine, never under its launcher's row in the
+  sidebar; the look follows the prototype validated in its own issue. Kept until the code follows.
+
+  **Led from another machine.** A session led by an agent of another machine (`agent_launch`
   `led` with `machine`) shows under its pilot's row, with its machine's mark, on every window, as a
   led session of the same machine does (#1340). The list's `pilot` is a session of the same list
   only (an id of another machine there would make every machine of before refuse the whole list,
@@ -952,7 +1036,11 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   would close it, and any row it still finds in no walk from a root it draws as a root, so a lying
   `pilots` never hides, moves or duplicates a row. A row whose line gains its machine's mark, once
   its pilot's list comes, fades from one line to the other.
-- **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a local ghost keeps each
+  shown session's conversation, texts and state, not a light copy without its conversation; what the
+  user sends while its machine is off waits as "What stays" says. Kept until the code follows.
+
+  **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
   hollow ring saying `server · offline since 22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
   its conversation, the copy replaced whenever that machine lists again, kept across a restart.
@@ -978,6 +1066,11 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   close waits replaces the one waiting. A close kept 30 days is dropped, as any message kept.
 
 ## What a machine may send
+
+**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): no closed list of what may
+cross: every action of an agent is sent to the machine of its target and runs there through the very
+code it runs through locally, the caller a full stand-in. The list below, and "Nothing else" after
+it, describe the code as it is. Kept until the code follows.
 
 On the `machine` side of a link, a machine sends only these messages, signed with its machine key,
 each naming the agent of its own that it acts for, and the receiving machine checks each against
@@ -1020,7 +1113,12 @@ local child's work; nothing moves your branch.*
 - **Who**: as today. `led` and `handed` from a root only; `child` from any agent that launches
   children. A led session on the computer may start a child on the server; a led session on the
   server is a root there, and may start its own children there.
-- **A child there is a child** (#1274). On the machine it runs on, a `child` an agent of another
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the caller is a full
+  stand-in there, known as the parent of what it launched: a child of another machine has its
+  parent, and is no child without one; nothing is refused it that a child here is not refused, and
+  its tree's mode is its own. Kept until the code follows.
+
+  **A child there is a child** (#1274). On the machine it runs on, a `child` an agent of another
   machine launched has no parent, and is a child all the same: a child's tools (none of the
   project's actions, no `session_*`, no `agent_*` at the depth limit), and its parent's depth plus
   one, so the depth limit holds across machines. The launch carries the caller's `depth`, left out
@@ -1179,7 +1277,12 @@ local child's work; nothing moves your branch.*
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
   place, which here is the same branch on another machine.
-- **Judged by the receiving machine's gate**, every time, child or led, as a session launch is
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a launch is judged there
+  as the same launch is on one machine (a child launch unjudged, a session launch as a local one),
+  not because "a machine alone must not be able to start anything unjudged". How a held launch is
+  answered stays. Kept until the code follows.
+
+  **Judged by the receiving machine's gate**, every time, child or led, as a session launch is
   (`tools.md`, "Sessions an agent starts"): the words name the machine (`Start a session led by
   agent … of pc on this machine, in a new workspace on feat/export with its uncommitted changes:
   "Finish the export"`), the brief whole. The receiving machine judges because its quota, its
@@ -1223,7 +1326,11 @@ local child's work; nothing moves your branch.*
   for its user in every mode but Full, never the judge's (`this agent is a session another agent
   started for the user, …`). A `led` or `handed` session a machine started for an agent of
   another is, to its own gate, a session an agent started: a session it starts comes to the user.
-- **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the mode is the caller's
+  tree's, Full included: Full follows the tree, with no signed switch and no 12 hours. Kept until
+  the code follows.
+
+  **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
   with the launch, and that switch is less than 12 hours old on the receiving machine's clock.
@@ -1267,7 +1374,12 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   two machines list is refused, naming both: ids are each machine's own. A child an agent of
   another machine launched is a child there too, never listed nor called as a session.
   A session the caller started there, named by its title, is called as by its id.
-- **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the caller is a full
+  stand-in there, with its tree's mode, known as the parent of what it launched, with all its tools,
+  not a hollow `<caller>@<machine's key>` given five: no leave is asked that one machine would not
+  ask (a launched session writing to its launcher included). Kept until the code follows.
+
+  **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
   is (`call`, signed with its machine key) and judges nothing of it. The receiving machine stands
   the caller in by an agent of its own, `<caller>@<machine's key>` (never an id of its own, never
   listed, shown as `agent <id> of pc`), in the caller's project by its name and in its tree's mode,
@@ -1294,7 +1406,11 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
   the members, with their leaves.
-- **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): Full follows the tree,
+  with no signed switch: a machine raises nothing, it carries the tree's own mode. Kept until the
+  code follows.
+
+  **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
   launch's ("Starting a session on another machine"): a machine alone cannot raise it.
 - **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
   sessions stay listed with its state (`on server, offline since 22:14`), and a call is refused at
@@ -1353,6 +1469,10 @@ parent, …`), each naming the ref they came into. A child that reported and end
 nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
 to be told.
 
+**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the removal runs as the
+same removal on one machine: what still exists on the launcher's machine is no loss, and nothing
+waits for the user, in Full or not, that would not wait there. Kept until the code follows.
+
 **The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
 workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
 tool's `remove` takes the same optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
@@ -1375,6 +1495,11 @@ the workspace it works in does. Only a root removes one, as on one machine (a ch
 caller removes no other workspace, of any name, and `machine` goes with no other action
 (`refused: with machine, workspace only removes the workspace there of a session or child you
 started: …`).
+
+**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a session an agent
+launched, on any machine, is in its launcher's Agents panel, one-shot and lasting alike, and a child
+that reported is tidied away by itself; the look follows the prototype validated in its own issue.
+Kept until the code follows.
 
 **Built (#819), in the window.** While the window shows this machine, each led session and each
 child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
@@ -1477,7 +1602,11 @@ As built (#818):
   pictures, the ask card, the requests with Allow and Deny, the mode, Stop, the tree read only. A
   phone is a `controller` by default; as a `viewer`, the composer, the answers and the controls are
   not drawn. A project's settings come later.
-- **The navigation, decided**: a bottom bar with three destinations. **Needs you**: each request
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): led sessions are not
+  indented under their pilot in **Sessions**; a session an agent launched is its launcher's. Kept
+  until the code follows.
+
+  **The navigation, decided**: a bottom bar with three destinations. **Needs you**: each request
   and question as a card answered in place (Allow and Deny on the card, the whole call in sight).
   **Sessions**: the window's sidebar, each machine, its projects folded or not, their sessions in one
   list newest first (#1441: a session that reports never moves), led sessions indented under their
@@ -1557,7 +1686,11 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   and its key's fingerprint, read from the code, no network); the user confirms this phone's name
   (the model's) and its role (**Control** or **View only**); the result says the role the hub gave.
   A refused code or a refused join stays on its screen, said.
-- **The screens**: a bottom bar, **Sessions** (the window's sidebar, design B, #1441: each machine
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the Sessions list, as
+  the window's sidebar, holds the user's sessions only; a session an agent launched is its
+  launcher's, never a row under its pilot there. Kept until the code follows.
+
+  **The screens**: a bottom bar, **Sessions** (the window's sidebar, design B, #1441: each machine
   in the list's order, said once, its header carrying its **mark** (#1249: its icon in its colour
   from the member list, a badge of one shape per state: a filled dot online, a hollow ring offline
   with the icon greyed, an amber dot with an arrow for an update, a dashed ring unknown) and its
@@ -2129,7 +2262,11 @@ on a real phone, by hand, and reported.
   could read a key a client keeps in an unlocked keyring. A device key read that way can sign what
   its role allows. Roles bound what a device may do; a phone that asks for its unlock before a base
   answer comes later.
-- **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
+- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): no signed switch to Full
+  and no twelve hours: Full follows the tree across machines. What stays true: code run in Full can
+  sign what this device's role allows. Kept until the code follows.
+
+  **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
   nothing (`docs/tools.md`, "In Full, a run is the user's own"): it reaches the keyring, and in it
   the `Flottille: device` key that signs the user's requests to every machine, and Flottille's
   state folder. Code it runs can sign what this device's role allows, a switch to Full among
@@ -2145,6 +2282,23 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the entries below that
+give another machine a rule of its own, each kept until the code follows: a child of another
+machine without a parent and what is refused it (#1274's depth at every open, #1275's child
+counted as a session an agent started and session that cannot be detached, #1304's refusals and
+depth); the hollow stand-in (#1250's leave that the writer's end does not take, a led session asking leave to
+write to its pilot, a held call's `<caller>@<key>`, a stand-in's folder that does not exist;
+#1263's reach to one machine only and stand-ins kept by an unread member list; #1361's cap of a
+pilot); the signed switch to Full and its 12 hours (#1250's switch for a call; the list after
+"The hub's hello is signed": a launch judged there, child as led, Full only with the switch, the
+switch, its root and its tree; and, as built, the kept switch a launch sends, Full "with a switch it
+verified", the user's switch kept by the caller's machine); the closed list of calls a caller may
+make, `review` for one call alone among them ("Across machines", #1279); #1272's led session whose
+pilot is a stand-in and a row under its pilot; the rows of another machine's launches (a reported
+child that stays under its pilot, rows of the tree that nothing offers to end, #1280); #1278's
+removal held in Full when it would lose what the launcher's machine still has; and #1441's phone
+row of a session led from another machine.
 
 - **Settings for all machines are sealed to the machines' own keys** (#1330): each machine's
   Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
