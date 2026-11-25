@@ -434,6 +434,9 @@ pub struct Session {
     /// What a waiting session waits for, in a few words, for its row's second line:
     /// `waits for checks of #1`, `out of quota until 13:00`; empty unless it waits.
     pub waits: String,
+    /// What it needs of the user, when its mark says it does and this machine knows what:
+    /// `a permission`, `a question`.
+    pub needs: Option<&'static str>,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
     /// How many of them have not ended: what ending the session ends.
@@ -475,6 +478,9 @@ pub struct Session {
     /// Its root is a child an agent of another machine launched here, that agent by name
     /// (`agent b1 of pc`): only that agent writes to it, never the user.
     pub child_of: Option<String>,
+    /// A child its pilot's tree launched on another machine: its row sits under its pilot's, but
+    /// it is no session its pilot leads.
+    pub child: bool,
     /// What it is about, as the daemon derives it: `None` while it held nothing.
     pub subject: Option<Subject>,
     /// The user named it (Rename…): its title stays on its row's first line.
@@ -1208,10 +1214,11 @@ impl Snapshot {
                     None => target["title"].as_str().unwrap_or_default().to_owned(),
                 });
             if let Some(run) = &run {
-                followed
-                    .entry(root_of(&parents, agent))
-                    .or_default()
-                    .push(run.clone());
+                let runs = followed.entry(root_of(&parents, agent)).or_default();
+                // A run followed twice, by its root and a sub-agent, is one run it follows.
+                if !runs.contains(run) {
+                    runs.push(run.clone());
+                }
             }
             let paused = following.is_some() && subscription["paused"] == true;
             // What it waits for, said once: the tooltip puts "Waiting: " before it, the row's
@@ -1309,12 +1316,20 @@ impl Snapshot {
                         None => "Needs you".to_owned(),
                     },
                 };
+                let needs = match mark {
+                    Some(AgentState::NeedsYou) => asks
+                        .iter()
+                        .find(|(session, _)| *session == id)
+                        .map(|(_, what)| *what),
+                    _ => None,
+                };
                 Session {
                     title: session_title(agent, &id, answers.briefs.get(&id)),
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
                     mark_said,
+                    needs,
                     waits,
                     agents: size.max(1),
                     live,
@@ -1348,6 +1363,7 @@ impl Snapshot {
                     elsewhere: None,
                     tag: None,
                     child_of: child_of(agent),
+                    child: false,
                     subject: Subject::of(&agent["subject"]),
                     renamed: agent["titled_by"] == "user",
                     held: held.remove(id.as_str()).unwrap_or_default(),
@@ -1582,6 +1598,7 @@ impl Snapshot {
                 mark,
                 mark_said: mark.map(|_| said(&state)).unwrap_or_default(),
                 waits: String::new(),
+                needs: None,
                 agents: 1,
                 live: 1,
                 resumable: false,
@@ -1613,6 +1630,7 @@ impl Snapshot {
                 }),
                 tag: None,
                 child_of: None,
+                child: launched.kind == "child",
                 subject: None,
                 renamed: false,
                 held: Vec::new(),
@@ -1700,6 +1718,7 @@ impl Snapshot {
                         })
                         .unwrap_or_default(),
                     waits: String::new(),
+                    needs: None,
                     agents: 1,
                     live: 1,
                     resumable: false,
@@ -1749,6 +1768,7 @@ impl Snapshot {
                     }),
                     tag: machine.map(str::to_owned),
                     child_of: None,
+                    child: false,
                     subject: None,
                     renamed: false,
                     held: Vec::new(),

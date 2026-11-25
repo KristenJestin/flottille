@@ -3001,17 +3001,18 @@ impl SessionRow {
             .pull_shown
             .clone()
             .filter(|_| self.pull.is_some() || shown > 0.0);
-        // What it waits for unfolds and fades in after the place, and folds away when it stops.
+        // What it waits for unfolds and fades in after the place, and folds away when it stops
+        // or when a pilot's summary takes its place.
+        let says_waits = !self.waits.is_empty() && self.summary.is_none();
         let waiting = fade(
             ElementId::Name(format!("session-waits-fade-{}", self.id).into()),
-            !self.waits.is_empty(),
+            says_waits,
             PANEL,
             window,
             cx,
         );
-        let waits = Some(self.waits_shown.clone()).filter(|waits| {
-            !waits.is_empty() && (!self.waits.is_empty() || waiting > 0.0) && self.summary.is_none()
-        });
+        let waits = Some(self.waits_shown.clone())
+            .filter(|waits| !waits.is_empty() && (says_waits || waiting > 0.0));
         // What a pilot says of the sessions it leads takes that place: it unfolds and fades in
         // after the place, its words fading as they change, and folds away once it leads none.
         let summing = fade(

@@ -7,14 +7,16 @@
 
 use std::collections::HashMap;
 
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Icon, ListCard, ListRow, Listing, MachineMark, MarkSize, Type as _, changing, icon, palette,
-    presence_of, section_label, space,
+    Icon, ListCard, ListRow, Listing, MachineMark, MarkSize, Type as _, changing, fade, icon,
+    palette, presence_of, section_label, space,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, WeakEntity, div, px,
+    IntoElement, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
 use crate::machines::shade;
@@ -100,6 +102,17 @@ pub struct LedLine {
     pub waits: String,
 }
 
+/// Whether `session` is one its pilot `pilot` leads, as its summary counts and its Leads lists:
+/// live, and neither a child its tree launched on another machine nor one in another project,
+/// which sits among that project's rows and says who leads it there.
+fn led_by(session: &Session, pilot: &str) -> bool {
+    session.pilot.as_deref() == Some(pilot)
+        && session.id != pilot
+        && !session.ended
+        && !session.led_from_elsewhere
+        && !session.child
+}
+
 /// The rows of Leads of the pilot `pilot`: each live session it leads, in launch order, after
 /// its launches held for the user, which come first as the newest.
 pub fn led_lines<'a>(
@@ -108,14 +121,7 @@ pub fn led_lines<'a>(
     held: &[HeldLaunch],
     homes: &[Home],
 ) -> Vec<LedLine> {
-    let mut led: Vec<&Session> = sessions
-        .into_iter()
-        // One it leads in another project sits among that project's rows, which say who leads
-        // it, and its pilot's summary does not count it: neither does Leads.
-        .filter(|s| {
-            s.pilot.as_deref() == Some(pilot) && s.id != pilot && !s.ended && !s.led_from_elsewhere
-        })
-        .collect();
+    let mut led: Vec<&Session> = sessions.into_iter().filter(|s| led_by(s, pilot)).collect();
     led.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     led.dedup_by(|a, b| a.id == b.id);
     let held = held.iter().map(|launch| {
@@ -148,6 +154,9 @@ pub fn led_lines<'a>(
     });
     let led = led.into_iter().map(|session| {
         let subject = session.subject.as_ref().filter(|s| s.kind == "ticket");
+        // A session of another machine's list is known here by its title and its state only:
+        // its place, its pull request and its runs are left unsaid, never made up.
+        let known = session.elsewhere.is_none();
         let place = session.place.clone().unwrap_or_else(|| "main".to_owned());
         let machine = session
             .elsewhere
@@ -156,11 +165,9 @@ pub fn led_lines<'a>(
             .map(|there| there.machine.as_str())
             .or(session.tag.as_deref());
         let waits = match session.mark {
-            Some(AgentState::NeedsYou) => match session.mark_said.strip_prefix("Needs you") {
-                Some(what) if !what.trim_start_matches(':').trim().is_empty() => {
-                    format!("needs you: {}", what.trim_start_matches(':').trim())
-                }
-                _ => "needs you".to_owned(),
+            Some(AgentState::NeedsYou) => match session.needs {
+                Some(what) => format!("needs you: {what}"),
+                None => "needs you".to_owned(),
             },
             Some(AgentState::Waiting) if !session.waits.is_empty() => session.waits.clone(),
             Some(AgentState::Waiting) => "waits".to_owned(),
@@ -176,11 +183,11 @@ pub fn led_lines<'a>(
                 .and_then(|s| s.title.clone())
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| session.title.clone()),
-            place: Some(match session.runs.is_empty() {
+            place: known.then(|| match session.runs.is_empty() {
                 true => place,
                 false => format!("{place} · {}", session.runs),
             }),
-            known: true,
+            known,
             machine: machine
                 .and_then(|machine| homes.iter().find(|home| home.machine == machine))
                 .cloned()
@@ -203,21 +210,72 @@ pub fn led_lines<'a>(
     held.chain(led).collect()
 }
 
-/// What each pilot says of the sessions it leads, by its row id.
+/// What each pilot says of the sessions it leads, by its row id, from the tree's lines alone, as
+/// every client says it (`flottille_core::leads`): the same sessions its Leads lists, wherever
+/// their rows sit, a check red when the pull request its line says has failing checks. A pilot
+/// that leads none has none.
 pub fn summaries<'a>(
-    _sessions: impl IntoIterator<Item = &'a Session>,
+    sessions: impl IntoIterator<Item = &'a Session>,
 ) -> HashMap<String, Vec<flottille_core::leads::Part>> {
-    HashMap::new()
+    let sessions: Vec<&Session> = sessions.into_iter().collect();
+    let mut led: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for session in &sessions {
+        if let Some(pilot) = session.pilot.as_deref()
+            && led_by(session, pilot)
+            && !led
+                .get(pilot)
+                .is_some_and(|counted| counted.iter().any(|s| s.id == session.id))
+        {
+            led.entry(pilot).or_default().push(session);
+        }
+    }
+    sessions
+        .iter()
+        .filter_map(|pilot| {
+            let counted: Vec<flottille_core::leads::Led> = led
+                .get(pilot.id.as_str())?
+                .iter()
+                .map(|session| flottille_core::leads::Led {
+                    needs_you: session.mark == Some(AgentState::NeedsYou),
+                    red: session
+                        .subject
+                        .as_ref()
+                        .and_then(|subject| subject.pull.as_ref())
+                        .is_some_and(|pull| pull.mark.as_deref() == Some("failing")),
+                    // Nothing says who blocks a session yet (#1451).
+                    blocked_by: Vec::new(),
+                })
+                .collect();
+            let summary = flottille_core::leads::summary(&counted, pilot.held.len())?;
+            Some((pilot.id.clone(), summary))
+        })
+        .collect()
 }
 
-/// What the section holds and draws: its rows as they come, fold and slide, and the mark of
-/// each, which fades from a state to the next.
+/// [`summaries`] of every session of `snapshot`, this machine's and the other machines'.
+pub fn summaries_of(
+    snapshot: &crate::model::Snapshot,
+) -> HashMap<String, Vec<flottille_core::leads::Part>> {
+    summaries(snapshot.sessions.iter().chain(&snapshot.elsewhere))
+}
+
+/// How high the card of Leads grows before its rows scroll inside it: about four rows, so that
+/// a pilot leading many sessions leaves its conversation in view.
+const CARD_HEIGHT: f32 = 240.;
+
+/// What the section holds and draws: its rows as they come, fold and slide, the mark of each,
+/// which fades from a state to the next, and the last words of what fades out.
 #[derive(Default)]
 pub struct Leads {
     rows: Listing<LedLine>,
     marks: HashMap<String, Entity<StateIcon>>,
     statuses: HashMap<String, Entity<Status>>,
     shown: usize,
+    /// The last count it said, which its title keeps while the section folds away.
+    count_shown: usize,
+    /// The last runs each row said, drawn while they fade out.
+    runs_shown: HashMap<String, Vec<String>>,
+    scroll: ScrollHandle,
 }
 
 impl Leads {
@@ -228,15 +286,6 @@ impl Leads {
 
     pub fn is_empty(&self) -> bool {
         self.shown == 0
-    }
-
-    /// The rows it lists, the ones folding away included.
-    pub fn lines(&self) -> Vec<LedLine> {
-        self.rows
-            .rows()
-            .filter(|row| !row.placement.is_gone())
-            .map(|row| row.value.clone())
-            .collect()
     }
 
     /// Takes the rows as they are now: a new one unfolds, a missing one folds away, one that
@@ -258,28 +307,41 @@ impl Leads {
                     self.marks.insert(line.key.clone(), mark);
                 }
             }
+            if !line.runs.is_empty() {
+                self.runs_shown.insert(line.key.clone(), line.runs.clone());
+            }
         }
         self.shown = lines.len();
+        if self.shown > 0 {
+            self.count_shown = self.shown;
+        }
         let reduce = cx.reduce_motion();
         self.rows.sync(
             lines.into_iter().map(|line| (line.key.clone(), line)),
             now,
             reduce,
         );
+        // A row gone for good takes its mark and its words with it.
+        let listed: std::collections::HashSet<String> =
+            self.rows.rows().map(|row| row.value.key.clone()).collect();
+        self.marks.retain(|key, _| listed.contains(key));
+        self.statuses.retain(|key, _| listed.contains(key));
+        self.runs_shown.retain(|key, _| listed.contains(key));
     }
 
-    /// The section: its title with its count, then its card of rows. It unfolds when the pilot
-    /// first leads something and folds away once it leads nothing.
+    /// The section: its title with its count, then its card of rows, which scrolls past a few.
+    /// It unfolds when the pilot first leads something and folds away once it leads nothing,
+    /// its title saying the last count meanwhile.
     pub fn section(
         &self,
         shell: WeakEntity<Shell>,
-        _window: &mut gpui_kit::Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         let p = palette(cx);
-        let count = self.shown;
-        let present = (count > 0).then(|| SharedString::from(format!("{LEADS} {count}")));
-        let mut card = ListCard::new("session-leads-card");
+        let present =
+            (self.shown > 0).then(|| SharedString::from(format!("{LEADS} {}", self.shown)));
+        let mut card = ListCard::new("session-leads-card").scrolling(&self.scroll, px(CARD_HEIGHT));
         for listed in self.rows.rows() {
             let line = listed.value;
             let key = line.key.as_str();
@@ -290,89 +352,75 @@ impl Leads {
                 .items_center()
                 .gap_x(space::MD)
                 .text_size(px(11.5))
+                .text_color(p.faint);
+            let place = SharedString::from(line.place.clone().unwrap_or_default());
+            let machine = line.machine.as_ref().map(|home| {
+                MachineMark::new(
+                    lead_machine_id(key),
+                    crate::glyphs::device(&home.icon),
+                    shade(&home.colour),
+                    home.presence(),
+                    home.said(),
+                )
+                .size(MarkSize::Small)
+            });
+            let glyph = line.place.is_some().then(|| {
+                icon(match line.session {
+                    Some(_) => Icon::Branch,
+                    None => Icon::Clock,
+                })
+                .size(px(11.))
                 .text_color(p.faint)
-                .child(
-                    div()
-                        .id(lead_place_id(key))
-                        .aria_label(SharedString::from(line.place.clone().unwrap_or_default()))
-                        .flex()
-                        .items_center()
-                        .gap(space::XS)
-                        .min_w_0()
-                        .children(line.machine.as_ref().map(|home| {
-                            MachineMark::new(
-                                lead_machine_id(key),
-                                crate::glyphs::device(&home.icon),
-                                shade(&home.colour),
-                                home.presence(),
-                                home.said(),
-                            )
-                            .size(MarkSize::Small)
-                        }))
-                        .child(
-                            icon(match line.session {
-                                Some(_) => Icon::Branch,
-                                None => Icon::Clock,
-                            })
-                            .size(px(11.))
-                            .text_color(p.faint),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(SharedString::from(line.place.clone().unwrap_or_default())),
-                        )
-                        .test_support(),
-                );
-            let pull = match &line.pull {
-                Some(pull) => {
-                    let (mark, ink, said) = match pull.mark.as_deref() {
-                        Some("passing") => (Some(Icon::Check), p.ok, ", checks passing"),
-                        Some("failing") => (Some(Icon::Close), p.fail, ", checks failing"),
-                        Some("stopped") => (Some(Icon::Close), p.faint, ", checks stopped"),
-                        Some(_) => (Some(Icon::Running), p.run, ", checks pending"),
-                        None => (None, p.faint, ""),
-                    };
-                    let said = SharedString::from(format!("#{}{said}", pull.number));
-                    div()
-                        .id(lead_pull_id(key))
-                        .aria_label(said.clone())
-                        .flex()
-                        .items_center()
-                        .gap(space::XS)
-                        .child(SharedString::from(format!("#{}", pull.number)))
-                        .child(changing(
-                            ElementId::Name(format!("session-lead-checks-{key}").into()),
-                            said,
-                            move |_| match mark {
-                                Some(mark) => {
-                                    icon(mark).size(px(11.)).text_color(ink).into_any_element()
-                                }
-                                None => div().into_any_element(),
+            });
+            below = below.child(
+                div()
+                    .id(lead_place_id(key))
+                    .aria_label(place.clone())
+                    .flex()
+                    .items_center()
+                    .gap(space::XS)
+                    .min_w_0()
+                    .children(machine)
+                    .children(glyph)
+                    .when(line.place.is_some(), |d| {
+                        d.child(changing(
+                            ElementId::Name(format!("session-lead-place-change-{key}").into()),
+                            place,
+                            |place| {
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(place)
+                                    .into_any_element()
                             },
                         ))
-                        .test_support()
-                        .into_any_element()
-                }
-                None if line.session.is_some() => div()
-                    .id(lead_pull_id(key))
-                    .aria_label("no pull request yet")
-                    .child("no pull request yet")
-                    .test_support()
-                    .into_any_element(),
-                None => div()
-                    .id(lead_pull_id(key))
-                    .aria_label("no session yet")
-                    .child("no session yet")
-                    .test_support()
-                    .into_any_element(),
+                    })
+                    .test_support(),
+            );
+            if line.known {
+                below = below.child(pull_words(line, &p));
+            }
+            // What it follows unfolds and fades in after the rest, its words fading as they
+            // change, and fades out once it follows nothing.
+            let following = fade(
+                ElementId::Name(format!("session-lead-runs-fade-{key}").into()),
+                !line.runs.is_empty(),
+                PANEL,
+                window,
+                cx,
+            );
+            let runs = match line.runs.is_empty() {
+                false => Some(line.runs.join(" · ")),
+                true => self
+                    .runs_shown
+                    .get(key)
+                    .filter(|_| following > 0.0)
+                    .map(|runs| runs.join(" · ")),
             };
-            below = below.child(pull);
-            if !line.runs.is_empty() {
-                let runs = SharedString::from(line.runs.join(" · "));
+            if let Some(runs) = runs {
+                let runs = SharedString::from(runs);
                 below = below.child(
                     div()
                         .id(lead_runs_id(key))
@@ -380,8 +428,13 @@ impl Leads {
                         .flex()
                         .items_center()
                         .gap(space::XS)
+                        .opacity(following)
                         .child(icon(Icon::Running).size(px(11.)).text_color(p.faint))
-                        .child(runs)
+                        .child(changing(
+                            ElementId::Name(format!("session-lead-runs-change-{key}").into()),
+                            runs,
+                            |runs| div().child(runs).into_any_element(),
+                        ))
                         .test_support(),
                 );
             }
@@ -433,7 +486,12 @@ impl Leads {
             }
             card = card.item(lead_item_id(key), listed.placement, row);
         }
-        let title = section_label(&format!("{LEADS} {count}"), cx).into_any_element();
+        // The count's words fade as it changes; while the section folds away, it says the last
+        // one, as `presence_of` hands back its last words (the kit's label needs the app, which
+        // the closure does not have).
+        let count = SharedString::from(format!("{LEADS} {}", self.count_shown));
+        let label = section_label(&count, cx).into_any_element();
+        let title = changing("session-leads-count", count, move |_| label).into_any_element();
         presence_of("session-leads-presence", present, move |said| {
             div()
                 .id(leads_id())
@@ -449,4 +507,58 @@ impl Leads {
         })
         .into_any_element()
     }
+}
+
+/// A row's pull request and its checks, `#12, checks failing`, or that it has none yet; its
+/// words fade as they change.
+fn pull_words(line: &LedLine, p: &gpui_design_system::Palette) -> AnyElement {
+    let key = line.key.as_str();
+    let (said, number, mark, ink) = match &line.pull {
+        Some(pull) => {
+            let (mark, ink, checks) = match pull.mark.as_deref() {
+                Some("passing") => (Some(Icon::Check), p.ok, ", checks passing"),
+                Some("failing") => (Some(Icon::Close), p.fail, ", checks failing"),
+                Some("stopped") => (Some(Icon::Close), p.faint, ", checks stopped"),
+                Some(_) => (Some(Icon::Running), p.run, ", checks pending"),
+                None => (None, p.faint, ""),
+            };
+            (
+                format!("#{}{checks}", pull.number),
+                format!("#{}", pull.number),
+                mark,
+                ink,
+            )
+        }
+        None if line.session.is_some() => (
+            "no pull request yet".to_owned(),
+            "no pull request yet".to_owned(),
+            None,
+            p.faint,
+        ),
+        None => (
+            "no session yet".to_owned(),
+            "no session yet".to_owned(),
+            None,
+            p.faint,
+        ),
+    };
+    let said = SharedString::from(said);
+    let id = lead_pull_id(key);
+    changing(
+        ElementId::Name(format!("session-lead-pull-change-{key}").into()),
+        said.clone(),
+        move |said| {
+            div()
+                .id(id)
+                .aria_label(said)
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .child(SharedString::from(number))
+                .children(mark.map(|mark| icon(mark).size(px(11.)).text_color(ink)))
+                .test_support()
+                .into_any_element()
+        },
+    )
+    .into_any_element()
 }

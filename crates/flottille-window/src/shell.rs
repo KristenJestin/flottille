@@ -3140,7 +3140,8 @@ impl Shell {
                 }
             })
             .unzip();
-        let rows = nested(&live, &rows, cx);
+        let summaries = crate::leads::summaries_of(&self.snapshot);
+        let rows = nested(&live, &rows, &summaries, cx);
         node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
@@ -5610,7 +5611,7 @@ impl Shell {
                 now,
                 cx,
             );
-            let rows = nested(&live, &rows, cx);
+            let rows = nested(&live, &rows, &crate::leads::summaries_of(&snapshot), cx);
             let key = (gone.name.clone(), machine.map(str::to_owned));
             let node = self.gone.remove(&key).unwrap_or_else(|| {
                 let this = this.clone();
@@ -5695,7 +5696,7 @@ impl Shell {
                         now,
                         cx,
                     );
-                    let rows = nested(&live, &rows, cx);
+                    let rows = nested(&live, &rows, &crate::leads::summaries_of(&snapshot), cx);
                     let key = (project.name.clone(), home.machine.clone());
                     let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
                         let this = this.clone();
@@ -5781,7 +5782,7 @@ impl Shell {
                     now,
                     cx,
                 );
-                let rows = nested(&live, &rows, cx);
+                let rows = nested(&live, &rows, &crate::leads::summaries_of(&snapshot), cx);
                 let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                     let name = project.name.clone();
                     let this = this.clone();
@@ -5935,9 +5936,14 @@ impl Shell {
             let subject = found.subject.clone();
             page.update(cx, |page, cx| page.set_subject(subject, cx));
         }
-        // What the sessions the open one leads do changed: its Leads says it.
+        // What the sessions the open one leads do changed: its Leads says it. A session of
+        // another machine is known here by its row's id, its page by its id there.
         if let Some(page) = self.session_page.clone() {
-            let id = page.read(cx).id().to_owned();
+            let agent = page.read(cx).id().to_owned();
+            let id = match &self.selected {
+                Some(Selection::Session(row)) if self.agent_of(row) == agent => row.clone(),
+                _ => agent,
+            };
             let led = self.led_lines_of(&id);
             if page.read(cx).led() != led.as_slice() {
                 page.update(cx, |page, cx| page.set_leads(led, cx));
@@ -7890,6 +7896,7 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
 fn nested(
     live: &[&crate::model::Session],
     rows: &[Entity<SessionRow>],
+    summaries: &HashMap<String, Vec<flottille_core::leads::Part>>,
     cx: &mut Context<Shell>,
 ) -> Vec<Entity<SessionRow>> {
     // The place of each session's pilot among them, when it is one of them.
@@ -7953,20 +7960,9 @@ fn nested(
         if row.read(cx).leads() != led.len() {
             row.update(cx, |row, cx| row.set_leads(led.len(), cx));
         }
-        // What it says of them, the same words as every client's (`flottille_core::leads`).
-        let counted: Vec<flottille_core::leads::Led> = led
-            .iter()
-            .map(|&other| flottille_core::leads::Led {
-                needs_you: live[other].mark == Some(AgentState::NeedsYou),
-                red: rows[other]
-                    .read(cx)
-                    .pull()
-                    .is_some_and(|pull| pull.mark.as_deref() == Some("failing")),
-                // Nothing says who blocks a session yet (#1451).
-                blocked_by: Vec::new(),
-            })
-            .collect();
-        let summary = flottille_core::leads::summary(&counted, live[at].held.len());
+        // What it says of them, from the tree's lines as every client's (`leads::summaries`):
+        // the same sessions its page's Leads lists, wherever their rows sit.
+        let summary = summaries.get(&live[at].id).cloned();
         if row.read(cx).summary() != summary.as_deref() {
             row.update(cx, |row, cx| row.set_summary(summary, cx));
         }
