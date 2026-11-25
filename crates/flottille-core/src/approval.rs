@@ -44,7 +44,8 @@ pub struct Request {
     pub place: Option<String>,
     /// A workspace's removal: the workspace's state when it was asked (`workspaces::digest`),
     /// read before its card. The answer to discard removes it only while it is still that;
-    /// `None` when it could not be read, or for any other call.
+    /// `None` when it could not be read. An exception's ask: what it covers, as read when it was
+    /// asked (`Scope`, in JSON). `None` for any other call.
     pub digest: Option<String>,
 }
 
@@ -196,6 +197,48 @@ impl Leave {
     pub fn to_json(&self) -> Value {
         json!({"writer": self.writer, "session": self.session, "request": self.request,
             "granted_at": self.granted_at})
+    }
+}
+
+/// An exception the user accepted for a session (`docs/design.md` §7.3): one rule of the gate
+/// that no longer stops that session, until it ends or the user withdraws it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Exception {
+    /// The session that asked: an agent's id. Its sub-agents and other sessions still ask.
+    pub agent: String,
+    /// The rule it lifts, by its name (`force-push`, `merge-blocked`, `forge-state`).
+    pub rule: String,
+    /// The agent's reason, masked, as the user read it.
+    pub why: String,
+    /// The request the user allowed it in.
+    pub request: u64,
+    pub granted_at: u64,
+    /// What the user allowed, exactly: a later call outside it is held as before.
+    pub scope: Scope,
+}
+
+/// What an exception covers, read when it was asked: the repository (its path in the project)
+/// and the branch it is for, and for a merge the pull request, its head commit and what blocked
+/// it as the card said: a merge whose head or blockers changed since is not covered. Empty for a
+/// rule that names none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Scope {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repository: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<String>,
+}
+
+impl Exception {
+    pub fn to_json(&self) -> Value {
+        json!({"agent": self.agent, "rule": self.rule, "why": self.why,
+            "request": self.request, "granted_at": self.granted_at, "scope": self.scope})
     }
 }
 

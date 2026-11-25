@@ -1331,3 +1331,343 @@ fn another_machine_s_session_rows_say_how_long_ago_as_time_goes_by(cx: &mut Test
     assert_eq!(frames_over(&shell, Duration::from_secs(30), cx), 0);
     assert_eq!(said_ago("server", &there, cx).as_deref(), Some("2m"));
 }
+
+// The scenarios of #1249: the sidebar's look across machines, after its prototype (variant A, a
+// presence badge on each machine's mark).
+
+/// What the kit last drew `id` in, on this thread.
+fn colour_of(id: &str) -> Option<gpui_kit::Hsla> {
+    gpui_design_system::seen::colour(gpui_kit::ElementId::Name(id.to_owned().into()))
+}
+
+/// Whether two colours are the same, but for the rounding of a tint at rest.
+fn same_colour(a: Option<gpui_kit::Hsla>, b: Option<gpui_kit::Hsla>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            (a.h - b.h).abs() < 1e-3
+                && (a.s - b.s).abs() < 1e-3
+                && (a.l - b.l).abs() < 1e-3
+                && (a.a - b.a).abs() < 1e-3
+        }
+        _ => false,
+    }
+}
+
+/// The id of the part `part` of the element `id` (`machine-mark-server` → `machine-mark-server-online`).
+fn part_of(id: gpui_kit::ElementId, part: &str) -> String {
+    format!("{id}-{part}")
+}
+
+/// The colour the window draws `machine` in, as the member list signs it.
+fn shade_of(shell: &Entity<Shell>, machine: &str, cx: &mut VisualTestContext) -> gpui_kit::Hsla {
+    shell.read_with(cx, |s, cx| {
+        let read = s
+            .machines()
+            .read(cx)
+            .machines()
+            .expect("the machines are read");
+        let member = read
+            .members
+            .iter()
+            .find(|member| member.name == machine)
+            .expect("a member of the list");
+        flottille_window::machines::shade(&member.look().1)
+    })
+}
+
+#[gpui_kit::test]
+fn a_device_that_runs_nothing_is_no_group_of_the_projects_list(cx: &mut TestAppContext) {
+    let (hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "site", SITE);
+    told(&pc, &["site"]);
+    let _phone = crate::remote::Phone::pair(&hub, "mobile");
+    pc.wait_for_member("mobile", true);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "the window knows the phone", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .is_some_and(|m| m.machine("mobile").is_some())
+        })
+    });
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    assert!(
+        !present(cx, machine_id("mobile")),
+        "a controller is no group of the projects list"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_with_nothing_under_it_shows_no_open_chevron(cx: &mut TestAppContext) {
+    use gpui_design_system::rows::toggle_id;
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&pc, "notes", "");
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    session(&pc, "app", "Fix the pc part");
+
+    let (shell, cx) = with_row(&pc, "notes", cx);
+    until(&shell, cx, "the session under app", |cx| {
+        present(cx, toggle_id(project_id("app")))
+    });
+    settle(&shell, cx);
+    assert!(
+        !present(cx, toggle_id(project_id("notes"))),
+        "a project with nothing under it has no chevron"
+    );
+    // Its title starts where every other project's does.
+    let title = |name: &str, cx: &mut VisualTestContext| {
+        f32::from(bounds(cx, format!("project-{name}-title")).origin.x)
+    };
+    assert!((title("notes", cx) - title("app", cx)).abs() < 0.5);
+
+    // By machine too: server's app holds nothing of server.
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    assert!(present(
+        cx,
+        toggle_id(flottille_window::tree::project_on_id("app", "pc"))
+    ));
+    assert!(!present(
+        cx,
+        toggle_id(flottille_window::tree::project_on_id("app", "server"))
+    ));
+
+    // A session comes: its chevron comes with it.
+    switch_grouping(&shell, cx);
+    session(&pc, "notes", "Write the notes");
+    until(&shell, cx, "the chevron of notes", |cx| {
+        present(cx, toggle_id(project_id("notes")))
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_in_a_machine_s_group_does_not_repeat_its_icon(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "both marks on the row", |cx| {
+        present(cx, project_mark_id("app", "pc")) && present(cx, project_mark_id("app", "server"))
+    });
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    assert!(present(cx, machine_mark_id("pc")) && present(cx, machine_mark_id("server")));
+    assert!(!present(cx, project_mark_id("app", "pc")));
+    assert!(!present(cx, project_mark_id("app", "server")));
+}
+
+#[gpui_kit::test]
+fn each_machine_s_mark_says_its_state_by_its_badge(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "both marks on the row", |cx| {
+        present(cx, project_mark_id("app", "server"))
+    });
+    settle(&shell, cx);
+    // On a project's row: this machine a house, server a filled dot, each in its own colour.
+    assert!(present(cx, part_of(project_mark_id("app", "pc"), "here")));
+    assert!(present(
+        cx,
+        part_of(project_mark_id("app", "server"), "online")
+    ));
+    assert_eq!(
+        label(cx, project_mark_id("app", "server")).as_deref(),
+        Some("server · online")
+    );
+    let server_ink = shade_of(&shell, "server", cx);
+    let drawn = colour_of(&part_of(project_mark_id("app", "server"), "icon"));
+    assert!(same_colour(drawn, Some(server_ink)), "{drawn:?}");
+
+    // The group's heading: the same mark, and no words after the name.
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    assert!(present(cx, part_of(machine_mark_id("pc"), "here")));
+    assert!(present(cx, part_of(machine_mark_id("server"), "online")));
+    assert_eq!(
+        label(cx, machine_mark_id("server")).as_deref(),
+        Some("server · online")
+    );
+    assert_eq!(
+        label(cx, machine_mark_id("pc")).as_deref(),
+        Some("pc · this machine")
+    );
+    for machine in ["pc", "server"] {
+        assert!(
+            !present(cx, flottille_window::tree::machine_state_id(machine)),
+            "the heading of {machine} ends with no words"
+        );
+    }
+
+    // Off: a hollow ring, the words in the tooltip.
+    let stopped = server.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", server.log());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the hollow ring", |cx| {
+        present(cx, part_of(machine_mark_id("server"), "offline"))
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, part_of(machine_mark_id("server"), "online")));
+    let said = label(cx, machine_mark_id("server")).unwrap_or_default();
+    assert!(said.starts_with("server · offline since "), "{said}");
+}
+
+#[gpui_kit::test]
+fn the_machines_marks_keep_their_colour_whichever_machine_is_in_front(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "the server's session", |cx| {
+        present(cx, session_id(&row)) && present(cx, project_mark_id("app", "server"))
+    });
+    settle(&shell, cx);
+    let icon = part_of(project_mark_id("app", "server"), "icon");
+    let before = colour_of(&icon);
+    assert!(
+        same_colour(before, Some(shade_of(&shell, "server", cx))),
+        "{before:?}"
+    );
+
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "the server's session is open", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    settle(&shell, cx);
+    let after = colour_of(&icon);
+    assert!(same_colour(after, before), "{after:?} after {before:?}");
+}
+
+/// What the sidebar shows, top to bottom: each project and its sessions, each with its place.
+fn sidebar_as_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    let mut drawn = Vec::new();
+    for name in drawn_order(shell, cx) {
+        let rows: Vec<String> = shell.read_with(cx, |s, cx| {
+            s.project(&name)
+                .map(|node| {
+                    node.read(cx)
+                        .sessions(cx)
+                        .iter()
+                        .map(|row| row.read(cx).id().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        drawn.push(name);
+        for id in rows {
+            let place =
+                label(cx, flottille_window::tree::session_place_id(&id)).unwrap_or_default();
+            drawn.push(format!("  {id} {place}"));
+        }
+    }
+    drawn
+}
+
+#[gpui_kit::test]
+fn opening_a_session_of_another_machine_leaves_the_sidebar_as_it_is(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&pc, "notes", "");
+    add(&server, "app", APP);
+    add(&server, "site", SITE);
+    told(&pc, &["app", "site"]);
+    session(&pc, "app", "Fix the pc part");
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "every row", |cx| {
+        present(cx, session_id(&row)) && present(cx, project_id("site"))
+    });
+    settle(&shell, cx);
+    let before = sidebar_as_drawn(&shell, cx);
+
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "the server's session is open", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(sidebar_as_drawn(&shell, cx), before);
+}
+
+#[gpui_kit::test]
+fn a_project_only_this_machine_has_stays_listed_while_another_machine_is_in_front(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "notes", "");
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = with_row(&pc, "notes", cx);
+    until(&shell, cx, "the server's session", |cx| {
+        present(cx, session_id(&row))
+    });
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "the server's session is open", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    settle(&shell, cx);
+    assert!(present(cx, project_id("notes")));
+    assert_eq!(homes(&shell, "notes", cx), ["pc"]);
+}
+
+#[gpui_kit::test]
+fn no_skeleton_in_the_sidebar_when_a_machine_comes_in_front(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "notes", "");
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = with_row(&pc, "notes", cx);
+    until(&shell, cx, "the server's session", |cx| {
+        present(cx, session_id(&row))
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    // Every frame until the page is there: the sidebar keeps its rows.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        assert!(
+            !present(cx, "sidebar-skeleton-0"),
+            "the sidebar said it loads"
+        );
+        assert!(present(cx, project_id("notes")));
+        if shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the page never came");
+    }
+}

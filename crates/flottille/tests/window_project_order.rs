@@ -608,13 +608,16 @@ fn groups_made_in_one_window_survive_a_sidebar_write_from_another(
     let user = user();
     project(&user, "alpha");
     project(&user, "bravo");
+    // A project folds what it holds: one with nothing under it has no chevron.
+    user.call("agent.run", json!({"project": "alpha", "message": "hello"}))
+        .unwrap();
     let (one, cx_one) = window(&user, first);
     until(&one, cx_one, "the rows of the window", |cx| {
         present(cx, project_id("bravo"))
     });
     let (two, cx_two) = window(&user, second);
     until(&two, cx_two, "the rows of the other window", |cx| {
-        present(cx, project_id("bravo"))
+        present(cx, project_id("bravo")) && present(cx, toggle_id(project_id("alpha")))
     });
 
     new_group("Work", &one, cx_one);

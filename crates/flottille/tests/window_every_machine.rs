@@ -665,10 +665,12 @@ fn a_folded_project_stays_folded_and_listed_while_a_session_of_another_machine_i
 ) {
     let (_hub, pc, _server, _here, there) = two_machines();
     project(&pc.user, "anchor");
+    // A project folds what it holds: one with nothing under it has no chevron.
+    session(&pc.user, "anchor", "Hold the anchor");
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     until(&shell, cx, "anchor is listed", |cx| {
-        present(cx, project_id("anchor"))
+        present(cx, fold_of("anchor"))
     });
     click(cx, fold_of("anchor"));
     settle(&shell, cx);
@@ -687,10 +689,12 @@ fn a_folded_project_stays_folded_and_listed_while_a_session_of_another_machine_i
 fn coming_back_keeps_every_fold_as_it_was(cx: &mut TestAppContext) {
     let (_hub, pc, _server, here, there) = two_machines();
     project(&pc.user, "anchor");
+    // A project folds what it holds: one with nothing under it has no chevron.
+    session(&pc.user, "anchor", "Hold the anchor");
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     until(&shell, cx, "anchor is listed", |cx| {
-        present(cx, project_id("anchor"))
+        present(cx, fold_of("anchor"))
     });
     click(cx, fold_of("anchor"));
     settle(&shell, cx);

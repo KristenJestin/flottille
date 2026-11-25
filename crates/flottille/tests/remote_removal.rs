@@ -630,3 +630,35 @@ fn an_end_told_once_its_workspace_is_gone_says_nothing_of_commits_that_came_back
     let woken = prompt_with(&pc, "Your following of it is over.");
     assert!(!woken.contains("could not come back"), "{woken}");
 }
+
+#[test]
+fn an_exception_asked_on_a_call_a_launch_s_machine_answers_is_refused_with_why() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, _launch, mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    ended_there(&server, &session);
+
+    // Exceptions are each machine's own: a read or a removal the session's machine answers never
+    // carries one there, nor drops it in silence.
+    let read = mcp.call(
+        "session_read",
+        json!({"session": session, "exception": "it is blocked for good"}),
+    );
+    let removal = mcp.call(
+        "workspace",
+        json!({"action": "remove", "name": workspace, "machine": "server",
+               "exception": "it is blocked for good"}),
+    );
+
+    for answer in [&read, &removal] {
+        let text = refused(answer);
+        assert!(
+            text.contains("exception") && text.contains("another machine"),
+            "{text}"
+        );
+    }
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert!(there.exists());
+}
