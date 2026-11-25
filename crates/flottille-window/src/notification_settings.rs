@@ -323,6 +323,7 @@ fn card(name: &str, cx: &App) -> impl ParentElement + IntoElement {
         .bg(p.card)
         .border_1()
         .border_color(p.line)
+        .test_support()
 }
 
 /// A section's controls once the daemon said them: its skeleton fades into them, and when the
