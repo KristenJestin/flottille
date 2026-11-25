@@ -142,9 +142,7 @@ impl Relay {
                 {
                     self.bells.lock().unwrap().push(held);
                 }
-                if self.held.lock().unwrap().contains(&method.as_str()) {
-                    std::thread::sleep(Duration::from_millis(self.held_for.load(Ordering::SeqCst)));
-                }
+                let held = self.held.lock().unwrap().contains(&method.as_str());
                 let cut = self.cut.lock().unwrap().contains(&method.as_str());
                 self.asked.lock().unwrap().push((method, params));
                 if cut {
@@ -152,6 +150,9 @@ impl Relay {
                 }
                 if self.silent.load(Ordering::SeqCst) {
                     continue;
+                }
+                if held {
+                    std::thread::sleep(Duration::from_millis(self.held_for.load(Ordering::SeqCst)));
                 }
                 let delay = self.delay.load(Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(delay));
