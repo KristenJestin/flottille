@@ -127,6 +127,32 @@ for scripts only (what starts the daemon or the window, what a process pipes: a 
 with its reason). The test `every_cli_command_has_its_place_in_the_window` refuses a command that
 has neither. A place needs its animations and its test as any window change does.
 
+## Machines are one (non-negotiable)
+
+**There is no distinction between the user's machines.** The maintainer has said it many times,
+and each remote pull request still added a rule of its own for another machine. An agent, a
+session or the user acting on another machine does exactly what they would do on their own:
+
+- a device the hub paired as a `runner` is the user, with the user's powers: the hub is the
+  trust, the pairing the only check between machines. A `controller` or a `viewer` stays bounded
+  by its role;
+- every action is sent to the machine of its target and runs there **through the very code it
+  runs through locally**: no closed list of what may cross, no second path, no rule of its own;
+- there, the caller is a full stand-in: its tree's mode (Full follows the tree, with no signed
+  switch), the parent of what it launched, all its tools. No leave is asked that one machine
+  would not ask;
+- each machine keeps a local ghost of every session of another machine it shows, which only
+  reflects; a close follows the whole tree across machines;
+- a session an agent launched belongs to its launcher (its Agents panel, on any machine); the
+  sidebar holds the user's sessions only.
+
+The rule, whole, opens `docs/remote.md` ("Machines are one"). **A pull request, or an issue, that
+adds a rule of its own for another machine is sent back by the review**, whatever it fixes: a
+refusal, a leave, a mode, a list of what may cross, a row or a word that the same session on one
+machine would not have. A machine changes only where it runs: it can be off (what waits for it
+waits on the machine that sends it), and the hub stays the trust. What the rule replaces in the
+design is marked there "Replaced by the rule (#1517)", kept until the code follows.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
