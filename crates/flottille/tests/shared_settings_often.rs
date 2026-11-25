@@ -429,6 +429,24 @@ fn an_https_connection_is_declared_on_each_machine_and_no_token_travels() {
     let copied = std::fs::read_to_string(server.folder().join("shared.json")).unwrap();
     assert!(!copied.contains(SECRET), "{copied}");
 
+    // The server's own declaration of that name stands over it until removed, and a connection
+    // of all machines alone is not the server's to remove.
+    call(
+        &server,
+        "connection.edit",
+        json!({"name": "almanac", "about": "My own notes."}),
+    );
+    call(&server, "connection.remove", json!({"name": "almanac"}));
+    assert_eq!(
+        connection(&server, "almanac").unwrap()["about"],
+        "Notes of the team."
+    );
+    let (_, why) = server
+        .user
+        .call("connection.remove", json!({"name": "almanac"}))
+        .unwrap_err();
+    assert!(why.contains("all machines"), "{why}");
+
     // A connection that names a vault entry, a program or a plain address is not shared.
     for wrong in [
         json!([{"name": "tracker", "about": "T.", "url": ALMANAC,

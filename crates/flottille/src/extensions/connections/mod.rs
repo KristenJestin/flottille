@@ -2892,6 +2892,10 @@ async fn remove_if(
         .await
         .map_err(|why| Failure::new("unavailable", why))?;
     changed_event(daemon, &name, None);
+    // All machines' connection of that name applies here again, given as an added one is.
+    if shared_names(&daemon.paths).contains(&name) {
+        pin_at_once(daemon, &name).await;
+    }
     Ok(json!({"name": name, "removed": true}))
 }
 
