@@ -37,6 +37,8 @@ mod restart;
 mod review;
 #[path = "../runs.rs"]
 mod runs;
+#[path = "../session_blocked.rs"]
+mod session_blocked;
 #[path = "../session_end.rs"]
 mod session_end;
 #[path = "../session_follow.rs"]
