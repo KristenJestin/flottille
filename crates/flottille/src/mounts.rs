@@ -14,10 +14,51 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
+const MOUNT_ATTR_RDONLY: u64 = 0x1;
+
+/// `struct mount_attr` of `mount_setattr(2)`, its first version.
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+/// `struct open_how` of `openat2(2)`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// `path` opened with `flags` without following a link anywhere on its way: the descriptor, or
+/// -1 and `errno` (`ENOSYS` before Linux 5.6, `ELOOP` for a link). A system call alone, which a
+/// child may make before its program.
+pub(crate) fn open_unfollowed(path: &CStr, flags: libc::c_int) -> libc::c_long {
+    let how = OpenHow {
+        flags: (flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_NO_SYMLINKS,
+    };
+    // SAFETY: a C string and a structure alive for the call.
+    unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    }
+}
 
 /// The variable that plays a kernel refusing user namespaces, read by a test build only: the
 /// tests' daemon is given it, never a packaged one.
@@ -117,16 +158,92 @@ pub fn sandbox() -> serde_json::Value {
     warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
     let unlent = crate::pushed::unlent();
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
+    // What a confined command's `ssh` refuses of the root-owned files its settings include.
+    if namespaces == Namespaces::Available {
+        warnings.extend(whole_refused());
+        warnings.extend(copies_failed());
+        warnings.extend(crate::ssh_owned::gaps());
+    }
     // Where no push is lifted, the agent's lending to one is moot.
     match crate::pushed::unlifted() {
         Some(why) => warnings.push(crate::pushed::unlifted_said(&why)),
         None => warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why))),
     }
+    // Chrome's DevTools, in the network of the browser a connection runs: out of the runs' reach
+    // only in a namespace of its own (`docs/vault.md`, "The browser's network").
+    let browser = crate::extensions::browser_network_available();
+    if let Err(why) = &browser {
+        warnings.push(format!(
+            "the agent's browser (a connection to agent-browser) cannot run in a network of its \
+             own, where no run reaches its DevTools: {why}. Its login refuses to fill until \
+             then"
+        ));
+    }
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,
+        "browser_network": browser.is_ok(),
         "ssh_lent": unlent.is_none(),
         "warnings": warnings,
+    })
+}
+
+/// The first of the calls a whole read-only copy needs that the system does not answer
+/// (`ENOSYS`), asked each time (`whole_refused` keeps its answer).
+fn refused_call() -> Option<&'static str> {
+    let none = std::ptr::null::<u8>();
+    // Each with arguments it refuses at once: only a call the system does not answer fails
+    // with `ENOSYS`. Its error is read right after it, before another call sets its own.
+    let refused = |result: libc::c_long| {
+        result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
+    };
+    // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
+    unsafe {
+        if refused(libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0)) {
+            return Some("openat2");
+        }
+        if refused(libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0)) {
+            return Some("open_tree");
+        }
+        if refused(libc::syscall(
+            libc::SYS_mount_setattr,
+            -1,
+            c"".as_ptr(),
+            0,
+            none,
+            0,
+        )) {
+            return Some("mount_setattr");
+        }
+        if refused(libc::syscall(
+            libc::SYS_move_mount,
+            -1,
+            c"".as_ptr(),
+            -1,
+            c"".as_ptr(),
+            0,
+        )) {
+            return Some("move_mount");
+        }
+    }
+    None
+}
+
+/// Why every command Flottille confines is refused its start, if it is: Landlock is there (its
+/// second ABI), and the system refuses one of the calls that make what a push reads read-only with
+/// every mount below it (`Plan::enter`), as a seccomp filter written for an older kernel does.
+pub fn whole_refused() -> Option<String> {
+    static REFUSED: OnceLock<Option<&'static str>> = OnceLock::new();
+    if crate::landlock::abi() < 2 {
+        return None;
+    }
+    let refused = *REFUSED.get_or_init(refused_call);
+    refused.map(|call| {
+        format!(
+            "the system refuses {call} to Flottille (a seccomp filter, Landlock being there), \
+             which makes what a push reads read-only to the commands it confines with every mount \
+             below it: each is refused its start (docs/vault.md, \"The runtime folder\")"
+        )
     })
 }
 
@@ -156,6 +273,34 @@ pub struct Plan {
     cwd: Option<CString>,
     pinned: Vec<CString>,
     read_only: Vec<(CString, libc::c_ulong)>,
+    /// Whether the read-only paths must be made read-only with every mount below them, or the
+    /// command not start: where Landlock keeps the rest (`landlock::abi`, its second ABI).
+    whole: bool,
+    copies: Copies,
+}
+
+/// The files given to the command as its own (`ssh_owned.rs`): each written into a file system
+/// the namespace makes on `staging` for the time it takes, then put over its `target`.
+#[derive(Default)]
+struct Copies {
+    staging: Option<CString>,
+    files: Vec<Copy>,
+    /// Where the child says why they were not given.
+    failed: Option<&'static AtomicI32>,
+    /// A test's: the file system is not taken away, as when the kernel refuses it.
+    #[cfg(test)]
+    kept_up: bool,
+}
+
+struct Copy {
+    staged: CString,
+    target: CString,
+    /// The file read (device, inode): the copy covers a file with that identity, so not one put at
+    /// its path since. A reused inode would match: it is root's own old file, whose text a copy
+    /// holds, a harm to no one.
+    id: (u64, u64),
+    text: Vec<u8>,
+    tree: libc::c_int,
 }
 
 /// Whether the kernel gives a confined command a private mount namespace.
@@ -297,6 +442,8 @@ pub fn plan(
         cwd: cwd.filter(|cwd| cwd.is_absolute()).and_then(c),
         pinned: Vec::new(),
         read_only: Vec::new(),
+        whole: false,
+        copies: Copies::default(),
     })
 }
 
@@ -311,6 +458,36 @@ impl Plan {
             .iter()
             .map(|p| Some((c(p)?, locked(p))))
             .collect::<Option<_>>()?;
+        self.whole = crate::landlock::abi() >= 2;
+        Some(self)
+    }
+
+    /// The plan, which also puts a copy of each file, with its text, over it, read-only and owned
+    /// by the user in the namespace (`ssh_owned.rs`). None where a path cannot be a C string.
+    pub fn giving(mut self, copies: Vec<crate::ssh_owned::Copied>) -> Option<Plan> {
+        let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
+        // Said by every command, with copies or none: a failure lasts until one gets them.
+        self.copies.failed = failed();
+        // Any folder that is there does to stage them: what it holds is hidden for that time only.
+        let Some(staging) = copies
+            .first()
+            .and_then(|copied| copied.path.parent())
+            .map(Path::to_owned)
+        else {
+            return Some(self);
+        };
+        let mut files = Vec::new();
+        for (n, copied) in copies.into_iter().enumerate() {
+            files.push(Copy {
+                staged: c(&staging.join(format!(".flottille-copy-{n}")))?,
+                target: c(&copied.path)?,
+                id: copied.id,
+                text: copied.text,
+                tree: -1,
+            });
+        }
+        self.copies.staging = Some(c(&staging)?);
+        self.copies.files = files;
         Some(self)
     }
 }
@@ -362,6 +539,87 @@ fn write_file(path: &CStr, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The mount `fd` (`O_PATH`) is at, and every mount below it, made read-only: cloned, made
+/// read-only whole while no one sees it, then put over it.
+///
+/// # Safety
+/// In the child, before its program: system calls alone.
+unsafe fn read_only_at(fd: libc::c_int) -> io::Result<()> {
+    let attr = MountAttr {
+        attr_set: MOUNT_ATTR_RDONLY,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    // SAFETY: as the function says; C strings and a structure alive for each call.
+    unsafe {
+        let tree = libc::syscall(
+            libc::SYS_open_tree,
+            fd,
+            c"".as_ptr(),
+            OPEN_TREE_CLONE
+                | AT_RECURSIVE
+                | libc::AT_EMPTY_PATH as libc::c_uint
+                | libc::O_CLOEXEC as libc::c_uint,
+        );
+        check(tree)?;
+        let tree = tree as libc::c_int;
+        let mut made = check(libc::syscall(
+            libc::SYS_mount_setattr,
+            tree,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH as libc::c_uint | AT_RECURSIVE,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        ));
+        if made.is_ok() {
+            made = check(libc::syscall(
+                libc::SYS_move_mount,
+                tree,
+                c"".as_ptr(),
+                fd,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ));
+        }
+        libc::close(tree);
+        made
+    }
+}
+
+/// `path` bound onto itself and made read-only by its path, on a kernel without the calls of
+/// [`read_only_at`]: before Linux 5.12, the top mount alone.
+///
+/// # Safety
+/// As [`read_only_at`].
+unsafe fn read_only_by_path(path: &CStr, flags: libc::c_ulong) -> io::Result<()> {
+    let none = std::ptr::null::<libc::c_char>();
+    // SAFETY: as the function says.
+    unsafe {
+        if libc::mount(
+            path.as_ptr(),
+            path.as_ptr(),
+            none,
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        ) != 0
+        {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        check(libc::mount(
+            none,
+            path.as_ptr(),
+            none,
+            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
+            std::ptr::null(),
+        ) as libc::c_long)
+    }
+}
+
 impl Plan {
     /// In the child, before its program: the namespace made as planned. Any failure fails the
     /// command's start: one that started without its folders emptied would reach them.
@@ -402,27 +660,52 @@ impl Plan {
                 }
             }
             for (path, flags) in &self.read_only {
-                let bound = libc::mount(
-                    path.as_ptr(),
-                    path.as_ptr(),
-                    none,
-                    libc::MS_BIND | libc::MS_REC,
-                    std::ptr::null(),
-                );
-                if bound != 0 {
-                    let error = io::Error::last_os_error();
-                    match error.raw_os_error() {
-                        Some(libc::ENOENT) => continue,
-                        _ => return Err(error),
+                // Opened once, following no link on its way, and made read-only through that
+                // descriptor alone: a link put on its way since the daemon's start leads nowhere
+                // else between two steps.
+                let fd = open_unfollowed(path, libc::O_PATH);
+                let made = match fd {
+                    0.. => {
+                        let made = read_only_at(fd as libc::c_int);
+                        libc::close(fd as libc::c_int);
+                        made
                     }
+                    _ => Err(io::Error::last_os_error()),
+                };
+                match made {
+                    Ok(()) => {}
+                    // Gone, or a link on its way now: not the path found at the daemon's start,
+                    // nothing to protect there; the push judges it (`pushed::unlent`).
+                    Err(error)
+                        if fd < 0
+                            && matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ELOOP)) => {
+                    }
+                    // A kernel without the calls: before Linux 5.12, with no Landlock of the
+                    // second ABI either, so no push is lent anything or run outside the sandbox
+                    // (`pushed::ssh_unlent`, `pushed::unlifted`). With Landlock, a filter of the
+                    // system's refuses them: the command is refused its start, never left with a
+                    // mount below a read-only one writable.
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSYS) && !self.whole => {
+                        read_only_by_path(path, *flags)?
+                    }
+                    Err(error) => return Err(error),
                 }
-                check(libc::mount(
-                    none,
-                    path.as_ptr(),
-                    none,
-                    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
-                    std::ptr::null(),
-                ) as libc::c_long)?;
+            }
+            // At best: a command started without them meets the refusal of `ssh` alone, where
+            // failing its start would fail every command, git's and the daemon's too. But never
+            // over a file system of the copies that stayed: it may be writable.
+            let given = give(&mut self.copies);
+            let errno = |error: &io::Error| error.raw_os_error().unwrap_or(libc::EIO);
+            let said = match &given {
+                Ok(()) => 0,
+                Err(Failed::Without(error)) => errno(error),
+                Err(Failed::Left(error)) => errno(error) | LEFT,
+            };
+            if let Some(failed) = self.copies.failed {
+                failed.store(said, Ordering::Relaxed);
+            }
+            if let Err(Failed::Left(error)) = given {
+                return Err(error);
             }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
@@ -504,6 +787,201 @@ impl Plan {
             }
         }
         Ok(())
+    }
+}
+
+/// Why the copies were not given.
+enum Failed {
+    /// The command starts without them.
+    Without(io::Error),
+    /// Their file system could not be taken away from over the folder it was mounted on: the
+    /// command must not start.
+    Left(io::Error),
+}
+
+/// Said with the error when their file system was left (`Failed::Left`).
+const LEFT: i32 = 1 << 30;
+
+/// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
+/// read-only, takes each file out of it, takes the file system away, and puts each file over its
+/// target, opened without following a link on its way. A target gone since the plan was made, or
+/// whose device and inode are no longer those of the file read, is not covered. A file system that cannot be taken away fails
+/// the start (`Failed::Left`).
+///
+/// # Safety
+/// In the child, before its program: plain system calls on what the plan allocated.
+unsafe fn give(given: &mut Copies) -> Result<(), Failed> {
+    #[cfg(test)]
+    let detach = match given.kept_up {
+        // Refused by the kernel: an expiry cannot be detached.
+        true => libc::MNT_DETACH | libc::MNT_EXPIRE,
+        false => libc::MNT_DETACH,
+    };
+    #[cfg(not(test))]
+    let detach = libc::MNT_DETACH;
+    let Some(staging) = given.staging.as_deref() else {
+        return Ok(());
+    };
+    let copies = &mut given.files[..];
+    let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    // SAFETY: as the function says.
+    unsafe {
+        check(libc::mount(
+            c"tmpfs".as_ptr(),
+            staging.as_ptr(),
+            c"tmpfs".as_ptr(),
+            flags,
+            c"mode=0755".as_ptr().cast(),
+        ) as libc::c_long)
+        .map_err(Failed::Without)?;
+        let staged = stage(staging, copies, flags);
+        if staged.is_err() {
+            for copy in copies.iter_mut().filter(|copy| copy.tree >= 0) {
+                libc::close(copy.tree);
+            }
+        }
+        // What the staging folder held before, shown again, whatever came of the copies.
+        check(libc::umount2(staging.as_ptr(), detach) as libc::c_long).map_err(Failed::Left)?;
+        staged.map_err(Failed::Without)?;
+        for copy in copies.iter() {
+            let moved = cover(copy);
+            libc::close(copy.tree);
+            moved.map_err(Failed::Without)?;
+        }
+    }
+    Ok(())
+}
+
+/// Moves `copy`'s file onto its target, opened without following a link on its way, when it is
+/// still the file read. A kernel without `openat2` (before Linux 5.6) covers none: the walk read
+/// none there either.
+///
+/// # Safety
+/// As `give`.
+unsafe fn cover(copy: &Copy) -> io::Result<()> {
+    // SAFETY: as the function says.
+    unsafe {
+        let target = open_unfollowed(&copy.target, libc::O_PATH);
+        if target < 0 {
+            let error = io::Error::last_os_error();
+            // Gone, or a link on its way now: not the file read, not covered.
+            return match error.raw_os_error() {
+                Some(libc::ENOENT | libc::ELOOP) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        let target = target as libc::c_int;
+        let mut stat: libc::stat = std::mem::zeroed();
+        let mut result = check(libc::fstat(target, &mut stat) as libc::c_long);
+        if result.is_ok() && (stat.st_dev, stat.st_ino) == copy.id {
+            result = check(libc::syscall(
+                libc::SYS_move_mount,
+                copy.tree,
+                c"".as_ptr(),
+                target,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ));
+        }
+        libc::close(target);
+        result
+    }
+}
+
+/// Writes each copy into the file system on `staging`, makes it read-only and takes each file out
+/// of it.
+///
+/// # Safety
+/// As `give`.
+unsafe fn stage(staging: &CStr, copies: &mut [Copy], flags: libc::c_ulong) -> io::Result<()> {
+    let none = std::ptr::null::<libc::c_char>();
+    // SAFETY: as the function says.
+    unsafe {
+        for copy in copies.iter() {
+            let fd = libc::open(
+                copy.staged.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o644,
+            );
+            check(fd as libc::c_long)?;
+            let mut written = 0;
+            while written < copy.text.len() {
+                let rest = &copy.text[written..];
+                let n = libc::write(fd, rest.as_ptr().cast(), rest.len());
+                if n <= 0 {
+                    let error = io::Error::last_os_error();
+                    libc::close(fd);
+                    return Err(error);
+                }
+                written += n as usize;
+            }
+            libc::close(fd);
+        }
+        // Read-only as a file system: no mount of it can be written, and a command, which has no
+        // capability left once it runs its program, cannot remount it.
+        check(libc::mount(
+            none,
+            staging.as_ptr(),
+            none,
+            libc::MS_REMOUNT | libc::MS_RDONLY | flags,
+            std::ptr::null(),
+        ) as libc::c_long)?;
+        for copy in copies.iter_mut() {
+            let fd = libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
+                copy.staged.as_ptr(),
+                OPEN_TREE_CLONE | libc::O_CLOEXEC as libc::c_uint,
+            );
+            check(fd)?;
+            copy.tree = fd as libc::c_int;
+        }
+    }
+    Ok(())
+}
+
+/// Where a confined command's child says why the copies were not given: a page every child shares
+/// with the daemon. None where it cannot be mapped.
+fn failed() -> Option<&'static AtomicI32> {
+    static PAGE: OnceLock<usize> = OnceLock::new();
+    let page = *PAGE.get_or_init(|| {
+        // SAFETY: a new anonymous mapping of the daemon's, never unmapped.
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                std::mem::size_of::<AtomicI32>(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        match page == libc::MAP_FAILED {
+            true => 0,
+            false => page as usize,
+        }
+    });
+    // SAFETY: a mapping of the right size and alignment, zeroed, alive for ever.
+    (page != 0).then(|| unsafe { &*(page as *const AtomicI32) })
+}
+
+/// Why the last confined command started without the copies of the files `ssh` includes, or was
+/// refused its start for them, as `flottille doctor` and the daemon's log say it: none once one
+/// started with them.
+pub fn copies_failed() -> Option<String> {
+    let said = failed()?.load(Ordering::Relaxed);
+    let error = io::Error::from_raw_os_error(said & !LEFT);
+    match said {
+        0 => None,
+        _ if said & LEFT != 0 => Some(format!(
+            "a command was refused its start: the file system its ssh settings were copied in \
+             could not be taken away ({error}), and would have stayed writable over a folder ssh \
+             reads"
+        )),
+        _ => Some(format!(
+            "the ssh settings of a command could not be copied ({error}): its ssh refuses the \
+             files root owns that they include (Bad owner or permissions)"
+        )),
     }
 }
 
@@ -626,5 +1104,374 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+    #[test]
+    fn a_copy_that_cannot_be_given_fails_no_command() {
+        use std::os::unix::process::CommandExt;
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // Its folder is gone since the plan was made: the copies are not given, and the command
+        // runs as it would without them.
+        let temp = tempfile::tempdir().unwrap();
+        let gone = temp.path().join("gone/ssh_config");
+        let mut plan = plan(&[temp.path().to_owned()], &[], &[], None)
+            .unwrap()
+            .giving(vec![crate::ssh_owned::Copied {
+                path: gone,
+                id: (0, 0),
+                text: b"Host *\n".to_vec(),
+            }])
+            .unwrap();
+        let mut command = std::process::Command::new("true");
+        // SAFETY: as in `landlock::confine`.
+        unsafe { command.pre_exec(move || plan.enter()) };
+
+        let status = command.status();
+
+        assert!(
+            status.as_ref().is_ok_and(|status| status.success()),
+            "{status:?}"
+        );
+    }
+
+    /// What a command run in `plan`'s namespace prints, or why it did not start.
+    fn printed(plan: Plan, program: &str, args: &[&std::ffi::OsStr]) -> io::Result<String> {
+        use std::os::unix::process::CommandExt;
+        let mut plan = plan;
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        // SAFETY: as in `landlock::confine`.
+        unsafe { command.pre_exec(move || plan.enter()) };
+        let output = command.output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// The copy of `target` with `text`, as `ssh_owned::copies` gives it.
+    fn copy_of(target: &Path, text: &str) -> Vec<crate::ssh_owned::Copied> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(target).unwrap();
+        vec![crate::ssh_owned::Copied {
+            path: target.to_owned(),
+            id: (meta.dev(), meta.ino()),
+            text: text.as_bytes().to_vec(),
+        }]
+    }
+
+    #[test]
+    fn a_copy_file_system_that_cannot_be_taken_away_fails_the_start() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The copies fail before their file system is read-only, and it cannot be taken away:
+        // a command started then would find a writable folder over the one `ssh` reads.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.conf"), "a\n").unwrap();
+        std::fs::write(folder.join("b.conf"), "b\n").unwrap();
+        let mut plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(
+                [
+                    copy_of(&folder.join("a.conf"), "a\n"),
+                    copy_of(&folder.join("b.conf"), "b\n"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            )
+            .unwrap();
+        // The second copy staged where the first is: written, it fails.
+        plan.copies.files[1].staged = plan.copies.files[0].staged.clone();
+        plan.copies.kept_up = true;
+
+        let started = printed(plan, "true", &[]);
+
+        assert!(started.is_err(), "{started:?}");
+    }
+
+    #[test]
+    fn a_target_swapped_since_the_plan_is_not_covered() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // Another file renamed over the one read: the copy of the first does not cover it.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.join("config");
+        std::fs::write(&target, "read\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&target, "read\n"))
+            .unwrap();
+        std::fs::write(folder.join("other"), "other\n").unwrap();
+        std::fs::rename(folder.join("other"), &target).unwrap();
+
+        let shown = printed(plan, "cat", &[target.as_os_str()]).unwrap();
+
+        assert_eq!(shown, "other\n");
+    }
+
+    #[test]
+    fn a_link_on_the_way_to_a_target_is_not_followed() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The target's folder swapped for a link since the plan: the copy covers no file the
+        // link leads to.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("ssh")).unwrap();
+        std::fs::write(root.join("ssh/config"), "read\n").unwrap();
+        std::fs::create_dir(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join("elsewhere/config"), "elsewhere\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&root.join("ssh/config"), "read\n"))
+            .unwrap();
+        std::fs::rename(root.join("ssh"), root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("ssh")).unwrap();
+
+        let shown = printed(plan, "cat", &[root.join("elsewhere/config").as_os_str()]).unwrap();
+
+        assert_eq!(shown, "elsewhere\n");
+    }
+
+    #[test]
+    fn a_copy_stays_read_only_to_a_namespace_the_command_makes_without_landlock() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The read-only layer alone: no Landlock refuses the mounts here, so a namespace of the
+        // command's own, where it is root, may make `/` private and try each of them.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.join("config");
+        std::fs::write(&target, "root's\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&target, "copy\n"))
+            .unwrap();
+        let nested = "import ctypes, errno, json, os, sys\n\
+             libc = ctypes.CDLL(None, use_errno=True)\n\
+             target = sys.argv[1]\n\
+             out = {'root': os.getuid() == 0}\n\
+             def call(name, result):\n\
+             \x20   out[name] = 'done' if result == 0 else errno.errorcode.get(ctypes.get_errno())\n\
+             MS_REMOUNT, MS_BIND = 32, 4096\n\
+             call('remount_bind_rw', libc.mount(None, target.encode(), None, MS_REMOUNT | MS_BIND, None))\n\
+             call('remount_rw', libc.mount(None, target.encode(), None, MS_REMOUNT, None))\n\
+             call('unmounted', libc.umount2(target.encode(), 2))\n\
+             try:\n\
+             \x20   open(target, 'a').write('planted\\n')\n\
+             \x20   out['write'] = 'done'\n\
+             except OSError as e:\n\
+             \x20   out['write'] = errno.errorcode.get(e.errno)\n\
+             out['text'] = open(target).read()\n\
+             print(json.dumps(out))\n";
+        let outer = "import errno, json, os, subprocess, sys\n\
+             target = sys.argv[1]\n\
+             out = {}\n\
+             def attempt(name, action):\n\
+             \x20   try:\n\
+             \x20       action()\n\
+             \x20       out[name] = 'done'\n\
+             \x20   except OSError as e:\n\
+             \x20       out[name] = errno.errorcode.get(e.errno)\n\
+             attempt('write', lambda: open(target, 'a').write('planted\\n'))\n\
+             attempt('mode', lambda: os.chmod(target, 0o666))\n\
+             nested = subprocess.run(['unshare', '-Urm', 'python3', '-c', sys.argv[2], target],\n\
+             \x20   capture_output=True, text=True)\n\
+             out['nested'] = json.loads(nested.stdout) if nested.returncode == 0 \\\n\
+             \x20   else nested.stderr[-500:]\n\
+             out['text'] = open(target).read()\n\
+             print(json.dumps(out))\n";
+
+        let shown = printed(
+            plan,
+            "python3",
+            &[
+                "-c".as_ref(),
+                outer.as_ref(),
+                target.as_os_str(),
+                nested.as_ref(),
+            ],
+        )
+        .unwrap();
+        let out: serde_json::Value =
+            serde_json::from_str(&shown).unwrap_or_else(|_| panic!("{shown}"));
+
+        assert_eq!(out["write"], "EROFS", "{out}");
+        assert_eq!(out["mode"], "EROFS", "{out}");
+        let nested = &out["nested"];
+        assert_eq!(nested["root"], true, "{out}");
+        for name in ["remount_bind_rw", "remount_rw", "unmounted", "write"] {
+            assert_ne!(nested[name], "done", "{name}: {out}");
+        }
+        assert_eq!(nested["text"], "copy\n", "{out}");
+        assert_eq!(out["text"], "copy\n", "{out}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "root's\n");
+    }
+
+    /// Makes `mount_setattr` fail with `ENOSYS` for the rest of the process's life, as a seccomp
+    /// filter written before Linux 5.12 does on a kernel that has it, Landlock's second ABI too.
+    ///
+    /// # Safety
+    /// In the child, before its program: system calls alone.
+    unsafe fn refuse_mount_setattr() -> io::Result<()> {
+        let statement = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        let filter = [
+            statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            statement(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                libc::SYS_mount_setattr as u32,
+            ),
+            statement(
+                libc::BPF_RET | libc::BPF_K,
+                0,
+                0,
+                libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            ),
+            statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr().cast_mut(),
+        };
+        // SAFETY: as the function says; the program is alive for the call.
+        unsafe {
+            check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) as libc::c_long)?;
+            check(libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &program as *const libc::sock_fprog,
+            ) as libc::c_long)
+        }
+    }
+
+    #[test]
+    fn the_call_the_system_refuses_is_the_one_said() {
+        // In a child of its own: the filter stays with the process that installs it.
+        // SAFETY: the child makes system calls alone, then leaves without unwinding.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "{}", io::Error::last_os_error());
+        if child == 0 {
+            // SAFETY: as `refuse_mount_setattr` says; this process is the test's alone.
+            let code = match unsafe { refuse_mount_setattr() } {
+                Err(_) => 2,
+                Ok(()) => match refused_call() {
+                    Some("mount_setattr") => 0,
+                    _ => 1,
+                },
+            };
+            // SAFETY: leaves the child at once, as a forked child of a test must.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child made above.
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        match libc::WEXITSTATUS(status) {
+            2 => eprintln!("skipped: no seccomp filter can be installed here"),
+            code => assert_eq!(code, 0, "the refused call was not said as mount_setattr"),
+        }
+    }
+
+    #[test]
+    fn a_read_only_path_is_not_left_writable_when_mount_setattr_is_refused() {
+        use std::os::unix::process::CommandExt;
+        if !available() || crate::landlock::abi() < 2 {
+            eprintln!("skipped: no user namespace, or no Landlock of the second ABI");
+            return;
+        }
+        // A read-only folder with a folder kept in place below it: a remount of the top mount
+        // alone would leave the one below writable.
+        let temp = tempfile::tempdir().unwrap();
+        let kept = temp.path().canonicalize().unwrap().join("kept");
+        let below = kept.join("below");
+        std::fs::create_dir_all(&below).unwrap();
+        let mut plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .protecting(std::slice::from_ref(&below), std::slice::from_ref(&kept))
+            .unwrap();
+        let planted = below.join("planted");
+        let mut command = std::process::Command::new("touch");
+        command.arg(&planted);
+        // SAFETY: as in `landlock::confine`; the filter first, as the system's would be.
+        unsafe {
+            command.pre_exec(|| refuse_mount_setattr());
+            command.pre_exec(move || plan.enter());
+        }
+
+        let started = command.status();
+
+        assert!(!planted.exists(), "{started:?}");
+        assert_eq!(
+            started.as_ref().err().and_then(io::Error::raw_os_error),
+            Some(libc::ENOSYS),
+            "{started:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_path_swapped_for_a_link_is_not_followed() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The folder made read-only, then a folder on its way, are swapped for a link since the
+        // plan: neither link leads the mounts to a folder a run chose.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for (kept, swapped) in [
+            (root.join("kept"), root.join("kept")),
+            (root.join("on/the/way"), root.join("on/the")),
+        ] {
+            std::fs::create_dir_all(&kept).unwrap();
+            let elsewhere = root.join("elsewhere");
+            std::fs::create_dir_all(elsewhere.join("way")).unwrap();
+            let plan = plan(&[], &[], &[], None)
+                .unwrap()
+                .protecting(&[], std::slice::from_ref(&kept))
+                .unwrap();
+            std::fs::rename(&swapped, root.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &swapped).unwrap();
+            let planted = elsewhere.join("way/planted");
+
+            let shown = printed(
+                plan,
+                "sh",
+                &[
+                    "-c".as_ref(),
+                    "touch \"$0\" && echo written".as_ref(),
+                    planted.as_os_str(),
+                ],
+            );
+
+            assert_eq!(
+                shown.as_deref().ok(),
+                Some("written\n"),
+                "{kept:?}: {shown:?}"
+            );
+            std::fs::remove_file(&swapped).unwrap();
+            std::fs::remove_dir_all(root.join("moved")).unwrap();
+            std::fs::remove_dir_all(&elsewhere).unwrap();
+            let _ = std::fs::remove_dir_all(root.join("on"));
+        }
     }
 }

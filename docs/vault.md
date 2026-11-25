@@ -2,8 +2,9 @@
 
 Agents sometimes need a secret the user holds: a tracker's API token to log time, the login of a
 test account, a deploy key. Pasted in a conversation, it would be stored and shown. The vault keeps
-it instead, where the operating system keeps secrets, and lets agents **use it without ever seeing
-it**.
+it instead, where the operating system keeps secrets. In Ask and Auto, agents **use it through
+Flottille's tools without seeing it**. In Full, a command an agent runs is the user's own and can
+read it (see below).
 
 ## Where the secrets are
 
@@ -214,6 +215,51 @@ an entry to the vault, not a request with rules of its own.
 The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
 
+## Proposing an edit of an entry
+
+An entry may be almost right: its URL points to a page with no login form, its username is wrong,
+it is bound to the wrong project. The agent does not tell the user, in words, to retype it: it
+proposes the edit, which the user accepts, edits or dismisses. It is the request of an asked entry,
+with the same card, the same place and the same answer; only what the card says and its buttons
+differ.
+
+- **`vault {action: "propose", name, why, url?, username?, description?, project?, for?}`.**
+  `name` is an entry the agent's project sees (another project's is no entry for it); each field
+  given is its new value, an empty text clearing it: `url`, read as an ask reads it (refused when it
+  is no `https` address, or `http` on this machine), `username`, `description`, `project` (`this`,
+  the agent's project alone, or `every`) and `for` (`worklog`, or `connection:<name>` for a
+  connection the user declared) for an entry bound to no use yet: an entry keeps its one use, and
+  the refusal does not name it. A proposal that changes nothing is refused, and so is a second one
+  for an entry while one waits.
+- **Never the secret.** The schema has no field for it and an argument it does not know is
+  refused; Accept rewrites the metadata only, as an edit that keeps the secret does: the keyring
+  item is never written, replaced or deleted, and read only to mask a new username's Basic form.
+- **Always held for the user**, in every mode, Full included: no rule applies it. The call is
+  answered at once (`… is held for the user, who accepts, edits or dismisses it`), and the answer
+  comes later as a delivery.
+- **Its card**, in **Waiting for you** with the asked entries' (and the inbox, the bell, the
+  session's "waits for you" mark, the conversation's quiet line `proposed an edit of the vault
+  entry <name> · waiting for you`, then `… · accepted`, `… · saved` or `… · dismissed`): **Proposes
+  a vault edit**, the entry's name, each field changed on a line of its own as before → after
+  (`URL: https://id.example.invalid/realms/dev/ → https://id.example.invalid/realms/dev/account`),
+  the host a new URL sends the secret to (**Goes to**, the daemon's reading), and the agent's
+  reason. Its buttons: **Dismiss**, **Edit** and **Accept**, all disabled while Accept or Dismiss
+  runs. Accept applies it in one action; Edit opens the entry's own form of an edit (`Edit
+  <name>`, the secret left empty to keep it) prefilled with the proposal and the agent's reason,
+  where the user changes what they want and saves, or closes it and nothing changes; Dismiss
+  changes nothing.
+- **Checked as a hand edit.** Accept is the user's own Save of the entry as it is then with the
+  fields proposed, in the daemon: every check of that Save applies (a login's entry on plain
+  `http` to another machine, an address login cannot read, a project the use refuses), its refusal
+  is said in a toast and the request stays open, for Edit or Dismiss. An entry removed meanwhile
+  is not made anew: it would have no secret.
+- **Answered as an asked entry is**: the agent whose project sees the entry is handed
+  `the user accepted your proposed edit of the vault entry <name>`, or, saved from its form or any
+  other way, `the user saved the vault entry <name> from its form after your proposed edit`; on
+  Dismiss, `the user dismissed your proposed edit of the vault entry <name>: nothing of it
+  changed`. Like the card of an asked entry, it has no command of its own: the user's
+  `flottille vault edit` saves the entry, which answers it.
+
 ## How a secret is used
 
 Through Flottille's own tools: a tool that needs a secret takes the entry's **name**, and the
@@ -294,6 +340,36 @@ row's **Share with…** (a dialog that lists the runners online), or `flottille 
   error; the logs say what was shared, with which machine, and by whom, never the value. The hub
   never sees it.
 
+## Made from a file a setup copies
+
+A launch on another machine whose project's setup copies a file that machine lacks (an ignored
+`.env`) asks the user to share it (`docs/remote.md`, "Which project"): the file becomes a vault
+entry first, on the machine that has it, with `vault.from_file {project, path, name?, replace?}`.
+The daemon reads the file only then, inside the project's folder, opened once and never through a
+link (what is checked is the file that is read), a text
+of 64 KiB at most; its text is the entry's secret, masked whole and line by line before it is
+kept, and nothing that is said of it, an answer, an error, a log or an event, holds a word of it.
+Each line is masked, a file of one line without a final newline too (any secret bound to a
+`file:` is, set by hand or received as well), and each line's value: what follows its first `=` or `:` (`KEY=v`, `key: v`,
+`"key": "v",`), its quotes and final comma left out, and the password of an address's
+`user:password@`, each of 6 characters or more, comments left. **A secret transformed is not
+recognised**: a value an agent decodes, splits, re-encodes (other than the address, HTML and JSON
+forms every vault value is masked in) or computes from the file is not masked.
+
+The entry is named `<project>-<path>` (`app-.env`), every project's, described as the file of that
+project its setup copies, and **bound to that file** (`"for": "file:<project>/<path>"`), which
+serves no tool and no other use; it is then shared as any other, its binding kept. The other
+machine makes the file from an entry only when it is bound to that very file and was shared from
+the launch's machine: an entry of its own, or another machine's, whatever its name, is never
+written into a file. **The window shares an entry for a file only when it is the file's own**:
+named `<project>-<path>` and bound to that file. An entry of that name made by hand, or bound to
+another use, is never shared in its place: the window asks `vault.from_file`, which refuses it, and
+a launch's `needs` that names another entry for a file is refused before anything is shared. **A machine renamed leaves the copies it shared under its old name matching
+nothing**: a launch from the new name finds no entry shared from it, so the file is asked for again
+(fail closed); share the entry again from the renamed machine. A name already taken is refused: by another entry (`a/b` and `a-b` both name
+`app-a-b`: the second file is refused, naming the first), and by the same file's entry unless the
+call says `replace: true`.
+
 ## The runtime folder
 
 The keyring answers on the session bus, whose socket is in the user's runtime folder
@@ -315,7 +391,11 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names;
+  An agent-browser connection's server, its login and its reload are granted its vault folder,
+  `$XDG_RUNTIME_DIR/flottille/vault/<connection>`, the same way (and `agent-browser close` too):
+  agent-browser's configuration and its daemon's socket, the login's one-time token and the
+  credential plugin's socket, which no run reaches. The folders are the ones the daemon made,
+  never one a variable of the connection names;
 - Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
   process also starts in a **private mount namespace** of its own, where the kernel lets a user
   make one (an unprivileged user namespace): the user's runtime folders are empty folders there
@@ -343,7 +423,39 @@ push the gate let through, and its checks' dry run, are the exception (below):
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
 
-**The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
+**The browsers' profiles stay out of every run.** A connection's browser keeps its profile (its
+cookies, the sign-ins the user made by hand or through a vault login) in
+`$XDG_STATE_HOME/flottille/browsers/<connection>/profile` (`docs/extensions.md`, "Adapters").
+Chrome without a session bus encrypts its cookies with a key every Chrome knows, so whoever reads
+the file takes the sign-in. The daemon makes `browsers/` at its start (mode 0700), and every
+process it confines is kept out of it: the private mount namespace empties it as it empties the
+runtime folders, and only the connection's own folder is put back, for its server and its login
+(and its reload of the page), the folder the daemon made for that connection, never one a
+variable or a request names. The folders on the way to `browsers/` that the user may change
+(the state folder, the home…) are kept where they are in the namespace, as the ones on the way to
+`~/.ssh` (below): a run that renamed one would have the next run, whose namespace empties the
+path found at the daemon's start, open the profiles under the new name; the rename fails. It is made once and never made again while a browser may run (the
+inode Landlock and the mount hold, #1040), and removed with its connection, once the browser is
+closed. The gate holds `browsers/` for a login's place, as Flottille's keys (`docs/tools.md`,
+"The gate"), so a line that names a path in it is refused in every mode, also where the kernel
+gives no namespace. Where it gives none, Landlock denies the folder itself (its second ABI or
+later) and gives the connection's server and login their own folder back. Only then, because a
+Landlock rule grants and never takes away: the folders on the way to a denied one (the home
+among them) get no rule of their own, so a confined process cannot make, remove or rename an
+entry directly in them, nor write a file made there after it started (below, "The gaps").
+
+**A run in Full is the exception, and nothing is held back from it** (`docs/tools.md`, "In
+Full, a run is the user's own"): it has the daemon's environment, no namespace and no Landlock,
+as a command in the user's terminal. **In Full, the vault and the device key are reachable by
+what the agent runs**: the vault's items over the session bus, in the keyring, with the user's
+rights; Flottille's state folder, the connections' vault sockets and the key that signs this
+machine's requests to the others (`docs/remote.md`) by their path. The vault's promise holds in
+every mode for Flottille itself (no method, tool, event or log returns a secret, and the gate
+still refuses `secret-tool` and the other keyring programs named on a line), not for code run in
+Full: Flottille says so where Full is chosen and to the agent. A Full that keeps the vault out (a
+filtered bus, the vault encrypted at rest) is not built.
+
+**The SSH agent stays out of every run but one in Full.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
 by its path: inside the runtime folder it is denied with it; outside it (`/tmp/ssh-…/agent.…`, a
 password manager's under the home), from Landlock's ninth ABI, the folders on the way to it are
@@ -397,7 +509,8 @@ that reaches a remote also gets:
   no agent and no session bus: its credential helper runs confined (below, "The gaps").
 
 **A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
-line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
+line, no wrapper) the user, the judge or a rule let through in Ask or Auto (in Full, a push is a
+plain run of the user's own, above), and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
 the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
 helper and the forge command line's sign-in are theirs. A push that goes to paths alone (a remote
@@ -568,14 +681,37 @@ private mount namespace of every command Flottille confines (above), `~/.ssh` is
 with what is below it, and so are the files of the user's own git settings found at the daemon's
 start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
 those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
-reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Where one of those
+files is reached through a link (a dotfiles manager's), the folder that holds each link on the way
+is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
+folder that holds the versions: the one above the folder of the file the link leads to
+(`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
+dotfiles manager makes later beside it, and the one above that (`~/dots`) when it can be kept, the
+manager's own folder, where it may stage a version before moving it in among the others; never
+one higher: no run re-points the link, writes a version made after the start, or makes (and holds
+open) the file a manager then moves in as its own. A kept folder is read-only with everything below it, the folders
+kept in place below it included. Not kept, a link there being refused when its settings are
+relinked (below), nothing kept above the folder of the versions when it is the one above it (that
+folder is then the manager's own), and nothing kept at all when it is the folder of the versions
+(a relink is then refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+(their folders as the projects' files and the store say at the daemon's start, whatever their
+name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
+`~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
+a user keeps projects in by their usual names (`projects`, `workspaces`, `src`, `code`, `dev`,
+`repos`, `git`, `work`, `Documents`, `Downloads`, `Desktop` of the home), and Flottille's own: they hold every other
+program's files, which a run would lose. Each folder on the
 way to them that a command could rename or remove (its own folder is the user's, or one they may
 write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
 the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
 user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
 (`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
 read-only. A command started at any time has them read-only from its start, and nothing it runs
-can unmount them (above).
+can unmount them (above). Each path is opened once, following no link on its way (one put there
+since the start is not followed, and the path is then not protected: the push judges it), and
+made read-only through that one descriptor, with every mount below it. Where Landlock is there and
+the system refuses one of the calls that does it (a seccomp filter written for an older kernel),
+every command Flottille confines is refused its start, saying so (and `flottille doctor` says it),
+rather than started with a mount below a read-only one left writable.
 
 What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
 push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
@@ -634,6 +770,31 @@ reachable.
 
 The gaps, where the platform does not allow more:
 
+- **what a run in Full wrote outlives it**: `~/.ssh`, the user's git settings and every file of
+  theirs are its to write, as the user's own, and a later push in Ask or Auto reads them. What
+  such a push runs from them is judged at each push, never trusted by where it is: a program
+  `ssh`'s configuration runs is refused; the credential helpers are those found at the daemon's
+  start; the hooks (`core.hooksPath=/dev/null`), the transports (`GIT_ALLOW_PROTOCOL` wins over a
+  `protocol.*.allow`), the `ssh` command and the programs a transport names are the daemon's own;
+  and a program of `~/.ssh` the user's `core.sshCommand` names runs only when it was neither made
+  nor changed (its change time) since the daemon's start, else the push says so and a restart of
+  the daemon trusts it again. What is not judged is data: a key, a `known_hosts`, a setting that
+  runs nothing (a push's remote URL is the user's to change, "Where the remote leads");
+- **the change-time rule on `core.sshCommand`'s program is best effort**, not a boundary: it
+  races with a run in Full at the same time (a change made, then the push, within the clock's
+  grain, or after the push has read it); it judges that one program, and not the other files it
+  reads or runs (a script the wrapper calls, a library, its own configuration); a restart of the
+  daemon trusts whatever is there then, a changed wrapper included; and a clock set back can
+  make a later change look older. It is kept because it costs a user nothing but a restart after
+  they edit their own wrapper, and refuses what a run in Full plants in the common way;
+- **the settings of a lent HTTPS push** are the user's, read from the files found at the daemon's
+  start: an included file that was not there then (or is another file at its path now) is left
+  out of what the push is given, with a `hasconfig` include of one, so that a file made since
+  (by a run in Full, a dotfiles update) cannot set `http.proxy`, `http.sslVerify` or
+  `http.sslCAInfo` for it, and the user's settings of such a file apply from the next restart of
+  the daemon. A file that was there is trusted as it is, even when written in place since, and so
+  is the settings file itself, which the user changes as they like: neither is judged for what
+  it says;
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
   cannot be opened, but a process that guesses the bus's path could still connect to it: the
@@ -648,7 +809,69 @@ The gaps, where the platform does not allow more:
 - where the kernel refuses user namespaces, a confined process has no private mount namespace:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
-  (`sandbox.private_mounts` false in `--json`);
+  (`sandbox.private_mounts` false in `--json`). That includes a connection's vault folder: it
+  cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
+  daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
+  login's socket, whose name it can guess and which refuses a request without the token;
+- where the kernel refuses user namespaces, Landlock denies the browsers' profiles
+  (`$XDG_STATE_HOME/flottille/browsers`) itself, and the folders on the way to it, the home
+  among them, lose the right to make, remove or rename an entry directly in them, for every
+  confined process: a program that writes a new file at the top of the home (a history file, a
+  lock beside `~/.gitconfig`) fails there. Default taken, to confirm: the sign-ins are kept out
+  rather than the top of the home left open. Without Landlock either (below its second ABI), a
+  run that does not name the path reaches the profiles: only the gate keeps them out;
+- **a browser of a connection is in the runs' network where it cannot have its own** ("The
+  browser's network", below): agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`,
+  so Chrome's DevTools listens on the loopback, on a port of its choice, with no token, and
+  agent-browser's daemon listens on another. In its own network namespace neither is on the runs'
+  loopback. Where pasta is missing or the kernel refuses user namespaces (a distribution that
+  restricts them to programs its AppArmor profiles allow, Ubuntu from 23.10, included), the
+  browser still runs, in the runs' network: a run that finds the port (`/proc/net/tcp`, a scan)
+  drives it with no gate, reads its pages, the cookies and storage of every site signed in to.
+  The login refuses to fill a password then, and says to install passt; the daemon's log and
+  `flottille doctor` say the gap (`sandbox.browser_network` false in `--json`). Flottille never
+  hands the address to an agent (the adapter keeps `get_cdp_url` off). Where the user's runs
+  have no private mount namespace (above), a run is in the same user namespace as the daemon and
+  can enter the browser's (`setns`): the browser's network keeps it out only where runs have
+  theirs;
+- **below Landlock's second ABI the browser has no private network, even for ordinary browsing**
+  (since the check that a run stays out of the browser's reach is made each time a network is
+  used): the server's browser runs in the runs' network, as where pasta is missing, and the login
+  refuses;
+- **a shown browser reads neither the user's fontconfig and GTK settings nor
+  `~/.local/share/fonts`**, since Chrome's `XDG_*` folders are the vault folder's: it may look
+  plainer than the user's other windows, and a certificate authority the user added to their own
+  certificate database (`~/.pki/nssdb`, `$XDG_DATA_HOME/pki/nssdb`) may not be trusted by it;
+- **another mount of the same files reaches the profiles.** The private mount namespace empties
+  `browsers/` at its path, and Landlock, where the kernel gives no namespace, denies that folder's
+  inode as it is reached there: the same files reached through another mount (an ostree
+  `/sysroot`, a Btrfs top level mounted elsewhere, a bind mount of the home) are neither emptied
+  nor denied, so a run that knows the other path reads the profile, the sign-ins' cookies with it;
+- **what the browser's server reads and writes is kept from the profile by its actions, not by
+  its paths.** The server reaches the profile, so an action that reads or writes a file by a path
+  the agent gives would follow a link a run planted to it; the adapter keeps those actions off or
+  refuses their path, any `url` argument is a web address, never a `file:` one, and an action
+  that runs other commands (`batch`, `flow_run`, `chat`) is off, as are `install` (root, through
+  sudo) and `upgrade` (out of the version the adapter was checked on; `docs/extensions.md`, "Adapters"): the
+  cookies, storage, saved state and a request's headers are no action's answer. What the user
+  turns on still reaches them: `eval` reads the page's storage and the part of `document.cookie`
+  that is not `HttpOnly`, and a HAR or a trace is written to agent-browser's own folder under the
+  home, which runs read and write: it holds the page's traffic, its cookies among it. Those
+  actions are off at every pin alike, a re-pin that switches the server's tools included, never
+  judged;
+- **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
+  can write what is the user's under the home: agent-browser itself where the user installed it
+  there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
+  `~/.agent-browser/browsers/`. A run that replaced that Chrome, or agent-browser, has its own
+  program run as the browser the login fills, and with the connection's profile and the sign-ins
+  it keeps. Chrome's certificate database is in the vault folder
+  (`data/pki/nssdb`, above); a Chrome that still reads the older `~/.pki/nssdb`, where one is, would
+  trust a certificate authority a run wrote there. Flottille does not
+  check them: the owner is the user either way, and a hash recorded at first use could be taken
+  of a program a run had already replaced, and would refuse every update the user or agent-browser
+  makes (agent-browser downloads a new Chrome on its own). Installing agent-browser and its Chrome
+  where root alone writes closes the programs' part; the rest needs a sandbox that keeps the
+  home's programs read-only, a change of its own;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
@@ -694,8 +917,37 @@ The gaps, where the platform does not allow more:
 - a file protected at the daemon's start is protected at the path it had then: a command started
   before the user replaced it (an editor that writes a new file, `git config --global`) still sees
   the new one writable, so the push is lent nothing until the daemon restarts, which ends every
-  run. A process a run of an older Flottille left behind, outside its session and without its
-  marker, is not ended at the start, and has `~/.ssh` as that version left it;
+  run (`flottille daemon stop`: the next command starts another, which finds the settings again).
+  **A settings file that leads elsewhere** is judged again at each push (`pushed::settle`). The
+  start and the push share the judgement of **the links** (which folder may hold one: the same
+  functions); the file itself is kept read-only at the start, whatever it is, and judged at the
+  push by a rule of its own. A dotfiles update that moves the link to a new version is accepted
+  only when **both** hold: each link on the way is in a folder kept read-only since the start
+  (above) or that only root may change, **and the new file lies under a folder kept since the
+  start** (above: the one that holds the old version's folder) or that only root may change, **with no other
+  hard link**. So no command could have written it between the link moving and the push, as a
+  command may write any file of the home outside those folders; the push then reads it, every
+  command started from then on has it read-only, its identity the one recorded then, and a hard
+  link made later is refused at the next push. Refused, saying which rule failed, when a link is
+  in a folder a run can write (the home itself: put the link in a folder of its own below it,
+  `~/.config/git/config`), when the new file is not under a folder kept since the start (a
+  manager that makes its versions elsewhere than beside the one found at the start), when it has
+  another hard link, or when no link leads there at all (a file replaced in its place); until the
+  daemon restarts. What remains: a settings file that includes a file not found at the start (a
+  relative include, which is a file of the new version folder) is refused as before, until a
+  restart; the folders kept are those of the settings the daemon found, so a link that did not
+  exist at the start is not kept; and a version made directly in one of the folders listed above
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that stages a
+  version outside the folders kept (in `~/.cache`, or beside its own folder in the home, where a
+  run writes) and then moves it in among its versions is trusted, not refused: the file is then
+  under a kept folder with one name, and nothing tells a file moved in from one made there, so a
+  run that made it first, and holds it open, writes what the push reads. A manager staging in its
+  own folder (`~/dots/staging` beside `~/dots/versions`) is covered: that folder is kept. A
+  manager that puts the file deeper in its versions (`versions/<n>/git/config`) has `versions`
+  kept, the folder above `versions/<n>`, so a relink to another version is accepted, and a version
+  it stages beside `versions` is one moved in from a folder a run writes (above); and a project
+  added after the daemon's start in a kept folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
+  older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before
   the call, so a run that rewrites it in between sends that call to another host of the same
@@ -748,6 +1000,106 @@ hold for what is made there (above). And the missing `XAUTHORITY` does not keep 
   for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
   user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
   `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
+
+## The browser's network
+
+agent-browser's daemon and its Chrome, for a connection the agent-browser adapter applies to
+(`docs/extensions.md`, "agent-browser"), run in a **network namespace of their own**, so that
+their loopback is not the runs': Chrome's DevTools, which has no token and drives the browser
+(the pages open, a password filled before it is sent, every cookie), and agent-browser's own
+port listen there, where no run connects. passt's `pasta` gives the namespace its way out:
+
+- the browser reaches the internet as the user does, through pasta, unprivileged;
+- the host's loopback ports are forwarded into the namespace (`-T auto -U auto`): a developer's
+  server on `localhost:<port>`, or one a run started, opens in the browser, and so does the
+  host's resolver on its loopback address;
+- nothing is forwarded in (`-t none -u none`): no port of the namespace is on the host's
+  loopback, DevTools' included.
+
+The namespace is held by a process of its own, `flottille browser-network`, started by the daemon
+in a user and a network namespace it makes (the user mapped to themself), and pasta set up on it
+by its pid. It outlives a server, as the browser does: the connection's vault folder records it
+(`network`, the holder's pid and its namespaces), and the next server, a login and `close` find it
+there and start each command of agent-browser's in it, before the rest of its sandbox (its private
+mount namespace is made inside). The vault folder's socket keeps working by its path: a socket by
+its path is no network's. It ends when the browser is closed (`close`, the daemon's stop, the
+connection's removal); pasta ends with it. A browser that answers on the socket folder from
+outside the namespace (started by a server that ran without one) is closed before a login or a
+server uses the namespace, and a login checks, once its page is loaded, that every browser that
+answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
+the socket folder and of the folders in it, never through a link (`SO_PEERCRED`; a namespace puts
+a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
+connection does not wait for a daemon to accept, and a socket it cannot connect to, whatever the
+error, counts as outside: one that stops accepting, one whose path is too long for a socket address,
+one whose mode refuses the connection, and one whose process is gone; so does what cannot be
+looked at (a folder or an entry that cannot be read, a link named as a socket, which agent-browser
+follows). One exception: a socket nobody listens on (the connection is refused) is a browser that
+crashed and left its file, in socket folders that are kept: it is removed before the count, and
+holds nothing. The pids are never read from
+agent-browser's `<session>.pid` files. The record is the holder's only while the process at its pid
+has the start time it records: a process that took the pid since is not the holder.
+
+**Chrome's profile is in the vault folder.** agent-browser makes the browser's profile (its
+cookies, Local Storage, History, and Chrome's `Default/Preferences`, which names a proxy) in the
+temporary folder, `/tmp/agent-browser-chrome-…`, and Chrome keeps its passwords there in the clear
+(`--password-store=basic`): in `/tmp`, which runs reach, a run would read them or plant a
+`Preferences` before Chrome reads it. Every command of agent-browser's (the server, `open`, `auth
+login`, `close`) is given `TMPDIR`, the folder `tmp` of the connection's vault folder (`0700`,
+denied to every run), so the profile and Chrome's own temporary files are there.
+
+Chrome also writes outside its profile, whatever profile it is given: its crash database
+(`Crash Reports`, whose dumps hold the page's memory, a password typed included) under its default
+configuration folder (`$XDG_CONFIG_HOME/google-chrome`, or the folder of the Chrome agent-browser
+runs, else `~/.config/…`), its certificate database (`$XDG_DATA_HOME/pki/nssdb`) and
+`mimeapps.list` under `$XDG_DATA_HOME`, and fontconfig's cache under `$XDG_CACHE_HOME`: a real
+login wrote all four there before this. The same commands
+are given `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`, the folders `config`, `cache`
+and `data` of the vault folder, and never `CHROME_CONFIG_HOME` nor `BREAKPAD_DUMP_LOCATION`,
+which would move the configuration folder or the dumps elsewhere. These are set after the
+connection's own `env` on every start, and a login is refused while the `env` names one of them
+(the socket's, `TMPDIR` and the `XDG_*` folders included), so an edit of the connection's `env` an
+agent proposes cannot move them back within a run's reach. `HOME` stays the user's:
+agent-browser finds the Chrome it downloaded under `~/.agent-browser` ("The gaps" says what a run
+can do there).
+
+The vault folder is in the runtime folder, in memory on most systems: Chrome's HTTP disk cache is
+capped at 32 MiB (`--disk-cache-size`, in the `args` of the configuration Flottille writes). The
+cap is the HTTP cache's alone: what pages keep themselves (IndexedDB, Cache Storage, Local
+Storage) is not capped, so a site that stores much takes memory until the browser is closed. A
+folder on disk denied to runs would have needed a rule of its own in every run's sandbox; the
+vault folder already is one. A Chrome that crashed leaves its profile behind, which agent-browser
+never removes: closing the connection's browser (`close`, the daemon's stop, the connection's
+removal) empties the folder `tmp` when no browser answers on the socket folder any more (a close
+that did not end it, or the other sessions' browsers, keep their profiles), and so does the
+daemon's start where no browser was left running. A `tmp` that is a link is never emptied.
+
+**Nothing reads the browser's memory.** A run with the user's identity may attach to Chrome
+(`ptrace`) and read the page and the password filled, or open `/proc/<pid>/root` of a process of
+the user's outside its namespace, which leads to the vault folder, the browser's socket and its
+profile. Landlock from its second ABI (Linux 5.19) keeps a confined process from both: it attaches
+to none outside its domain and cannot open their `/proc/<pid>/root`. Yama's `ptrace_scope` keeps
+the attach alone, not `/proc/<pid>/root`, which needs only the right to read: it is no substitute.
+Where Landlock is missing or below its second ABI, the browser's isolation is unavailable and the
+login refuses, saying so and what lets it sign in.
+
+**Full mode.** The namespace keeps the browser from the runs Flottille confines, Ask's and
+Auto's. A run that reaches the vault folder or the user's other processes as the user does, as a
+run in Full mode may, can enter the namespace (`setns` into its holder) and reach DevTools: the
+browser's isolation is no defence against it.
+
+**After Flottille's program is updated in place**, the daemon that still runs cannot start the
+namespace's holder, which is its own program by its path, and the login refuses until the daemon
+is restarted.
+
+Without pasta on the `PATH`, where the kernel refuses user namespaces, or where Landlock is below
+its second ABI, the server still runs, its browser in the runs' network, and the **login refuses
+to fill**, saying why and its remedy: "install passt (pasta) to let the agent's browser sign in",
+the user namespaces to allow, or the kernel to update. Every other action of the connection works.
+`flottille doctor` says whether the browser's isolation is available (`sandbox.browser_network`),
+with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as
+`passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces
+through AppArmor, which refuses Flottille's own namespaces, the browser's included, until the user
+lifts the restriction or allows Flottille.
 
 ## The tests' keyring
 

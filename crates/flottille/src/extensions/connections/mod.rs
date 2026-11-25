@@ -9,6 +9,7 @@ mod adapters;
 mod bounded;
 mod client;
 pub mod command;
+pub mod network;
 mod oauth;
 pub mod requests;
 mod schema;
@@ -37,19 +38,20 @@ use crate::projects::Failure;
 pub use adapters::{in_clear, provide, site};
 pub use client::{Live, stop_all};
 
-/// The browsers a daemon that died left shown, closed before any server or login of theirs
-/// starts: agent-browser's daemon outlives the daemon that started it, confined with the display
-/// folder this daemon removed (`display::clean`) and makes again, a folder out of its reach
-/// (#1040). Each is closed the way a stop closes it, by its socket folder; one that does not
-/// answer is no error.
+/// The browsers a daemon that died left, shown or hidden, closed before any server or login of
+/// theirs starts: agent-browser's daemon outlives the daemon that started it, a shown one confined
+/// with the display folder this daemon removed (`display::clean`) and makes again, a folder out of
+/// its reach (#1040), and every one with its vault folder within its reach, under a mode the
+/// user's switch may have changed since. Each is closed the way a stop closes it, by its socket
+/// folder; one that does not answer is no error.
 pub async fn close_left_at_start(daemon: &Daemon) {
+    adapters::swept_at_start(&daemon.paths);
     let Ok(declared) = declarations(&daemon.paths) else {
         return;
     };
     let left: Vec<adapters::Browser> = declared
         .iter()
-        .filter(|declaration| declaration.headed)
-        .filter_map(|declaration| adapters::browser(daemon, declaration, None))
+        .filter_map(|declaration| adapters::left(daemon, declaration))
         .collect();
     // At once, as `stop_all` does: each close is bounded.
     futures::future::join_all(left.iter().map(|browser| adapters::close(daemon, browser))).await;
@@ -179,9 +181,6 @@ pub struct Declaration {
     pub except: Vec<String>,
     /// The OAuth client id the user registered with the server's authorization server, for a URL.
     pub client_id: Option<String>,
-    /// Whether an adapter's browser is shown: its server also gets the daemon's display
-    /// variables, and the adapter writes `headed` in the configuration it writes.
-    pub headed: bool,
 }
 
 /// A vault entry a URL connection's requests carry, and where.
@@ -523,6 +522,7 @@ const KEYS: &[&str] = &[
     // Read and ignored: it added hosts to a list of the browser's sites that is gone (#1041), and
     // a declaration written while it existed still loads.
     "sites",
+    // The same: showing the browser is the agent's, a call at a time (#1066).
     "headed",
 ];
 
@@ -710,12 +710,6 @@ impl Declaration {
                 return Err(format!("{at}.client_id: must be a client id, on one line"));
             }
         }
-        let headed = match table.get("headed") {
-            None => false,
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| format!("{at}.headed: must be true or false"))?,
-        };
         Ok(Declaration {
             name,
             about,
@@ -726,7 +720,6 @@ impl Declaration {
             only,
             except,
             client_id,
-            headed,
         })
     }
 
@@ -774,15 +767,12 @@ impl Declaration {
         if let Some(id) = &self.client_id {
             table["client_id"] = json!(id);
         }
-        if self.headed {
-            table["headed"] = json!(true);
-        }
         table
     }
 
-    /// What trust is given to: how the server is reached, what it is given, the limits, and
-    /// whether an adapter's browser is shown. An edit of any of them is another server as
-    /// far as trust goes; the sentence, the switch and the projects left out are not.
+    /// What trust is given to: how the server is reached, what it is given and the limits. An edit
+    /// of any of them is another server as far as trust goes; the sentence and the
+    /// projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
             Reach::Command(words) => json!({"command": words}),
@@ -801,10 +791,6 @@ impl Declaration {
             "only": self.only});
         if let Some(others) = json.get("secrets") {
             trusted["secrets"] = others.clone();
-        }
-        // Only when it is: a connection that is not shown keeps the digest it was pinned for.
-        if self.headed {
-            trusted["headed"] = json!(true);
         }
         crate::files::sha256(trusted.to_string().as_bytes())
     }
@@ -1433,20 +1419,20 @@ fn now_of(daemon: &Daemon, name: &str) -> Option<(Declaration, Row, State)> {
 }
 
 /// The setting of an action as it applies: what the user set, but off where the adapter that
-/// applies to the pin keeps it off.
+/// applies to the pin keeps it off; with no setting, judged, or off where that adapter does not
+/// know the action.
 fn setting_of<'a>(row: &'a Row, action: &str) -> &'a str {
-    if row
-        .pin
-        .as_ref()
-        .and_then(adapters::applying)
-        .is_some_and(|adapter| adapter.locks(action))
-    {
+    let adapter = row.pin.as_ref().and_then(adapters::applying);
+    if adapter.is_some_and(|adapter| adapter.locks(action)) {
         return "off";
     }
     row.settings
         .get(action)
         .map(String::as_str)
-        .unwrap_or("judged")
+        .unwrap_or_else(|| match adapter {
+            Some(adapter) if !adapter.knows(action) => "off",
+            _ => "judged",
+        })
 }
 
 // ── The tool ─────────────────────────────────────────────────────────────────────────────────
@@ -1690,7 +1676,12 @@ fn decide<'a>(
             action.name, action.name
         )
     })?;
-    if let Some(why) = adapter.and_then(|adapter| adapter.refuses_url(&action.name, &arguments)) {
+    if let Some(why) = adapter.and_then(|adapter| {
+        adapter
+            .refuses_url(&action.name, &arguments)
+            .or_else(|| adapter.refuses_files(&action.name, &arguments))
+            .or_else(|| adapter.refuses_idle(&action.name, &arguments))
+    }) {
         return Err(why);
     }
     limits(declaration, action, &arguments)?;
@@ -1878,10 +1869,16 @@ fn help(declaration: &Declaration, row: &Row, of: Option<&str>, entries: &[Strin
             Some(action) => Outcome::Done(format!(
                 "The action {} of {tool}, as its server describes it ({says}):\n\
                  <connection_text>\n{}\n</connection_text>\nIts arguments, as JSON Schema \
-                 (arguments of the call):\n<connection_text>\n{}\n</connection_text>",
+                 (arguments of the call):\n<connection_text>\n{}\n</connection_text>{}",
                 action.name,
                 framed(&cut(&action.description, HELP_CHARS)),
-                framed(&action.schema.to_string())
+                framed(&action.schema.to_string()),
+                adapter
+                    .and_then(|adapter| adapter.shows)
+                    .filter(|(opens, _)| *opens == action.name)
+                    .map_or(String::new(), |(_, words)| format!(
+                        "\nFlottille's own words, not the server's: {words}"
+                    ))
             )),
             None => Outcome::Refused(format!("refused: {tool} has no action {action:?}")),
         },
@@ -2725,6 +2722,9 @@ async fn remove_if(
         Ok(())
     })?;
     client::stop(daemon, &name).await;
+    client::vault_removed(daemon, &name).await;
+    // Its browser closed with the server: its profile, the sign-ins made in it, goes with it.
+    crate::browsers::remove(&daemon.paths, &name);
     forget_row(daemon, &name)?;
     oauth::forget(daemon, &name)
         .await
@@ -2864,6 +2864,9 @@ fn adapter_said(
                 && let Some(why) = adapter
                     .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
+                    .or_else(|| adapter.unsafe_start(words, &declaration.env))
+                    .or_else(|| adapter.moves_folders(words, &declaration.env))
+                    .or_else(|| adapter.launched(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }
@@ -2872,7 +2875,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, declaration.headed), "said": said})
+                "changed": adapter.changed(config), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,
@@ -2913,6 +2916,13 @@ async fn accept_checked(
             (Some(seen), Some(seen_for)) if *seen_for == digest => seen.clone(),
             _ => return Err(review_first(&name)),
         };
+        // A listing seen before the command was checked at each start is not pinned with it.
+        if let (Some(adapter), Reach::Command(words)) =
+            (adapters::applying(&listing), &declaration.reach)
+            && let Some(why) = adapter.command_refused(words, &declaration.env)
+        {
+            return Err(Failure::refused(format!("{name} is not accepted: {why}")));
+        }
         let settings = settings_of_accept(&row, &listing, &params)?;
         let pin = || {
             // A review that started a server before the pin is written would be met against the
@@ -2981,8 +2991,9 @@ fn review_first(name: &str) -> Failure {
 }
 
 /// The settings `accept` writes for `listing`: kept where the action did not change from the pin
-/// of `row`, judged where it is new or changed (or as the adapter that applies says at the first
-/// pin), then those the user named; off where that adapter keeps it off, whatever is named.
+/// of `row`, judged where it is new or changed (or as the adapter that applies says, at every pin
+/// the same: off for an action it keeps off, runs a script or writes a file by design, or does not
+/// know), then those the user named; off where that adapter keeps it off, whatever is named.
 fn settings_of_accept(
     row: &Row,
     listing: &Listing,
@@ -2997,9 +3008,7 @@ fn settings_of_accept(
             .and_then(|pin| pin.action(&action.name))
             .filter(|had| *had == action)
             .map(|_| setting_of(row, &action.name).to_owned());
-        let first = adapter
-            .filter(|_| row.pin.is_none())
-            .and_then(|adapter| adapter.first(&action.name));
+        let first = adapter.and_then(|adapter| adapter.first(&action.name));
         let setting = match adapter.is_some_and(|adapter| adapter.locks(&action.name)) {
             true => "off".to_owned(),
             false => kept.unwrap_or_else(|| first.unwrap_or("judged").to_owned()),

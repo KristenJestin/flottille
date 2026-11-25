@@ -1805,6 +1805,56 @@ fn an_allowed_push_runs_no_credential_helper_a_run_wrote() {
 }
 
 #[test]
+fn a_push_runs_nothing_a_run_in_full_added_to_the_user_s_git_settings() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    let mcp = session(&user, &url);
+    // As a run in Full writes them, as the user does: in place, the file the daemon found at its
+    // start still the one at its path.
+    let planted = user.path("planted/helper");
+    script(
+        &planted,
+        &format!("echo \"$1\" >> '{}'\n", user.path("planted-ran").display()),
+    );
+    let hooks = user.path("planted/hooks");
+    script(
+        &hooks.join("pre-push"),
+        &format!("echo hook >> '{}'\n", user.path("planted-ran").display()),
+    );
+    let mut settings = std::fs::OpenOptions::new()
+        .append(true)
+        .open(user.path("home/.gitconfig"))
+        .unwrap();
+    std::io::Write::write_all(
+        &mut settings,
+        format!(
+            "[credential]\n\thelper = !{}\n[core]\n\thooksPath = {}\n\
+             [protocol \"ext\"]\n\tallow = always\n",
+            planted.display(),
+            hooks.display()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    drop(settings);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/after-full");
+
+    assert!(
+        !user.path("planted-ran").exists(),
+        "what the run wrote ran: {}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "after-full"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
 fn an_allowed_push_runs_no_git_a_run_put_first_in_the_path() {
     let (user, _agent, _bus) = user();
     // A folder of the user's first in the daemon's `PATH`, as `~/.local/bin` often is.
@@ -2611,6 +2661,26 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
 }
 
 #[test]
+fn an_include_made_after_the_daemon_s_start_gives_a_lifted_push_none_of_its_settings() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    // The user's settings include a file that is not there yet (a machine-local one, made by a
+    // later `gh auth setup-git`, a dotfiles update, or a run in Full).
+    let later = user.path("home/later.gitconfig");
+    let user = credential_helper(user);
+    let mut settings = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
+    settings.push_str(&format!("[include]\n\tpath = {}\n", later.display()));
+    std::fs::write(user.path("home/.gitconfig"), settings).unwrap();
+    let mcp = session(&user, &url);
+    // After the start: a proxy nobody listens on, which a push given it could not get through.
+    std::fs::write(&later, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/included-late");
+
+    assert!(remote_has(&user, "included-late"), "{}", pushed.text);
+}
+
+#[test]
 fn a_decoy_remote_gets_no_forge_helper_asked_for_another_host() {
     let (user, _agent, _bus) = user();
     let (_server, url) = http_remote(&user);
@@ -2703,4 +2773,359 @@ fn a_dry_run_that_forces_a_ref_the_line_did_not_name_is_refused() {
     // A line that asks for the force still forces.
     let pushed = line(&user, &mcp, "git push --force origin");
     assert_ne!(remote_main(), before, "{}", pushed.text);
+}
+
+/// The user's git settings as a dotfiles manager keeps them: `text` in the file of the version
+/// `name` of a folder it versions (`home/dots/versions/<name>/git-config`).
+fn version(user: &User, name: &str, text: &str) -> PathBuf {
+    let file = user.path(&format!("home/dots/versions/{name}/git-config"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// What a dotfiles update does to `link`: a new link renamed over it, to `target`, the version it
+/// led to gone.
+fn relink(link: &Path, target: &Path, gone: &Path) {
+    let new = link.with_extension("new");
+    std::os::unix::fs::symlink(target, &new).unwrap();
+    std::fs::rename(&new, link).unwrap();
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+}
+
+/// The user's git settings, a link at `link` to the version `a`, and their own `ssh` command in
+/// the version `b` that a dotfiles update then brings: its marker file says it ran.
+fn dotfiles(user: User, link: &Path) -> (User, PathBuf, PathBuf) {
+    let own = user.path("home/.ssh/own-b");
+    marker(&user, &own);
+    let a = version(&user, "a", "[user]\n\tname = Test\n");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&a, link).unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap());
+    (user, a, own)
+}
+
+/// The dotfiles update: the version `b` made, with the user's own `ssh` command `own` in it, the
+/// link at `link` moved to it and the version `a` removed.
+fn update(user: &User, link: &Path, a: &Path, own: &Path) {
+    let b = version(
+        user,
+        "b",
+        &format!("[core]\n\tsshCommand = {}\n", own.display()),
+    );
+    relink(link, &b, a);
+}
+
+#[test]
+fn a_dotfiles_update_that_relinks_the_git_config_keeps_the_push_lent() {
+    let (user, _agent, _bus) = user();
+    // A link in a folder of its own, which no run can change: the settings of the user's
+    // dotfiles manager, its folder below the home. The versions are under `home/dots`, kept
+    // read-only to every run since the start, so the new one is no file a run could have written.
+    let link = user.path("home/gitlink/config");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+    let first = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/before"}),
+    ));
+    assert!(first.contains("exited with code 0"), "{first}");
+
+    update(&user, &link, &a, &own);
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/after"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "after"), "{pushed}");
+    let reached = format!("reached {}", socket(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+    // The settings the push read are the new version's.
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{pushed}");
+}
+
+#[test]
+fn a_git_config_a_run_can_write_is_still_refused_after_a_change() {
+    let (user, _agent, _bus) = user();
+    // The settings are a file of the user's, in a folder a run can write.
+    let settings = user.path("home/.gitconfig");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "[user]\n\tname = Test\n").unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+    // Replaced, as `git config --global` writes it: a new file renamed over the old.
+    let new = user.path("home/.gitconfig.new");
+    std::fs::write(&new, "[user]\n\tname = Someone\n").unwrap();
+    std::fs::rename(&new, &settings).unwrap();
+
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/replaced"}),
+    );
+
+    assert!(!remote_has(&user, "replaced"), "{}", pushed.text);
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("a file a run can write"),
+        "the rule that failed is not said: {}",
+        pushed.text
+    );
+    assert!(
+        pushed.text.contains("flottille daemon stop"),
+        "the way to restart is not said: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_relinked_git_config_in_the_home_folder_is_refused_saying_why() {
+    let (user, _agent, _bus) = user();
+    // A link in the home folder itself, which a run can replace: no folder of its own to keep.
+    let link = user.path("home/.gitconfig");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+
+    update(&user, &link, &a, &own);
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/relinked"}),
+    );
+
+    assert!(!remote_has(&user, "relinked"), "{}", pushed.text);
+    assert!(
+        !user.path("home/.ssh/own-b-ran").exists(),
+        "{}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("a link a run can replace"),
+        "the rule that failed is not said: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_restart_clears_a_changed_git_config_refusal() {
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/.gitconfig");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+    update(&user, &link, &a, &own);
+    let refused = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/before-restart"}),
+    );
+    assert!(!remote_has(&user, "before-restart"), "{}", refused.text);
+    assert!(refused.text.contains("lent to no push"), "{}", refused.text);
+    assert!(
+        refused.text.contains("flottille daemon stop"),
+        "the way to restart is not said: {}",
+        refused.text
+    );
+
+    // The restart the refusal names: the daemon stops, the next command starts another.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let mcp = agent(&user);
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/after-restart"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "after-restart"), "{pushed}");
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{pushed}");
+}
+
+#[test]
+fn a_run_cannot_re_point_the_link_of_the_git_settings() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, a, _own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run plants a file of its own and re-points the link at it, as a dotfiles update would.
+    let planted = user.path("work/app/planted-config");
+    std::fs::write(&planted, "[core]\n\tsshCommand = /bin/false\n").unwrap();
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "link = {link:?}\n\
+             try:\n\
+             \x20   os.symlink({planted:?}, link + '.new')\n\
+             \x20   os.rename(link + '.new', link)\n\
+             \x20   print('outcome=replaced')\n\
+             except OSError as e:\n\
+             \x20   print('outcome=' + type(e).__name__)\n",
+            link = link.to_str().unwrap(),
+            planted = planted.to_str().unwrap(),
+        ),
+    );
+
+    assert!(!said.contains("outcome=replaced"), "{said}");
+    assert_eq!(std::fs::read_link(&link).unwrap(), a);
+}
+
+#[test]
+fn a_confined_run_cannot_write_below_the_kept_dotfiles_folder() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, _a, _own) = dotfiles(user, &link);
+    // The next version, already made by the manager before the daemon's start: a folder below the
+    // kept one, beside the version in use, whose own folders are kept in place.
+    let b = version(&user, "b", "[user]\n\tname = Test\n");
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run appends to the next version, makes another beside it, and writes in the one in use.
+    let versions = user.path("home/dots/versions");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nversions = {versions:?}\n\
+             for name, act in [\n\
+             \x20   ('b', lambda: open({b:?}, 'a').write('[core]\\n\\tsshCommand = ./x\\n')),\n\
+             \x20   ('new-in-b', lambda: open(versions + '/b/planted', 'w').write('x')),\n\
+             \x20   ('c', lambda: os.mkdir(versions + '/c')),\n\
+             \x20   ('in-a', lambda: open(versions + '/a/planted', 'w').write('x')),\n\
+             ]:\n\
+             \x20   try:\n\
+             \x20       act()\n\
+             \x20       print(name + '=written')\n\
+             \x20   except OSError as e:\n\
+             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+            versions = versions.to_str().unwrap(),
+            b = b.to_str().unwrap(),
+        ),
+    );
+
+    for name in ["b", "new-in-b", "c", "in-a"] {
+        assert!(
+            said.contains(&format!("{name}=EROFS")) || said.contains(&format!("{name}=EACCES")),
+            "{name}: {said}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&b).unwrap(),
+        "[user]\n\tname = Test\n"
+    );
+    assert!(!versions.join("c").exists(), "{said}");
+}
+
+#[test]
+fn a_confined_run_cannot_write_below_ssh_where_a_folder_is_kept_in_place() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    // The git settings include a file of a folder of `~/.ssh`: that folder is kept in place, below
+    // the read-only `~/.ssh`.
+    let extra = user.path("home/.ssh/git/extra");
+    std::fs::create_dir_all(extra.parent().unwrap()).unwrap();
+    std::fs::write(&extra, "[user]\n\tname = Test\n").unwrap();
+    let settings = user.path("home/.gitconfig");
+    std::fs::write(&settings, "[include]\n\tpath = ~/.ssh/git/extra\n").unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let folder = user.path("home/.ssh/git");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nfolder = {folder:?}\n\
+             for name, act in [\n\
+             \x20   ('planted', lambda: open(folder + '/planted', 'w').write('x')),\n\
+             \x20   ('folder', lambda: os.mkdir(folder + '/more')),\n\
+             ]:\n\
+             \x20   try:\n\
+             \x20       act()\n\
+             \x20       print(name + '=written')\n\
+             \x20   except OSError as e:\n\
+             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+            folder = folder.to_str().unwrap(),
+        ),
+    );
+
+    for name in ["planted", "folder"] {
+        assert!(
+            said.contains(&format!("{name}=EROFS")) || said.contains(&format!("{name}=EACCES")),
+            "{name}: {said}"
+        );
+    }
+    assert!(!folder.join("planted").exists(), "{said}");
+}
+
+#[test]
+fn a_version_moved_into_the_kept_folder_from_a_folder_runs_write_is_refused() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, a, own) = dotfiles(user, &link);
+    let planted = user.path("home/.ssh/planted");
+    marker(&user, &planted);
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run prepares the next version where the manager stages it, beside the folder of the
+    // versions, with a `ssh` command of its own choosing.
+    let staged = user.path("home/dots/staging/b/git-config");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nstaged = {staged:?}\n\
+             try:\n\
+             \x20   os.makedirs(os.path.dirname(staged))\n\
+             \x20   open(staged, 'w').write('[core]\\n\\tsshCommand = {planted}\\n')\n\
+             \x20   print('staged=written')\n\
+             except OSError as e:\n\
+             \x20   print('staged=' + errno.errorcode[e.errno])\n",
+            staged = staged.to_str().unwrap(),
+            planted = planted.display(),
+        ),
+    );
+    // The manager stages the version, unless a file is there already (the one a run holds open,
+    // and writes after the manager), moves it in among the versions, and relinks.
+    if !staged.exists() {
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(
+            &staged,
+            format!("[core]\n\tsshCommand = {}\n", own.display()),
+        )
+        .unwrap();
+    }
+    let b = user.path("home/dots/versions/b");
+    std::fs::rename(staged.parent().unwrap(), &b).unwrap();
+    relink(&link, &b.join("git-config"), &a);
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/moved-in"}),
+    );
+
+    assert!(
+        said.contains("staged=EROFS") || said.contains("staged=EACCES"),
+        "{said}"
+    );
+    assert!(
+        !user.path("home/.ssh/planted-ran").exists(),
+        "{}",
+        pushed.text
+    );
+    // What the manager staged itself is the user's own: the push reads it.
+    assert!(remote_has(&user, "moved-in"), "{}", pushed.text);
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{}", pushed.text);
 }

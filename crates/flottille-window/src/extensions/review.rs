@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui_design_system::{Card, Disclosure, SetHere, Switch, Toast, enter, palette, space, toast};
 use gpui_kit::{
     AnyElement, App, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -17,7 +17,6 @@ use super::{Listed, OnLine, Registry, Setting};
 use crate::actions::Command;
 use crate::session::state_of;
 use crate::session_link::TreeAgent;
-use crate::shell::Shell;
 use crate::state::AgentState;
 
 /// Its name in `extension.list`.
@@ -75,13 +74,12 @@ pub enum Then {
 }
 
 /// `/review` in the composer of `session`: the daemon starts the review, or says why not.
-pub fn start(shell: &WeakEntity<Shell>, session: &str, cx: &mut App) {
-    let command = Command::Ask {
+pub fn start(asks: &crate::actions::Actions, session: &str) {
+    asks.send(Command::Ask {
         method: "review.start".into(),
         params: json!({"agent": session}),
         then: super::Then::Review(Then::Started),
-    };
-    shell.update(cx, |shell, _| shell.perform(command)).ok();
+    });
 }
 
 /// What the daemon answered: a toast either way.

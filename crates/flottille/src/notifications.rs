@@ -107,6 +107,8 @@ fn read(daemon: &Daemon, asked: Read) -> Result<Value, Failure> {
     };
     let changed = daemon.read(|store| store.read_notifications(which, now_ms()))?;
     changed_event(daemon, &changed, false, "read");
+    // What the phones were told of it is dismissed.
+    crate::phone::check(daemon);
     Ok(json!({"read": changed}))
 }
 
@@ -222,6 +224,7 @@ pub fn keep(daemon: &Arc<Daemon>) {
     changed.sort_unstable();
     changed.dedup();
     changed_event(daemon, &changed, pruned, "kept");
+    crate::phone::check(daemon);
 }
 
 /// The rows of what waits for the user from before the cursor: a request still held for them,
@@ -379,6 +382,15 @@ fn root(daemon: &Daemon, id: Option<&str>) -> Option<String> {
     agent.parent.is_none().then_some(agent.id)
 }
 
+/// [`root`] for what a session's own says, its report and its failure: a child an agent of
+/// another machine launched has no parent here, and says them to that agent, not to the user. Its
+/// question to the user (its parent's machine being off) is still the user's, which [`root`] keeps.
+fn session(daemon: &Daemon, id: Option<&str>) -> Option<String> {
+    let id = id?;
+    let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
+    (!agent.is_child()).then_some(agent.id)
+}
+
 /// Whether the session ended or failed.
 fn is_final(daemon: &Daemon, id: &str) -> bool {
     let agent = daemon.read(|store| store.agent(id)).ok().flatten();
@@ -461,7 +473,7 @@ fn note(
             )?
         }
         "agent.answered" | "agent.replaced" | "agent.resumed" | "agent.ended" | "agent.failed" => {
-            let mut changed = match (event.name.as_str(), root(daemon, agent)) {
+            let mut changed = match (event.name.as_str(), session(daemon, agent)) {
                 ("agent.failed", Some(id)) => add(
                     daemon,
                     event,
@@ -478,7 +490,7 @@ fn note(
             }
             changed
         }
-        "agent.reported" => match root(daemon, agent) {
+        "agent.reported" => match session(daemon, agent) {
             Some(id) => add(
                 daemon,
                 event,
@@ -496,7 +508,10 @@ fn note(
             "vault",
             format!("vault:{}", event.seq),
             agent,
-            "Asks you for a vault entry",
+            match data["edit"].is_object() {
+                true => "Proposes a vault edit",
+                false => "Asks you for a vault entry",
+            },
             notification::excerpt(data["name"].as_str().unwrap_or_default()),
         )?,
         "vault.ask_answered" => match data["ask"].as_u64() {

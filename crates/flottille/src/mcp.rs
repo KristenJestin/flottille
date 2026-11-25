@@ -151,7 +151,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given; \".\" for its top."},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 5}
             }, "required": ["path"], "additionalProperties": false})
         },
@@ -188,7 +188,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "content": {"type": "string", "description": "The whole new content."},
                 "why": {"type": "string", "description": "One sentence: why this write."}
             }, "required": ["path", "content"], "additionalProperties": false})
@@ -207,7 +207,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "edits": {"type": "array", "minItems": 1, "maxItems": 50, "items": {
                     "type": "object", "properties": {
                         "old": {"type": "string", "minLength": 1, "description": "The text to replace, appearing once."},
@@ -373,7 +373,7 @@ const SERVED: [Definition; 33] = [
                 "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
                 "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
                 "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
-                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
+                "base": {"type": "string", "description": "create: the branch it goes into, in place of the workspace's base (left out, a workspace whose base branch was merged and deleted opens it into where that went, and says so). edit: the branch it goes into; the workspace's base follows when it is the workspace's own pull request. It must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
                 "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
                 "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
@@ -513,11 +513,10 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "setup",
         title: "The project's setup",
-        description: "The steps that prepare each new workspace, in order, by number. list reads \
-            them; add (at a number, the last by default), edit, remove and move (to) change them, \
-            judged as for tasks, a run step as a run of its line. A step is one of copy (globs), \
-            link, root_entries, run (a line) and task, in a repository, for_each_repository or \
-            the workspace folder. {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
+        description: "The steps that prepare each new workspace, in order, by number: \
+            list reads them; add, edit, remove and move change them, judged as for tasks. A step \
+            is an object with one of copy, link, root_entries, run, task. \
+            {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
             \"for_each_repository\": true}}.",
         read_only: false,
         idempotent: false,
@@ -534,16 +533,14 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "project",
         title: "The project's settings",
-        description: "This project's settings. settings reads each repository's forge and the \
-            tracker; set_settings declares them (null removes one; a tracker left out is kept), \
-            and a repository's base branches and dependencies; what is left out is kept, a \
-            refused change saves nothing. rules reads how agents are told to work (the global \
-            rules, then the project's); set_rules replaces the project's text and sets \
-            rules_alone, for the agents created after. A change is done once the judge or the \
-            user allows it, of the tracker or of the rules only once the user does: you are \
-            answered at once, the result may come later. {\"action\": \"set_settings\", \
-            \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
-            \"depends_on\": [\"lib\"]}]}.",
+        description: "This project's settings: settings reads each repository's forge and the \
+            tracker, rules how agents are told to work; set_settings and set_rules change them \
+            once the judge or the user allows it (the tracker and the rules: the user). \
+            set_rules replaces the project's text whole (text, at most 8000 characters): send \
+            every rule, never one alone. A forge is {kind: github | bitbucket-cloud, repository} \
+            or {kind: bitbucket-data-center, host, repository}, a tracker {kind: github, \
+            repository} or {kind: jira, site, projects}. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \
+            \"base\": [\"develop\", \"main\"], \"depends_on\": [\"lib\"]}]}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -587,26 +584,19 @@ const SERVED: [Definition; 33] = [
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
                 "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "create: the branch it starts from in place of the base rule, on the remote: one for every repository, or {path: branch}. Its pull requests target it."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
-                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
+                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."},
+                "machine": {"type": "string", "description": "remove: the machine of a session or child you started on another machine, whose workspace there it removes, judged there; left out, this machine."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
     Definition {
         name: "services",
         title: "The machine's services",
-        description: "The services of the machine: programs every project shares (a database, \
-            an API the apps call), each run once, in its own folder, by Flottille. A task that \
-            needs one starts it before it runs. list: each with its state (stopped, starting, \
-            ready, running, outside: started by someone else, failed and why), folder and \
-            address; show: one, with the end of its output. start: starts it, what it needs \
-            first, judged as a run of its line in its folder: {\"action\": \"start\", \
-            \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
-            when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
-            url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
-            answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
-            \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
-            {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
-            \"folder\": \"~/tools/redis\"}.",
+        description: "The services of the machine: programs every project shares (a \
+            database, an API the apps call), each run once, in its own folder, by Flottille; a \
+            task that needs one starts it first. list and show read them; start is judged as a \
+            run of its line, stop is always held for the user. {\"action\": \"start\", \
+            \"name\": \"mongo\"}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -631,18 +621,13 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "connections",
         title: "The user's connections",
-        description: "The MCP servers the user gives every agent, each as one tool conn_<name>. \
-            list: each with its state and actions; show: one, its command or URL, its variables \
-            by vault entry name (never a secret), its limits and each action's setting. add, \
-            edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
-            are always held for the user, whatever the mode: you are answered at once, the \
-            result comes later; the user reads the declaration whole before it is written. \
-            A connection is given to every project, so the vault entries it names are every \
-            project's, and a URL's secret goes only to its entry's own address (its url): the \
-            user's Accept waits until they are, and the user sets them from the request. One \
-            the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. \
-            {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
-            \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
+        description: "The MCP servers the user gives every agent, each as one \
+            tool conn_<name>: list and show read them, never a secret; add, edit, remove, set, on \
+            and off are always held for the user, whatever the mode. A connection is given to \
+            every project, so the vault entries it names are every project's (env and headers \
+            hold an entry's name, never a secret); one the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. {\"action\": \"add\", \
+            \"name\": \"notes\", \"about\": \"The user's notes.\", \"command\": \
+            \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -664,26 +649,24 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "vault",
         title: "The user's vault",
-        description: "The secrets the user keeps for agents (a tracker's token, a test \
-            account's login): list gives each entry's name, what it is for, its URL and its \
-            username. A secret is never shown: a tool of Flottille's that needs one takes the \
-            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
-            ask: when you need an entry the vault lacks, the user is offered its form, \
-            prefilled with what you give; they type the secret (answered at once, their answer \
-            later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
-            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.",
+        description: "The secrets the user keeps for agents: list gives each entry's \
+            name, use, URL and username, never a secret (a tool that needs one takes the entry's \
+            name); ask offers the user the form of an entry the vault lacks; propose shows them \
+            your edit of one that is almost right, never its secret. {\"action\": \
+            \"ask\", \"name\": \"staging-login\", \"why\": \"to sign in to staging\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "ask"]},
-                "name": {"type": "string", "description": "ask: the new entry's name."},
-                "why": {"type": "string", "description": "ask: what you need it for, for the user."},
-                "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
-                "username": {"type": "string", "description": "ask: the account, if known."},
-                "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
-                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is, this project's when left out; an entry a connection's server is given is every project's."},
+                "action": {"type": "string", "enum": ["list", "ask", "propose"]},
+                "name": {"type": "string", "description": "ask: the new entry's name; propose: the entry's."},
+                "why": {"type": "string", "description": "ask: what you need it for; propose: what is wrong with it; for the user."},
+                "url": {"type": "string", "description": "ask, propose: where the secret goes (a login page)."},
+                "username": {"type": "string", "description": "ask, propose: the account, if known."},
+                "description": {"type": "string", "description": "propose: what the entry is for, as agents read it."},
+                "for": {"type": "string", "description": "ask, propose: its one use: worklog, or connection:<name> (a login)."},
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is, this project's when left out; an entry a connection's server is given is every project's. propose: whose it becomes."},
                 "connection": {"type": "string", "description": "ask: the connection it is for, declared or that your request asks to add: the entry is every project's, at the connection's address."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -722,19 +705,19 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "agent_launch",
         title: "Launch a child, or start a session",
-        description: "kind (required): child, a part of your own task, in your place, that you \
-            direct and that reports to you (no workspace; refused above the children cap); led, an \
-            autonomous job of its own that you pilot, a real session the user sees under you and \
-            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
-            handed, a session you start for the user and let go, of which you hear nothing more \
-            unless it writes to you. led and handed: a root only, judged, in workspace (main is \
-            the project folder) or new_workspace; you and it write with session_send. Answered at \
-            once with its id; never poll. The brief is all it knows: the task, what to read, the \
-            checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
-            \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
-            \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+        description: "kind (required): child, a part of your own task, in your place, that reports \
+            to you; led, an autonomous job of its own that you pilot, a real session the user \
+            sees under you, which asks you its questions and wakes you at each end of its turns; handed, a session you \
+            start for the user and let go, of which you hear no more unless it writes. led and \
+            handed: a root only, in workspace or new_workspace. Answered at once; never \
+            poll. The brief is all it knows: the task, what to read, the checks, the \
+            deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \"brief\": \
+            \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \"...\", \
+            \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
             \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
-            machine: another machine, in a copy of your place.",
+            machine: another machine, a copy of your place with your uncommitted \
+            changes. project: another registered project, held for the user. new_workspace: \
+            name its branch by the repository's convention.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -939,7 +922,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "session": {"type": "string", "description": "The session's agent id or its title, whole; left out, your own."},
-                "project": {"type": "string", "description": "Another registered project: session is then matched, as a title or an id, among that project's root sessions. Left out, your own project's."},
+                "project": {"type": "string", "description": "Another registered project, as session_send's project."},
                 "last": {"type": "integer", "minimum": 1, "maximum": crate::session_read::MAX_MESSAGES, "description": "The messages of a page, 20 by default."},
                 "since": {"type": "string", "description": "A date, 2026-10-31T14:05:00Z or 2026-10-31: the messages from it on."},
                 "until": {"type": "string", "description": "With since: the messages before it."},
@@ -964,6 +947,159 @@ const SERVED: [Definition; 33] = [
         },
     },
 ];
+
+/// The whole description of `services`, its guide (`docs/tools.md`, "Guides read on demand").
+const SERVICES_WHOLE: &str = "The services of the machine: programs every project shares (a database, \
+    an API the apps call), each run once, in its own folder, by Flottille. A task that \
+    needs one starts it before it runs. list: each with its state (stopped, starting, \
+    ready, running, outside: started by someone else, failed and why), folder and \
+    address; show: one, with the end of its output. start: starts it, what it needs \
+    first, judged as a run of its line in its folder: {\"action\": \"start\", \
+    \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
+    when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
+    url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
+    answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
+    \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
+    {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
+    \"folder\": \"~/tools/redis\"}.";
+/// The whole description of `setup`, its guide (`docs/tools.md`, "Guides read on demand").
+const SETUP_WHOLE: &str = "The steps that prepare each new workspace, in order, by number. list reads \
+    them; add (at a number, the last by default), edit, remove and move (to) change them, \
+    judged as for tasks, a run step as a run of its line. A step is one of copy (globs), \
+    link, root_entries, run (a line) and task, in a repository, for_each_repository or \
+    the workspace folder. {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
+    \"for_each_repository\": true}}.";
+/// The whole description of `connections`, its guide (`docs/tools.md`, "Guides read on demand").
+const CONNECTIONS_WHOLE: &str = "The MCP servers the user gives every agent, each as one tool conn_<name>. \
+    list: each with its state and actions; show: one, its command or URL, its variables \
+    by vault entry name (never a secret), its limits and each action's setting. add, \
+    edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
+    are always held for the user, whatever the mode: you are answered at once, the \
+    result comes later; the user reads the declaration whole before it is written. \
+    A connection is given to every project, so the vault entries it names are every \
+    project's, and a URL's secret goes only to its entry's own address (its url): the \
+    user's Accept waits until they are, and the user sets them from the request. One \
+    the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. \
+    {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
+    \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.";
+/// The whole description of `vault`, its guide (`docs/tools.md`, "Guides read on demand").
+const VAULT_WHOLE: &str = "The secrets the user keeps for agents (a tracker's token, a test \
+    account's login): list gives each entry's name, what it is for, its URL and its \
+    username. A secret is never shown: a tool of Flottille's that needs one takes the \
+    entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
+    ask: when you need an entry the vault lacks, the user is offered its form, \
+    prefilled with what you give; they type the secret (answered at once, their answer \
+    later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
+    \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}. \
+    propose: when an entry is almost right (its URL, username, description, project or \
+    use), the user is shown your edit, before and after, to accept, edit or dismiss; \
+    never its secret (answered at once, their answer later as a delivery). \
+    {\"action\": \"propose\", \"name\": \"staging-login\", \"why\": \"the form is \
+    under /account\", \"url\": \"https://staging.example.com/account\"}.";
+
+/// The whole description of `project`, its guide (`docs/tools.md`, "Guides read on demand").
+const PROJECT_WHOLE: &str = "This project's settings. settings reads each repository's forge and the \
+    tracker; set_settings declares them (null removes one; a tracker left out is kept), \
+    and a repository's base branches and dependencies; what is left out is kept, a \
+    refused change saves nothing. rules reads how agents are told to work (the global \
+    rules, then the project's); set_rules replaces the project's text whole \
+    (text, at most 8000 characters), so send every rule, never one alone, and sets \
+    rules_alone, for the agents created after. A forge is \
+    {kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, \
+    repository}, a tracker {kind: github, repository} or {kind: jira, site, projects}. \
+    A change is done once the judge or the \
+    user allows it, of the tracker or of the rules only once the user does: you are \
+    answered at once, the result may come later. {\"action\": \"set_settings\", \
+    \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
+    \"depends_on\": [\"lib\"]}]}.";
+
+/// The whole description of `agent_launch`, its guide (`docs/tools.md`, "Guides read on demand").
+const AGENT_LAUNCH_WHOLE: &str = "kind (required): child, a part of your own task, in your place, that you \
+    direct and that reports to you (no workspace; refused above the children cap); led, an \
+    autonomous job of its own that you pilot, a real session the user sees under you and \
+    may talk to, which asks you its questions and wakes you at each end of its turns; \
+    handed, a session you start for the user and let go, of which you hear nothing more \
+    unless it writes to you. led and handed: a root only, judged, in workspace (main is \
+    the project folder) or new_workspace; you and it write with session_send. Answered at \
+    once with its id; never poll. The brief is all it knows: the task, what to read, the \
+    checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
+    \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
+    \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+    \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
+    machine: another of the user's machines, judged there, in a copy of your place \
+    (your uncommitted changes go with it). project: another registered project, always \
+    held for the user. new_workspace: name its branch by the repository's convention. \
+    provider, model and effort are yours when left out, and role is worker.";
+
+/// The families an agent rarely calls, listed short: their whole description, with each
+/// argument's sentence, is their guide, read on demand (`docs/tools.md`, "Guides read on demand").
+const ON_DEMAND: [(&str, &str); 6] = [
+    ("services", SERVICES_WHOLE),
+    ("setup", SETUP_WHOLE),
+    ("project", PROJECT_WHOLE),
+    ("connections", CONNECTIONS_WHOLE),
+    ("vault", VAULT_WHOLE),
+    ("agent_launch", AGENT_LAUNCH_WHOLE),
+];
+
+/// What a family read on demand says of its guide, after its short description.
+const GUIDE_SAID: &str = " Its guide, each action and each argument: {\"action\": \"guide\"}, or \
+    with your first call.";
+
+/// What a family with no `action` to ask the guide with says of it: it comes with the first call.
+const GUIDE_SAID_FIRST: &str = " Argument guide: with your first call.";
+
+/// The name of a family read on demand, as `ON_DEMAND` holds it.
+fn on_demand(name: &str) -> Option<&'static str> {
+    ON_DEMAND
+        .iter()
+        .find(|(family, _)| *family == name)
+        .map(|(family, _)| *family)
+}
+
+/// The guide of a family read on demand: its whole description, then a line for each argument
+/// that has a sentence, nested ones by their path.
+fn guide_of(definition: &Definition) -> Option<String> {
+    let (_, whole) = ON_DEMAND
+        .iter()
+        .find(|(family, _)| *family == definition.name)?;
+    fn lines(schema: &Value, path: &str, text: &mut String) {
+        let Some(properties) = schema["properties"].as_object() else {
+            return;
+        };
+        for (name, property) in properties {
+            let path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            if let Some(said) = property["description"].as_str() {
+                text.push_str(&format!("\n- {path}: {said}"));
+            }
+            lines(property, &path, text);
+            lines(&property["items"], &path, text);
+        }
+    }
+    let mut text = format!("{whole}\n\nArguments:");
+    lines(&(definition.schema)(), "", &mut text);
+    Some(text)
+}
+
+/// A schema without the sentence of any argument, nested ones included: what a family read on
+/// demand lists, the sentences being in its guide.
+fn without_sentences(schema: &mut Value) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in properties.values_mut() {
+            if let Some(property) = property.as_object_mut() {
+                property.remove("description");
+            }
+            without_sentences(property);
+        }
+    }
+    if let Some(items) = schema.get_mut("items") {
+        without_sentences(items);
+    }
+}
 
 /// Whether the tool is one of the core's.
 pub fn serves(name: &str) -> bool {
@@ -1040,11 +1176,22 @@ fn definition(name: &str) -> Option<&'static Definition> {
 /// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
 /// through tool search: for the agents Flottille runs, which have nothing else.
 pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
+    let mut schema = (definition.schema)();
+    let mut description = definition.description.to_owned();
+    if on_demand(definition.name).is_some() {
+        without_sentences(&mut schema);
+        if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+            actions.push("guide".into());
+            description.push_str(GUIDE_SAID);
+        } else {
+            description.push_str(GUIDE_SAID_FIRST);
+        }
+    }
     let mut tool = json!({
         "name": definition.name,
         "title": definition.title,
-        "description": definition.description,
-        "inputSchema": (definition.schema)(),
+        "description": description,
+        "inputSchema": schema,
         "annotations": {
             "title": definition.title,
             "readOnlyHint": definition.read_only,
@@ -1072,6 +1219,9 @@ pub struct Grant {
     pub place: Place,
     /// The agent is a root another agent started for the user: it starts none without the user.
     pub launched: bool,
+    /// A caller of another machine stood in for here, reading the session or child it started
+    /// here (`across::serve_call`): that agent, read without a leave, its child as its parent.
+    pub reads: Option<String>,
 }
 
 /// What a tool did.
@@ -1185,6 +1335,8 @@ pub struct Server {
     pub seen: crate::web::Seen,
     /// Moves at every change of a session's tools: what listens for them looks again.
     changes: watch::Sender<u64>,
+    /// The families read on demand whose guide each agent's process was given, by agent.
+    guided: crate::locks::Lock<HashSet<(String, &'static str)>>,
 }
 
 /// Where a running session stands with the tools its grant serves (`docs/tools.md`, "When the
@@ -1265,7 +1417,16 @@ impl Server {
             keyless: crate::locks::Lock::named("keyless", Default::default()),
             seen: crate::web::Seen::default(),
             changes: watch::Sender::new(0),
+            guided: crate::locks::Lock::named("guided", Default::default()),
         }
+    }
+
+    /// Whether the agent's process is yet to be given the guide of `family`: true once.
+    fn first_guide(&self, agent: &str, family: &'static str) -> bool {
+        self.guided
+            .lock()
+            .unwrap()
+            .insert((agent.to_owned(), family))
     }
 
     /// The agent's running session is now served `tools`: told, or said to run an older list
@@ -1422,6 +1583,11 @@ impl Server {
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token = base64url(&bytes);
         let digest = files::sha256(token.as_bytes());
+        // A new process has read no guide.
+        self.guided
+            .lock()
+            .unwrap()
+            .retain(|(guided, _)| *guided != grant.agent);
         let mut tokens = self.tokens.lock().unwrap();
         let agent = grant.agent.clone();
         if let Some(old) = tokens.by_agent.insert(agent.clone(), digest.clone()) {
@@ -1621,7 +1787,8 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
         epoch: agent.epoch,
         tools,
         place,
-        launched: agent.launched_by.is_some(),
+        launched: crate::launches::launched(daemon, agent),
+        reads: None,
     })
 }
 
@@ -1635,7 +1802,8 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         daemon,
         provider,
         project,
-        agent.parent.is_none(),
+        // A child an agent of another machine launched has no parent here, and is at depth 1.
+        agent.parent.is_none() && agent.depth == 0,
         agent.depth,
         crate::vault::listed_to(daemon, project),
         crate::extensions::launched(daemon, &agent.id)
@@ -2119,6 +2287,19 @@ impl ServerHandler for Handler {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        // A family read on demand that this agent holds: its guide, asked or with its first call.
+        let name = providers::PROVIDERS
+            .iter()
+            .find_map(|provider| provider.tool_of(&request.name))
+            .unwrap_or(&request.name);
+        let family = on_demand(name).filter(|family| grant.tools.contains(family));
+        let guide = family.and_then(|family| guide_of(definition(family)?));
+        if let (Some(family), Some(guide)) = (family, &guide)
+            && args["action"] == "guide"
+        {
+            self.daemon.mcp.first_guide(&grant.agent, family);
+            return Ok(CallToolResult::success(vec![ContentBlock::text(guide.clone())]).into());
+        }
         if self.daemon.mcp.called(&digest) {
             say_outdated(&self.daemon, &grant.agent, true);
         }
@@ -2148,6 +2329,15 @@ impl ServerHandler for Handler {
                     "[an image of this answer is left out: its file is gone]",
                 )),
             }
+        }
+        // After the result, in a block of its own: the result and its limits stay as they are.
+        if let (Some(family), Some(guide)) = (family, guide)
+            && self.daemon.mcp.first_guide(&grant.agent, family)
+        {
+            content.push(ContentBlock::text(format!(
+                "[flottille:guide {family}] The guide of {family}, given once with your first \
+                 call of it: {guide}"
+            )));
         }
         Ok(if error {
             CallToolResult::error(content)
@@ -2471,8 +2661,22 @@ async fn played_whole(
     } else {
         (args, None, None)
     };
+    // A read of a session or child this agent started there: answered there by the same tool.
+    let launch_read = match (tool, &away) {
+        ("session_read" | "agent_status", None)
+            if grant.tools.contains(&tool) && !replaced && removed.is_none() =>
+        {
+            crate::across::aimed(daemon, &grant.agent, tool, &args)
+        }
+        _ => None,
+    };
+    // The removal of the workspace of a session or child this agent started there: done there.
+    let removal_there = match grant.tools.contains(&tool) && !replaced && removed.is_none() {
+        true => crate::across::removal_aimed(daemon, &grant.agent, tool, &args),
+        false => None,
+    };
     // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
-    let shaped = away.is_some();
+    let shaped = away.is_some() || launch_read.is_some() || removal_there.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2497,6 +2701,15 @@ async fn played_whole(
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
         crate::across::forward(daemon, grant, tool, &args, away).await
+    } else if let Some(launch) = &launch_read {
+        crate::across::read_launch(daemon, grant, tool, &args, launch).await
+    } else if let Some(removal) = removal_there {
+        // Judged by the machine the workspace is on, as a removal of its own agents': nothing
+        // of it here.
+        match removal {
+            Ok(launch) => crate::across::remove_there(daemon, grant, &args, &launch).await,
+            Err(why) => Outcome::Refused(why),
+        }
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2578,9 +2791,13 @@ async fn played_whole(
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, a
                             // worklog deleted, a connection written, and a pull request's code
-                            // run by its review.
+                            // run by its review. So is, asked from another machine, a removal
+                            // that would lose what did not go back there.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
+                                && !(crate::across::is_stand_in(&grant.agent)
+                                    && removes_a_workspace(tool, &args)
+                                    && crate::actions::removal_loses(&says))
                                 && !gate::asks_leave(&ask)
                                 && !crate::exceptions::asks(&ask)
                                 && !gate::asks_end(&ask)
@@ -2612,9 +2829,13 @@ async fn played_whole(
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 // The judge takes seconds: a leave the user withdrew meanwhile,
-                                // or a session ended, stops the message it was judging.
-                                let lost = (tool == "session_send")
-                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                // or a session ended, stops the message it was judging. A
+                                // session on another machine is no session here: the check
+                                // before the judge skipped it too.
+                                let lost = (tool == "session_send"
+                                    && crate::across::aimed(daemon, &grant.agent, tool, &args)
+                                        .is_none())
+                                .then(|| crate::tree::needs_leave(daemon, grant, &args));
                                 // A read of another project's session is under the same leave.
                                 let read_lost = tool == "session_read"
                                     && crate::session_read::needs_leave(daemon, grant, &args);
@@ -2691,14 +2912,16 @@ async fn played_whole(
     );
     let word = outcome.word();
     let (text, limit) = match (shaped, outcome) {
-        // Masked there of that machine's secrets, and here of this one's: a secret only this
-        // machine knows is never shown its agent either. Escaped and cut there.
-        (true, Outcome::Done(text) | Outcome::Failed(text)) => {
-            (masked(&text, &grant.place), RESULT_LIMIT)
-        }
-        (true, Outcome::Held(text) | Outcome::Refused(text) | Outcome::Invalid(text)) => {
-            (text, RESULT_LIMIT)
-        }
+        // Masked there of that machine's secrets, and here of this one's, whatever its outcome: a
+        // secret only this machine knows is never shown its agent either. Escaped and cut there.
+        (
+            true,
+            Outcome::Done(text)
+            | Outcome::Failed(text)
+            | Outcome::Held(text)
+            | Outcome::Refused(text)
+            | Outcome::Invalid(text),
+        ) => (masked(&text, &grant.place), RESULT_LIMIT),
         (false, outcome) => shown(outcome, &grant.place),
     };
     // Notes left for the session that replaced this one are its own, not this late call's.
@@ -2826,7 +3049,21 @@ pub async fn judged_off(
         {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        judged(&daemon, &grant, &tool, &args)
+        let judged = judged(&daemon, &grant, &tool, &args);
+        // For the tests of what is written between a card and what is done: the card is made,
+        // `<file>.reached` says so, and the call waits while the file exists.
+        if cfg!(debug_assertions)
+            && tool == "workspace"
+            && let Some(file) = std::env::var_os("FLOTTILLE_TEST_AFTER_CARD_FILE")
+                .map(std::path::PathBuf::from)
+                .filter(|file| file.exists())
+        {
+            let _ = std::fs::write(file.with_extension("reached"), "");
+            while file.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        judged
     };
     match tokio::task::spawn_blocking(judging).await {
         Ok(judged) => judged,
@@ -4253,6 +4490,126 @@ mod tests {
         }
     }
 
+    fn definition_schema_action(definition: &Definition) -> Value {
+        (definition.schema)()["properties"]["action"].clone()
+    }
+
+    #[test]
+    fn a_family_read_on_demand_keeps_its_whole_text_in_its_guide() {
+        fn sentences(schema: &Value, found: &mut Vec<String>) {
+            let Some(properties) = schema["properties"].as_object() else {
+                return;
+            };
+            for property in properties.values() {
+                if let Some(said) = property["description"].as_str() {
+                    found.push(said.to_owned());
+                }
+                sentences(property, found);
+                sentences(&property["items"], found);
+            }
+        }
+        for (family, whole) in ON_DEMAND {
+            let definition = definition(family).unwrap();
+            let guide = guide_of(definition).unwrap();
+            assert!(guide.starts_with(whole), "{family}: {guide}");
+            let mut whole_sentences = Vec::new();
+            sentences(&(definition.schema)(), &mut whole_sentences);
+            assert!(!whole_sentences.is_empty(), "{family}");
+            for said in &whole_sentences {
+                assert!(guide.contains(said.as_str()), "{family} lost: {said}");
+            }
+
+            // Listed: what it is, an example, where the guide is; no argument's sentence.
+            let tool = serde_json::to_value(tool_of(definition, true)).unwrap();
+            let description = tool["description"].as_str().unwrap();
+            assert!(
+                description.contains("{\""),
+                "{family} has no example: {description}"
+            );
+            let has_action = !definition_schema_action(definition).is_null();
+            assert!(
+                description.ends_with(if has_action {
+                    GUIDE_SAID
+                } else {
+                    GUIDE_SAID_FIRST
+                }),
+                "{description}"
+            );
+            assert!(description.len() < whole.len(), "{family}");
+            let mut listed = Vec::new();
+            sentences(&tool["inputSchema"], &mut listed);
+            assert!(listed.is_empty(), "{family}: {listed:?}");
+            if has_action {
+                let actions = tool["inputSchema"]["properties"]["action"]["enum"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(actions.last().unwrap(), "guide", "{family}");
+            }
+            assert!(guide_of(definition).is_some() && !guide.contains("[flottille:"));
+        }
+        assert!(guide_of(definition("forge").unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_rule_needed_before_the_first_call_stays_in_the_short_listing() {
+        // The guide comes with the first call, after it is done: what an agent must know to make
+        // that call well is listed, never moved to the guide.
+        let listed = |family: &str| {
+            let tool = serde_json::to_value(tool_of(definition(family).unwrap(), true)).unwrap();
+            tool["description"].as_str().unwrap().to_owned()
+        };
+        // set_rules replaces the text whole: one rule sent alone would replace all the user's.
+        let project = listed("project");
+        for said in [
+            "set_rules replaces the project's text whole",
+            "at most 8000 characters",
+            "every rule, never one alone",
+            // Objects with no declared field in the schema.
+            "{kind: github | bitbucket-cloud, repository}",
+            "{kind: jira, site, projects}",
+        ] {
+            assert!(project.contains(said), "project lost: {said}\n{project}");
+        }
+        // A step is an object with no declared field.
+        let setup = listed("setup");
+        assert!(
+            setup.contains("one of copy, link, root_entries, run, task"),
+            "setup lost what a step is: {setup}"
+        );
+        // A launch on another machine takes the uncommitted changes there, one in another project
+        // is held for the user, and a new workspace's branch follows the repository's convention.
+        let launch = listed("agent_launch");
+        for said in [
+            "a copy of your place with your uncommitted changes",
+            "another registered project, held for the user",
+            "the repository's convention",
+        ] {
+            assert!(launch.contains(said), "agent_launch lost: {said}\n{launch}");
+        }
+        // A secret never goes in a connection's variables or headers.
+        let connections = listed("connections");
+        assert!(
+            connections.contains("never a secret"),
+            "connections lost: {connections}"
+        );
+    }
+
+    #[test]
+    fn a_new_process_is_given_the_guide_again_at_its_first_call() {
+        // Once is per process (`docs/tools.md`, "Guides read on demand").
+        let (server, _) = minted(true);
+        assert!(server.first_guide("a1", "services"));
+        assert!(!server.first_guide("a1", "services"));
+        assert!(server.first_guide("a1", "setup"), "each family has its own");
+        // The agent's process starts again (a reload, a resume): its token is minted anew.
+        server.mint(grant(), true, STARTED.to_vec(), false).unwrap();
+        assert!(server.first_guide("a1", "services"));
+        assert!(server.first_guide("a1", "setup"));
+        // A daemon started again has read no guide to give.
+        let (restarted, _) = minted(true);
+        assert!(restarted.first_guide("a1", "services"));
+    }
+
     #[test]
     fn the_biggest_list_stays_under_the_guards_on_tools_and_tokens() {
         // Anthropic suggests tool search past 10 tools or 10k tokens of definitions
@@ -4267,18 +4624,29 @@ mod tests {
             one family tool with actions (as forge and tickets), guidance read on demand (as \
             skill_read), or tool search for rarely used families. A tool cannot be withheld by \
             context.";
+        // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
+        // definition's size (2,915 characters, measured on that branch), before it is listed
+        // short as the other rarely used families are. The roots list is measured with the
+        // tool `vault` (an entry exists) and `routine` whole: 58,155 characters of the 60,000,
+        // a margin of 1,845 (measured on this branch, round 3, 2026-11-24; child 46,993, leaf
+        // 40,643). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
+        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back, and the
+        // `propose` action of `vault` (listed short too) took 118. The limits are not raised, and
+        // no tool is trimmed.
+        const ROUTINE: usize = 2_915;
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
             ("a root", true, false),
             ("a child", false, false),
             ("a child at the depth limit", false, true),
         ] {
-            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, true);
             let names = served(&claude::PROVIDER, &list);
+            let coming = if root { 1 } else { 0 };
             assert!(
-                names.len() <= TOOLS,
+                names.len() + coming <= TOOLS,
                 "{} tools for {role}, at most {TOOLS}. {advice}",
-                names.len()
+                names.len() + coming
             );
             let chars: usize = names
                 .into_iter()
@@ -4286,7 +4654,8 @@ mod tests {
                     let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
                     tool.unwrap().len()
                 })
-                .sum();
+                .sum::<usize>()
+                + coming * ROUTINE;
             biggest = biggest.max(chars);
         }
         assert!(
@@ -4317,6 +4686,7 @@ mod tests {
                 home: None,
             },
             launched: false,
+            reads: None,
         }
     }
 

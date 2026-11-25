@@ -30,7 +30,7 @@ fn turning_remote_on_starts_the_link_without_a_restart() {
     assert_eq!(settings(&user)["on"], false);
 
     let on = configure(&user, json!({"on": true}));
-    assert_eq!(on, json!({"on": true}));
+    assert_eq!(on, json!({"on": true, "notify": "away"}));
     let seen = user.call("remote.machines", json!({})).unwrap();
     assert!(seen["this"]["key"].is_string(), "{seen:#}");
     assert_eq!(user.status()["pid"], pid, "the daemon was not restarted");

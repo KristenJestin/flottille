@@ -13,6 +13,7 @@ mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod browsers;
 mod changes_command;
 mod chat;
 mod children;
@@ -61,6 +62,7 @@ mod notifications;
 mod notifications_command;
 mod opencode;
 mod people;
+mod phone;
 mod pictures;
 mod pilot;
 mod place;
@@ -68,6 +70,7 @@ mod posts;
 mod program;
 mod programs;
 mod project_command;
+mod project_map;
 mod projects;
 mod providers;
 mod push_folder;
@@ -95,6 +98,7 @@ mod sign_in;
 mod skill_command;
 mod skills;
 mod ssh_agent;
+mod ssh_owned;
 mod subscriptions;
 mod sweep;
 mod tasks;
@@ -103,6 +107,7 @@ mod tickets;
 mod titles;
 mod travel;
 mod travelled;
+mod travelled_folder;
 mod tree;
 mod tunnel;
 mod tunnel_command;
@@ -175,8 +180,8 @@ enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools and
-    /// never see
+    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools; in Full
+    /// a command they run can read them
     Vault {
         #[command(subcommand)]
         action: VaultAction,
@@ -287,6 +292,10 @@ enum Command {
     /// daemon set: what it holds, as JSON
     #[command(name = "read-page", hide = true)]
     ReadPage { kind: String, url: String },
+    /// Hold the network namespace of a connection's browser, which the daemon started it in,
+    /// until the daemon ends it
+    #[command(name = "browser-network", hide = true)]
+    BrowserNetwork,
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
     Window {
@@ -361,10 +370,10 @@ enum ProviderAction {
     Enable { name: String },
     /// Start no more agents on it: those running now go on, and fail at their next start
     Disable { name: String },
-    /// Choose the provider, model and effort a new session starts on
+    /// Choose the provider, model and effort, and the mode, a new session starts in
     NewSession {
         /// The provider; with no model or effort, they are the ones it proposes
-        #[arg(required_unless_present = "clear")]
+        #[arg(required_unless_present_any = ["clear", "mode"])]
         provider: Option<String>,
         #[arg(long, requires = "provider")]
         model: Option<String>,
@@ -373,6 +382,9 @@ enum ProviderAction {
         /// Go back to what the provider proposes
         #[arg(long, conflicts_with = "provider")]
         clear: bool,
+        /// The mode a session you start is in: ask, auto or full
+        #[arg(long, value_parser = ["ask", "auto", "full"])]
+        mode: Option<String>,
     },
 }
 
@@ -459,6 +471,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             action: VaultAction::Provide { .. },
         } => Some("vault provide"),
         Command::ReadPage { .. } => Some("read-page"),
+        Command::BrowserNetwork => Some("browser-network"),
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
@@ -482,6 +495,10 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             "flottille {command} is this machine's own: it drives no other (leave out --machine)"
         )
         .into());
+    }
+    // Started by the daemon with no environment, in the namespace it holds.
+    if let Command::BrowserNetwork = &cli.command {
+        extensions::browser_network();
     }
     // The page's reader runs with no environment: it needs no folder of Flottille's.
     if let Command::ReadPage { kind, url } = &cli.command {
@@ -556,13 +573,25 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     provider,
                     model,
                     effort,
-                    clear: _,
+                    clear,
+                    mode,
                 } => {
-                    let answer = Client::connect_or_start(&paths)?.request(
-                        "provider.set_new_session",
-                        serde_json::json!({"provider": provider, "model": model, "effort": effort}),
-                    )?;
-                    print!("{}", providers::new_session_text(&answer["new_session"]));
+                    let mut client = Client::connect_or_start(&paths)?;
+                    // The mode alone leaves what a new session starts on as it is.
+                    if provider.is_some() || clear {
+                        let answer = client.request(
+                            "provider.set_new_session",
+                            serde_json::json!({"provider": provider, "model": model, "effort": effort}),
+                        )?;
+                        print!("{}", providers::new_session_text(&answer["new_session"]));
+                    }
+                    if let Some(mode) = mode {
+                        let answer = client.request(
+                            "provider.set_new_session_mode",
+                            serde_json::json!({"mode": mode}),
+                        )?;
+                        print!("{}", providers::new_session_mode_text(&answer));
+                    }
                     return Ok(ExitCode::SUCCESS);
                 }
                 ProviderAction::List { json } => {
@@ -684,6 +713,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             agent: BridgeAgent::Codex,
         } => return codex_bridge::run(&paths),
         Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
+        Command::BrowserNetwork => unreachable!("the namespace's holder never returns"),
         Command::Window { open } => {
             // One window: a second command brings the open one to the front and leaves. When
             // that cannot be told (no runtime folder to hold the place), another window is

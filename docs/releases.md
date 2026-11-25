@@ -204,16 +204,26 @@ about five minutes, not twenty.
   `tools/` (the tests that read `ci.yml` or run `package.sh` judge a change of them), and those
   listed on a line of its description, `Tests: <name> <name>…`, a binary's name or a grouped
   file's (the developing agent lists those it ran; the description is read when the jobs run, so
-  running them again picks up a line written after the push). When it selects no binary, it runs the unit tests of the crates whose
+  running them again picks up a line written after the push). A change of the run sandbox
+  (`mounts.rs`, `landlock.rs`, `ssh_owned.rs`, `runs.rs`) runs `real_programs`, which runs real
+  programs (`ssh`, `git`, `gh`, `cargo`, `node`, `pnpm`, `curl`) through it. When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
   to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
-  nothing else. A pull request that touches no test and no such source runs `check` alone. A push
+  nothing else. A pull request that touches no test and no such source runs `check` alone.
+  Beside them, **the guards** (`guards`) run on every pull request the Rust suite runs for,
+  whatever it changes: the tests that hold a rule over the whole repository, which no pull
+  request's files select (the unit tests of the `flottille` binary, every command's section of
+  `docs/cli.md` among them, `window_parity`, and the window's `window_rules`). A push
   to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its pull request's run is its run.
 - **A push** to `dev` (each merge), `main`, `stable/*`, `next/*` or a tag runs **the whole suite**
   (below). It **blocks nothing**: a pull request's `verify` never waits for it, and a failure there
   names the test and the merge that brought it, to be fixed by a pull request of its own while
   merges go on (no freeze of `dev`). What it does gate is the publish of that push (`dev`'s beta,
   a line's release candidate): `publish` waits for its `verify`.
+
+**A pull request writes no cache**: it reads those dev's pushes write (`save-if` on every
+`Swatinem/rust-cache`, and Gradle's downloads saved by a push only), which its own would evict from
+the repository's 10 GB while serving it alone.
 
 Every job that compiles links with **mold** (`rui314/setup-mold@v1`, which makes it the default
 `ld`: no flag changes, so the caches stay valid).
@@ -228,6 +238,18 @@ The jobs of the whole suite's run:
   its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
   partition compiles nothing.
 - **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
+- **`real-browser`** runs the tests that drive the real agent-browser (`connections::` of
+  `group_remote`: the vault's browser login, the browser's network, its kept profile), which no
+  other job can run: they need agent-browser at the version its adapter is checked on
+  (`npm install --global agent-browser@0.43.0`), passt's `pasta` and a Chrome (the runner's own: a
+  test's `HOME` has none), and print `skipped:` and pass without them. The job installs them
+  (and Weston, for the headed tests of #1066, which start one of their own) and sets
+  `FLOTTILLE_REAL_BROWSER=required`, which turns each of those skips into a failure, so that a
+  change of the browser's sandbox never passes with them skipped; on a machine without the
+  variable they stay a skip. A push runs it; a pull request runs it when it changes the
+  connections extension, `landlock.rs`, `mounts.rs`, `browsers.rs`, `tests/connections.rs` or
+  `ci.yml` (`changes`, its output `browser`). It builds on the cache dev writes, like
+  `test-selected`, and its pull request says how long it took.
 - **`android`** (`apps/android/ci.sh`, when the app or its core changes) builds the mobile core and
   runs the app's unit tests and its instrumentation tests. **The unit tests never fetch**:
   Robolectric would download the `android-all` jar of each SDK it runs on from Maven while the
@@ -235,12 +257,14 @@ The jobs of the whole suite's run:
   (`org.robolectric:android-all-instrumented`, in `apps/android/app/build.gradle.kts`), fetched
   by `:app:fetchRobolectricJars`, a step of `ci.sh` of its own (tried three times) that runs before
   any test, and every test task reads it from there with `robolectric.offline=true`: a test that
-  needs a jar it was not given fails, it never goes to the network.
+  needs a jar it was not given fails, it never goes to the network. Gradle's downloads
+  (`~/.gradle/caches/modules-2`) are kept from one run to the next: Maven Central answers a jar
+  fetched on every run with 429, Too Many Requests.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
-  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
-  `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
+  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check`,
+  `guards` and `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
   pass). Skipped is also a pass when `changes` said the Rust suite is not needed, and when `hub`
-  ran, it must have passed.
+  or `real-browser` ran, it must have passed.
 
 **A failed test is retried**, twice (`.config/nextest.toml`, the profile `ci`): one that passes
 on a retry does not fail the run, and **is not hidden**. Each partition's summary, and `verify`'s

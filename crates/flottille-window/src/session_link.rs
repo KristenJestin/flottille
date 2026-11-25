@@ -17,14 +17,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flottille_protocol::Event;
-use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::{VaultAsk, one_line};
 use crate::exceptions::ExceptionRow;
 use crate::leaves::LeaveRow;
-use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::link::{Conn, Connect, Update, Updates, quiet_wait};
 use crate::model::OpenQuestion;
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
@@ -215,6 +214,8 @@ pub struct Request {
     pub created_at: u64,
     /// `deny`, `once` once decided, `cancelled` when nobody answered it.
     pub decision: Option<String>,
+    /// A held launch's files to share before it is allowed (its `needs`).
+    pub needs: Option<crate::waiting::Needs>,
 }
 
 impl Request {
@@ -258,6 +259,7 @@ impl Request {
                 Some("cancelled") => Some("cancelled".into()),
                 _ => request["decision"].as_str().map(str::to_owned),
             },
+            needs: crate::waiting::Needs::of(&request["call"]["needs"]),
         }
     }
 
@@ -387,6 +389,8 @@ pub struct PlaceFacts {
     /// is on (the project folder).
     pub repositories: Vec<(String, RepositoryFacts)>,
     pub branch: Option<String>,
+    /// The workspace's own folder (a workspace).
+    pub folder: Option<String>,
     pub bases: Vec<String>,
     /// Each repository's pull request (a workspace).
     pub pulls: Vec<PullRequest>,
@@ -585,7 +589,7 @@ const HEALTHY: Duration = Duration::from_secs(10);
 /// conversation.
 pub fn spawn(
     connect: Connect,
-    updates: UnboundedSender<Update>,
+    updates: impl Into<Updates>,
     root: String,
     shown: String,
     place: Where,
@@ -597,7 +601,7 @@ pub fn spawn(
     let watched = Arc::new(Mutex::new(None));
     let link = Link {
         connect,
-        updates,
+        updates: updates.into(),
         token,
         root,
         shown,
@@ -621,7 +625,7 @@ pub fn spawn(
 
 struct Link {
     connect: Connect,
-    updates: UnboundedSender<Update>,
+    updates: Updates,
     token: u64,
     root: String,
     shown: String,
@@ -1086,6 +1090,7 @@ impl Link {
             statuses: RepositoryStatus::of_workspace(&shown),
             repositories,
             branch: shown["branch"].as_str().map(str::to_owned),
+            folder: shown["folder"].as_str().map(str::to_owned),
             bases,
             pulls: forge.pulls,
             forge_problem: forge.problem,

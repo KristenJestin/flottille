@@ -450,6 +450,42 @@ fn a_custom_bitbucket_pipeline_runs_on_the_workspace_branch() {
 }
 
 #[test]
+fn a_write_whose_gh_could_not_be_checked_says_nothing_was_written() {
+    let (user, _, mcp) = setup();
+    let mut script = gh_script();
+    script["status_fail"] = json!("HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+    user.gh_script(script);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "run", "repository": "web", "pipeline": "e2e.yml"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("gh could not be checked"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("HTTP 502: Bad Gateway"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("nothing was written"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        !answer.text.contains("could not be refreshed"),
+        "a write refreshes nothing: {}",
+        answer.text
+    );
+}
+
+#[test]
 fn a_github_workflow_runs_with_its_inputs() {
     let (user, _, mcp) = setup();
 

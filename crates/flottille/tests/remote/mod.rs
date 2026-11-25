@@ -51,7 +51,7 @@ pub struct TestHub {
     /// Serves the hub while the test runs.
     _runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
-    served: Served<SystemClock>,
+    served: Option<Served<SystemClock>>,
     address: SocketAddr,
 }
 
@@ -72,9 +72,26 @@ impl TestHub {
         TestHub {
             _runtime: runtime,
             _folder: folder,
-            served,
+            served: Some(served),
             address,
         }
+    }
+
+    /// Stops the hub: every session to it ends.
+    pub fn stop(&mut self) {
+        let served = self.served.take().unwrap();
+        self._runtime.block_on(served.stop());
+    }
+
+    /// Serves the hub again from its state folder, at the address it had.
+    pub fn start_again(&mut self) {
+        let (folder, address) = (self._folder.path().join("hub"), self.address);
+        let served = self._runtime.block_on(async {
+            let hub = Hub::open(&folder, SystemClock).unwrap();
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            flottille_hub::serve(hub, listener, None, Hello::ours("0.4.0")).unwrap()
+        });
+        self.served = Some(served);
     }
 
     pub fn url(&self) -> String {
@@ -85,12 +102,14 @@ impl TestHub {
     pub fn code(&self) -> String {
         let url = self.url();
         self.served
+            .as_ref()
+            .unwrap()
             .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 
     /// Does `act` with the hub, as its host's commands do.
     pub fn with_hub<R>(&self, act: impl FnOnce(&mut Hub<SystemClock>) -> R) -> R {
-        self.served.with_hub(act)
+        self.served.as_ref().unwrap().with_hub(act)
     }
 }
 
@@ -306,4 +325,121 @@ pub async fn dial(
 /// The machine key of `machine`, as `remote.machines` says it.
 pub fn key_of(machine: &Machine) -> PublicKey {
     serde_json::from_value(machine.remote()["this"]["key"].clone()).unwrap()
+}
+
+/// A phone of the user's, paired with the hub as the app pairs it (a controller, its endpoint's
+/// key declared as its machine, saying it is a phone), its session to the hub kept open: what the
+/// hub tells it for its notifications (`docs/remote.md`, "Notifications") is kept, in order, each
+/// with the key of the machine it is from and the frame as it came.
+pub struct Phone {
+    runtime: tokio::runtime::Runtime,
+    _folder: tempfile::TempDir,
+    asker: flottille_link::Asker,
+    told: std::sync::Arc<std::sync::Mutex<Vec<(PublicKey, flottille_link::Notice)>>>,
+}
+
+impl Phone {
+    pub fn pair(hub: &TestHub, name: &str) -> Phone {
+        use flottille_link::{Action, Ask, Change, Colour, Icon, PairCode, Proposed, Pushed, Role};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let key = DeviceKey::make().unwrap();
+        let endpoint = MachineKey::load_or_make(&folder.path().join("endpoint")).unwrap();
+        let code = PairCode::from_code(&hub.code()).unwrap();
+        let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        let name = name.to_owned();
+        let asker = runtime.block_on(async move {
+            let proposed = Proposed {
+                key: key.public(),
+                name,
+                role: Role::Controller,
+                icon: Icon::Phone,
+                colour: Colour::of(&key.public()),
+            };
+            let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
+            let mut paired = Device::pair(&code, proposed, &endpoint, &hello, &Tls::System)
+                .await
+                .unwrap();
+            let (mut device, _) = paired.listed().await.unwrap();
+            let declared = Change::sign(
+                device.list.head(),
+                Action::Machine {
+                    key: key.public(),
+                    machine: endpoint.public(),
+                },
+                &key,
+            )
+            .claimed_by(&endpoint);
+            device.submit(&mut paired.session, declared).await.unwrap();
+            let mut session = paired.session;
+            session
+                .ask(Ask::About {
+                    device: "phone".to_owned(),
+                    system: "android".to_owned(),
+                    notices: true,
+                })
+                .await
+                .unwrap();
+            let asker = session.asker();
+            tokio::spawn(async move {
+                while let Some(pushed) = session.next().await {
+                    if let Pushed::Notice { from, notice } = pushed {
+                        kept.lock().unwrap().push((from, notice));
+                    }
+                }
+            });
+            asker
+        });
+        Phone {
+            runtime,
+            _folder: folder,
+            asker,
+            told,
+        }
+    }
+
+    /// What the app says when it opens its session again: an input now (`mobile.rs`).
+    pub fn tell_presence(&self) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let asker = self.asker.clone();
+        self.runtime
+            .block_on(asker.ask(flottille_link::Ask::Presence {
+                active: true,
+                last_input: now,
+            }))
+            .unwrap();
+    }
+
+    /// What the hub told this phone so far.
+    pub fn told(&self) -> Vec<(PublicKey, flottille_link::Notice)> {
+        self.told.lock().unwrap().clone()
+    }
+
+    /// Waits until the hub told this phone `count` notices: all it told.
+    pub fn wait_told(&self, count: usize) -> Vec<(PublicKey, flottille_link::Notice)> {
+        eventually(&format!("{count} notices told the phone"), || {
+            self.told().len() >= count
+        });
+        self.told()
+    }
+
+    /// Whether the hub tells this phone nothing more than `count` notices within `wait`.
+    pub fn told_nothing_more(&self, count: usize, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if self.told().len() > count {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.told().len() == count
+    }
 }

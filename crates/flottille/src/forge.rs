@@ -44,6 +44,7 @@ mod logs;
 pub(crate) mod people;
 mod pipelines;
 mod review;
+mod stacked;
 mod started;
 mod threads;
 mod yaml;
@@ -487,12 +488,7 @@ impl Pull {
                 Some("REVIEW_REQUIRED") => Some("review required"),
                 _ => None,
             },
-            checks: value["statusCheckRollup"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(check_of)
-                .collect(),
+            checks: rollup(value).into_iter().map(check_of).collect(),
             not_started: None,
             comments: comments("comments"),
             reviews: comments("reviews"),
@@ -522,6 +518,53 @@ impl Pull {
 pub(crate) fn is_bot(author: &Value) -> bool {
     let login = author["login"].as_str().unwrap_or_default();
     author["is_bot"] == true || login.starts_with("app/") || login.ends_with("[bot]")
+}
+
+/// The checks of a head, each counted once: its latest run (`latest`). Every read of a pull
+/// request's checks goes through it, so `forge show`, `forge merge` and the items never disagree.
+fn rollup(value: &Value) -> Vec<&Value> {
+    let started = |check: &&Value| {
+        ["startedAt", "createdAt"]
+            .iter()
+            .find_map(|key| check[*key].as_str().filter(|at| !at.starts_with("0001-")))
+            .and_then(crate::session_read::form)
+    };
+    let all = value["statusCheckRollup"].as_array().into_iter().flatten();
+    // A job is a check of its workflow, a commit status one of its own: the same name in two
+    // workflows, or as a status and a run, is two checks (as `forge checks` groups by workflow).
+    let key = |check: &&Value| match check["__typename"].as_str() {
+        Some("StatusContext") => format!("status\0{}", check["context"].as_str().unwrap_or("")),
+        _ => format!(
+            "{}\0{}",
+            check["workflowName"].as_str().unwrap_or(""),
+            check["name"].as_str().unwrap_or("")
+        ),
+    };
+    latest(all.collect(), key, started)
+}
+
+/// The latest run of each check, in the order the checks first appear: by its start, and of two
+/// that started together the one listed last. A run with no start (queued, not begun) is placed
+/// by the listing alone: it is the latest when listed after the other, so a re-run queued after a
+/// pass blocks, and a stale entry listed before the run that replaced it does not count. A run superseded by a newer one of the same check (run again, replaced, cancelled and
+/// started again) counts no more, whatever it said; the forges list them all for a head.
+pub(crate) fn latest<T>(
+    runs: Vec<T>,
+    check: impl Fn(&T) -> String,
+    started: impl Fn(&T) -> Option<u64>,
+) -> Vec<T> {
+    let mut kept: Vec<(String, Option<u64>, T)> = Vec::new();
+    for run in runs {
+        let (name, at) = (check(&run), started(&run));
+        match kept.iter_mut().find(|(other, ..)| *other == name) {
+            Some(newest) if at.is_none() || newest.1.is_none() || at >= newest.1 => {
+                *newest = (name, at, run)
+            }
+            Some(_) => {}
+            None => kept.push((name, at, run)),
+        }
+    }
+    kept.into_iter().map(|(.., run)| run).collect()
 }
 
 /// A check of `statusCheckRollup`: a check run (`status`, `conclusion`) or a commit status
@@ -674,20 +717,176 @@ pub(crate) fn bitbucket_lists_host(listed: &Value, host: &str) -> bool {
     bitbucket::lists_host(listed, host)
 }
 
-/// Whether `gh` is there and signed in: its exit code, nothing it prints.
+/// What a command line's own status check says (#1315): signed in, not signed in (it says so
+/// itself), or could not be checked (any other failure: the network, a service that is down, a
+/// timeout, a locked keyring), which says nothing of who is signed in and is never answered with a
+/// sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Auth {
+    SignedIn,
+    NotSignedIn,
+    /// Why it could not be checked: the command line's first error line, masked, or `no answer in
+    /// N s`.
+    Unchecked(String),
+}
+
+/// The words with which `gh`, `glab` and `acli` say they hold no login (`gh auth status`: `You
+/// are not logged into any GitHub hosts`; a token the service refuses: `The token in … is
+/// invalid`, a 401). Anything else a failed status says is not a clear "not signed in": when
+/// unsure, it is "could not check".
+fn says_not_signed_in(said: &str) -> bool {
+    let said = said.to_ascii_lowercase();
+    [
+        "not logged in",
+        "not signed in",
+        "not authenticated",
+        "unauthenticated",
+        "no token found",
+        "unauthorized",
+        "bad credentials",
+    ]
+    .iter()
+    .any(|phrase| said.contains(phrase))
+        || (said.contains("token") && said.contains("is invalid"))
+}
+
+/// The line that says why a command line failed: the first that starts with a failure mark or
+/// says `error`, else the first that is not empty (`gh auth status` starts with the host's name).
+/// glab's own (`x gitlab.com: API call failed: …`) is said without its mark and its host. The
+/// account's login is never shown, a secret is masked, and only then is the line cut.
+pub(crate) fn error_line(stderr: &str, stdout: &str) -> Option<String> {
+    let said: Vec<&str> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let marked = |line: &str| {
+        line.starts_with("X ")
+            || line.starts_with("x ")
+            || line.starts_with("✗")
+            || line.to_ascii_lowercase().contains("error")
+    };
+    let line = said.iter().find(|line| marked(line)).or(said.first())?;
+    let line = match line.strip_prefix("x ") {
+        // The host is said before what it answered: what it answered is the reason.
+        Some(rest) => match rest.split_once(": ") {
+            Some((host, answered)) if !host.contains(' ') => answered,
+            _ => rest,
+        },
+        None => line,
+    };
+    Some(cut(&masked(&without_login(line))))
+}
+
+/// A line cut to what a row can show.
+fn cut(line: &str) -> String {
+    line.chars().take(200).collect()
+}
+
+/// `line` with the login that follows `account` said by its first letter (`X Timeout trying to log
+/// in to github.com account octocat (keyring)`).
+fn without_login(line: &str) -> String {
+    let Some(at) = line.find(" account ") else {
+        return line.to_owned();
+    };
+    let (before, rest) = line.split_at(at + " account ".len());
+    let (login, after) = rest.split_once(' ').unwrap_or((rest, ""));
+    let shown = crate::sign_in::account_masked(login).unwrap_or_default();
+    format!("{before}{shown} {after}").trim_end().to_owned()
+}
+
+/// The cause `gh auth status` prints on its `- Error:` line. For every failure of its API call but
+/// a timeout (DNS, refused, a 5xx, a rate limit) gh prints the shape of a bad token (`X Failed to
+/// log in…`, `- The token in keyring is invalid.`), with the real cause on that line.
+fn gh_cause(said: &str) -> Option<&str> {
+    said.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("- Error:"))
+        .map(str::trim)
+        .filter(|cause| !cause.is_empty())
+}
+
+/// Whether the cause of a failed API call is the service refusing the login: a 401, bad
+/// credentials or an expired token.
+fn refuses_the_login(cause: &str) -> bool {
+    let cause = cause.to_ascii_lowercase();
+    ["http 401", "bad credentials", "expired", "unauthorized"]
+        .iter()
+        .any(|phrase| cause.contains(phrase))
+}
+
+/// How a time is said: whole seconds, at least one.
+pub(crate) fn no_answer(time: Duration) -> String {
+    format!(
+        "no answer in {} s",
+        time.as_secs_f64().ceil().max(1.) as u64
+    )
+}
+
+/// What a command line's status check says (`program`'s `auth status`, as run). A command line
+/// that is not there is the caller's to say.
+pub(crate) fn auth_of(program: &str, ran: Result<(bool, String, String), Gh>) -> Auth {
+    match ran {
+        Ok((true, _, _)) => Auth::SignedIn,
+        Ok((false, stdout, stderr)) => {
+            let said = format!("{stderr}\n{stdout}");
+            // gh says every failure as a bad token: its own cause is what says which it is.
+            if program == "gh"
+                && let Some(cause) = gh_cause(&said)
+            {
+                return match refuses_the_login(cause) {
+                    true => Auth::NotSignedIn,
+                    false => Auth::Unchecked(cut(&masked(cause))),
+                };
+            }
+            match says_not_signed_in(&said) {
+                true => Auth::NotSignedIn,
+                false => Auth::Unchecked(
+                    error_line(&stderr, &stdout)
+                        .unwrap_or_else(|| format!("{program} failed without saying why")),
+                ),
+            }
+        }
+        Err(Gh::Missing) => Auth::Unchecked(format!("{program} went missing")),
+        Err(Gh::Failed(why)) => Auth::Unchecked(masked(&why)),
+    }
+}
+
+/// The sentence of a check that could not be made: for a read, what is shown could not be
+/// refreshed; for a write, nothing was written.
+pub(crate) fn unchecked(program: &str, why: &str, write: bool) -> String {
+    let after = match write {
+        true => "nothing was written",
+        false => "what is shown could not be refreshed",
+    };
+    format!("{program} could not be checked: {why}; {after}")
+}
+
+/// Whether `gh` is there and signed in: its exit code, and its first error line when it fails
+/// without saying it holds no login.
 pub(crate) async fn signed_in() -> Result<(), String> {
+    signed_in_for(false).await
+}
+
+/// `signed_in`, for a write: a check that could not be made says nothing was written.
+pub(crate) async fn signed_in_to_write() -> Result<(), String> {
+    signed_in_for(true).await
+}
+
+pub(crate) async fn signed_in_for(write: bool) -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
         Err(Gh::Missing) => Err("Flottille cannot find gh, GitHub's command line: install \
              it (https://cli.github.com) and sign in with `gh auth login` to see the pull \
              requests; the rest of Flottille works without it"
             .into()),
-        Err(Gh::Failed(why)) => Err(format!("gh cannot run: {why}")),
-        Ok((false, _, _)) => Err(
-            "gh is not signed in to github.com: run `gh auth login` to see \
-             the pull requests; the rest of Flottille works without it"
-                .into(),
-        ),
-        Ok((true, _, _)) => Ok(()),
+        ran => match auth_of("gh", ran) {
+            Auth::SignedIn => Ok(()),
+            Auth::NotSignedIn => Err("gh is not signed in to github.com: run `gh auth login` \
+                 to see the pull requests; the rest of Flottille works without it"
+                .into()),
+            Auth::Unchecked(why) => Err(unchecked("gh", &why, write)),
+        },
     }
 }
 
@@ -743,7 +942,7 @@ async fn run(
 }
 
 /// How long a call of `gh` or `bkt` may take before it is cut.
-fn gh_time() -> Duration {
+pub(crate) fn gh_time() -> Duration {
     // Tests shorten it, so that a call that hangs is seen cut without waiting half a minute.
     std::env::var("FLOTTILLE_FORGE_TIMEOUT_MS")
         .ok()
@@ -761,11 +960,7 @@ async fn run_for(
 ) -> Result<(bool, String, String), Gh> {
     match run_within(program, time, set, remove, args).await? {
         Some(output) => Ok(output),
-        None => Err(Gh::Failed(format!(
-            "{program} {} took more than {} s",
-            args[..2].join(" "),
-            time.as_secs()
-        ))),
+        None => Err(Gh::Failed(no_answer(time))),
     }
 }
 
@@ -1568,7 +1763,8 @@ async fn created(
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        // A child an agent of another machine launched has no parent here, and is no session.
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let events = crate::extensions::subscribed_on_create(daemon, &place.project);
     if !session || events.is_empty() {
         return String::new();
@@ -2636,7 +2832,7 @@ async fn forge_note(
     };
     let slug = forge.slug();
     if matches!(forge, Forge::GitHub { .. })
-        && let Err(problem) = signed_in().await
+        && let Err(problem) = signed_in_to_write().await
     {
         return Outcome::Failed(problem);
     }
@@ -2703,6 +2899,16 @@ async fn forge_note(
     {
         return refusal;
     }
+    // The branch of the pull request a base is asked for, when it is the repository's own: the
+    // workspace's base follows the forge once the forge took it.
+    let retargeted = match (action, asked.base.as_deref(), place.workspace.is_some()) {
+        ("edit", Some(_), true) => seen_of(&forge, asked.number.unwrap_or_default())
+            .await
+            .ok()
+            .filter(|seen| seen.own)
+            .map(|seen| seen.branch),
+        _ => None,
+    };
     // What the checks were before a change that may start some, to tell what started after it.
     let before = match action == "edit" {
         true => Some(started::Before::read(&forge, asked.number.unwrap_or_default()).await),
@@ -2756,6 +2962,16 @@ async fn forge_note(
                 crate::posts::record_body(daemon, on, body);
             }
             let mut said = format!("Pull request #{number} of {slug} was changed.{reviewers_said}");
+            if let (Some(head), Some(to)) = (retargeted, asked.base.as_deref()) {
+                let on = Retarget {
+                    place,
+                    repository: &checkout.path,
+                    head: &head,
+                    to,
+                    number: &number,
+                };
+                said.push_str(&follow_retarget(daemon, &forge, on).await);
+            }
             if let Some(before) = before {
                 let target = json!({"project": place.project, "repository": checkout.path,
                     "number": number.parse::<u64>().unwrap_or_default()});
@@ -2764,6 +2980,83 @@ async fn forge_note(
             Outcome::Done(said)
         }
     }
+}
+
+/// A pull request of the workspace's own branch that the forge moved onto `to`.
+struct Retarget<'a> {
+    place: &'a Place,
+    repository: &'a str,
+    head: &'a str,
+    to: &'a str,
+    number: &'a str,
+}
+
+/// The workspace's base follows a pull request of its own branch that the forge moved onto `to`
+/// (`forge edit` with a base), but only where the repository's base rule allows a merge: `to` is
+/// one of the rule's branches, or where the workspace's own stacked base went once merged and
+/// deleted. Whatever else the forge took is the forge's: the base stays, and the merge is
+/// refused, which the answer says. The sentence to add to the answer, none when it is not the
+/// workspace's own pull request or the base was `to` already.
+async fn follow_retarget(daemon: &Arc<Daemon>, forge: &Forge, on: Retarget<'_>) -> String {
+    let Retarget {
+        place,
+        repository,
+        head,
+        to,
+        number,
+    } = on;
+    let Some(name) = &place.workspace else {
+        return String::new();
+    };
+    let Ok(Some(workspace)) = daemon.read(|store| store.workspace(&place.project, name)) else {
+        return String::new();
+    };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
+    let branches = workspaces::branches(&workspace, &heads);
+    let Some(at) = workspace
+        .repositories
+        .iter()
+        .position(|worktree| worktree.path == repository)
+        .filter(|at| branches[*at] == head)
+    else {
+        return String::new();
+    };
+    let recorded = workspace.repositories[at].base.branch.clone();
+    if recorded == to {
+        return String::new();
+    }
+    let rule = projects::load_project(daemon, &place.project)
+        .map(|project| repository_rule(&project, repository))
+        .unwrap_or_default();
+    let allowed = rule.iter().any(|branch| branch == to)
+        || (!rule.contains(&recorded)
+            && stacked::has_branch(forge, &recorded).await == Ok(false)
+            && stacked::successor(forge, &recorded).await.as_deref() == Some(to));
+    if !allowed {
+        return format!(
+            " The workspace's base stays {}: {} is not in the repository's base rule ({}), so \
+             the merge of #{number} into it will be refused; move the pull request back onto \
+             {} or a branch of the rule, or ask the user.",
+            masked(&recorded),
+            masked(to),
+            rule.join(", "),
+            masked(&recorded)
+        );
+    }
+    let why = format!("its pull request #{number} was moved onto it on the forge");
+    workspaces::move_base(daemon, &workspace, repository, (&recorded, to), &why)
+        .map(|said| format!(" {said}"))
+        .unwrap_or_default()
+}
+
+/// The base rule of the repository `path` as the project's file says it now.
+fn repository_rule(project: &Project, path: &str) -> Vec<String> {
+    project
+        .repositories
+        .iter()
+        .find(|repository| repository.path == path)
+        .map(|repository| repository.base.clone())
+        .unwrap_or_default()
 }
 
 /// What an `edit` asks that the forge cannot do, refused before anything is written: labels on
@@ -2783,33 +3076,21 @@ async fn edit_checked(forge: &Forge, asked: &ForgeCall) -> Result<(), Outcome> {
             )));
         }
     }
-    let Some(base) = asked.base.as_deref() else {
-        return Ok(());
-    };
-    let found = match forge {
-        Forge::GitHub { .. } => {
-            let path = format!("repos/{slug}/branches/{base}");
-            gh_text(&[
-                "api",
-                &path,
-                "--hostname",
-                declared::GITHUB,
-                "--jq",
-                ".name",
-            ])
-            .await
-            .map(|_| ())
-        }
-        Forge::Bitbucket { .. } => bitbucket::branch_exists(forge, base).await,
-    };
-    match found {
-        Ok(()) => Ok(()),
-        Err(why) if why.contains("404") || why.contains("Not Found") => {
-            Err(Outcome::Refused(format!(
-                "refused: {slug} has no branch {} on the forge; nothing was written",
-                masked(base)
-            )))
-        }
+    match asked.base.as_deref() {
+        Some(base) => base_checked(forge, base).await,
+        None => Ok(()),
+    }
+}
+
+/// Refuses a base the forge has not got, before anything is written.
+async fn base_checked(forge: &Forge, base: &str) -> Result<(), Outcome> {
+    match stacked::has_branch(forge, base).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Outcome::Refused(format!(
+            "refused: {} has no branch {} on the forge; nothing was written",
+            forge.slug(),
+            masked(base)
+        ))),
         Err(why) => Err(Outcome::Failed(why)),
     }
 }
@@ -2948,7 +3229,7 @@ async fn forge_close(
     let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
     let numbered = number.to_string();
     let repo = forge.gh_repository();
-    if !bitbucket && let Err(problem) = signed_in().await {
+    if !bitbucket && let Err(problem) = signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let seen = match seen_of(&forge, number).await {
@@ -3205,7 +3486,7 @@ async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), Stri
 
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
-async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Outcome {
     if let Some(why) = asked.malformed() {
         return Outcome::Refused(why);
     }
@@ -3345,22 +3626,84 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             .any(|r| r.path == checkout.path && r.delete_branch_on_merge),
         keep_because,
     };
+    // The base a pull request goes into: the one a `create` asked for; else where the workspace's
+    // base went when that branch was merged and deleted on the forge (a stacked workspace); else
+    // the recorded one. A base that moved is recorded once the write is done.
+    let recorded = repository.base.branch.clone();
+    let mut base = recorded.clone();
+    let mut followed = None;
+    match (asked.action.as_str(), asked.base.as_deref()) {
+        ("create", Some(chosen)) => {
+            if let Err(refusal) = base_checked(&forge, chosen).await {
+                return refusal;
+            }
+            base = chosen.to_owned();
+        }
+        ("create" | "merge", _) => {
+            let rule = &repository_rule(&project, &checkout.path);
+            if let Some(moved) = stacked::moved(&forge, &recorded, rule).await {
+                base = moved.to.clone();
+                followed = Some(moved);
+            }
+        }
+        _ => {}
+    }
+    let settle = |forge_said: &str| -> String {
+        let Some(followed) = &followed else {
+            return forge_said.to_owned();
+        };
+        let why = if followed.merged {
+            format!(
+                "{} is gone from {}, merged and deleted",
+                masked(&recorded),
+                forge.slug()
+            )
+        } else {
+            format!(
+                "{} was not found on {} and no merged pull request says where it went, so the \
+                 repository's base rule is taken",
+                masked(&recorded),
+                forge.slug()
+            )
+        };
+        let moved = workspaces::move_base(
+            daemon,
+            &workspace,
+            &checkout.path,
+            (&recorded, &followed.to),
+            &why,
+        );
+        match moved {
+            Some(moved) => format!("{forge_said} {moved}"),
+            None => forge_said.to_owned(),
+        }
+    };
     if matches!(forge, Forge::Bitbucket { .. }) {
-        let base = &repository.base.branch;
-        let on = (daemon, place.project.as_str(), checkout.path.as_str());
-        let written =
-            bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
+        let on = (
+            daemon.as_ref(),
+            place.project.as_str(),
+            checkout.path.as_str(),
+        );
+        let written = bitbucket::write(
+            on,
+            &forge,
+            (branch, base.as_str()),
+            &reviewers,
+            &deletion,
+            asked,
+        )
+        .await;
         return match written {
             Outcome::Done(said) => {
                 if own.is_some() {
                     opened(daemon, &place.project, &checkout.path, branch);
                 }
-                Outcome::Done(said + &reviewers_said)
+                Outcome::Done(settle(&(said + &reviewers_said)))
             }
             other => other,
         };
     }
-    if let Err(problem) = signed_in().await {
+    if let Err(problem) = signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let slug = forge.slug();
@@ -3372,10 +3715,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                     "refused: create needs a title: say what the pull request does".into(),
                 );
             };
-            let base = &repository.base.branch;
             let body = asked.body.unwrap_or_default();
             let mut args = vec![
-                "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
+                "pr", "create", "-R", &repo, "--head", branch, "--base", &base, "--title", &title,
                 "--body", &body,
             ];
             if asked.draft == Some(true) {
@@ -3421,13 +3763,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                                 a merge too";
                         }
                     }
-                    Outcome::Done(told + &reviewers_said)
+                    Outcome::Done(settle(&(told + &reviewers_said)))
                 }
                 Err(why) => Outcome::Failed(why),
             }
         }
         "merge" => {
-            let base = &repository.base.branch;
             let listed = match gh_json(&[
                 "pr",
                 "list",
@@ -3447,7 +3788,8 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             };
             // `--head` names a branch, in this repository or in any fork of it.
             let ours = |pull: &&Value| {
-                pull["isCrossRepository"] == false && pull["baseRefName"].as_str() == Some(base)
+                pull["isCrossRepository"] == false
+                    && pull["baseRefName"].as_str() == Some(base.as_str())
             };
             let Some(number) = listed.iter().find(ours).and_then(|p| p["number"].as_u64()) else {
                 let why = match listed.first() {
@@ -3545,10 +3887,10 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                         ),
                         _ => kept.said(branch),
                     };
-                    Outcome::Done(format!(
+                    Outcome::Done(settle(&format!(
                         "The pull request #{number} of {branch} was merged by {method} into \
                          {base} in {slug}{said}."
-                    ))
+                    )))
                 }
                 Err(why) => {
                     // Refused by the forge: when the repository forbids the method, say which
@@ -3587,7 +3929,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 "--limit",
                 "50",
                 "--json",
-                "databaseId,headSha,conclusion,workflowName",
+                "databaseId,headSha,conclusion,workflowName,createdAt",
             ])
             .await
             {
@@ -3595,11 +3937,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 Err(why) => return Outcome::Failed(why),
             };
             let runs = runs.as_array().cloned().unwrap_or_default();
-            // The runs of the branch's last commit, the newest listed first.
+            // The runs of the branch's last commit, the newest listed first; of each workflow, its
+            // latest run alone, as the pull request's checks count them.
             let head = runs.first().and_then(|run| run["headSha"].as_str());
-            let failed: Vec<&Value> = runs
+            let of_head: Vec<&Value> = runs
                 .iter()
-                .filter(|run| run["headSha"].as_str() == head && run["conclusion"] == "failure")
+                .filter(|run| run["headSha"].as_str() == head)
+                .rev()
+                .collect();
+            let workflow = |run: &&Value| run["workflowName"].as_str().unwrap_or("").to_owned();
+            let created = |run: &&Value| {
+                run["createdAt"]
+                    .as_str()
+                    .and_then(crate::session_read::form)
+            };
+            let failed: Vec<&Value> = latest(of_head, workflow, created)
+                .into_iter()
+                .filter(|run| run["conclusion"] == "failure")
                 .collect();
             if failed.is_empty() {
                 return Outcome::Refused(format!(
@@ -4243,10 +4597,8 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
             .filter(|at| !at.starts_with("0001-"))
             .map(masked)
     };
-    value["statusCheckRollup"]
-        .as_array()
+    rollup(value)
         .into_iter()
-        .flatten()
         .map(|check| {
             let (name, state) = check_of(check);
             flottille_core::item::Check {
@@ -4268,6 +4620,86 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `gh auth status` prints when its API call fails with `cause` (cli/cli,
+    /// `auth/status/status.go`): the shape of a bad token, whatever the cause.
+    fn gh_failing(cause: &str) -> Result<(bool, String, String), Gh> {
+        Ok((
+            false,
+            String::new(),
+            format!(
+                "github.com\n  X Failed to log in to github.com account octocat (keyring)\n  - \
+                 Active account: true\n  - The token in keyring is invalid.\n  - Error: {cause}\n"
+            ),
+        ))
+    }
+
+    #[test]
+    fn gh_failing_on_its_api_is_judged_by_its_error_line_not_by_its_bad_token_shape() {
+        for cause in [
+            "Get \"https://api.github.com/user\": dial tcp: lookup api.github.com: no such host",
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+            "HTTP 403: API rate limit exceeded (https://api.github.com/graphql)",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::Unchecked(cause.to_owned()),
+                "{cause}"
+            );
+        }
+        for cause in [
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            "HTTP 401: The token has expired",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::NotSignedIn,
+                "{cause}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reason_never_shows_the_login_of_an_account() {
+        // gh's timeout has no `- Error:` line: its first line names the account.
+        let ran = Ok((
+            false,
+            String::new(),
+            "github.com\n  X Timeout trying to log in to github.com account octocat (keyring)\n"
+                .to_owned(),
+        ));
+        let Auth::Unchecked(why) = auth_of("gh", ran) else {
+            panic!("a timeout says nothing of the login");
+        };
+        assert!(!why.contains("octocat"), "{why}");
+        assert!(why.contains("Timeout"), "{why}");
+    }
+
+    #[test]
+    fn glab_s_reason_is_its_failed_call_not_its_host() {
+        let ran = Ok((
+            false,
+            String::new(),
+            "gitlab.com\n  x gitlab.com: API call failed: 502 Bad Gateway\n".to_owned(),
+        ));
+
+        assert_eq!(
+            auth_of("glab", ran),
+            Auth::Unchecked("API call failed: 502 Bad Gateway".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_reason_is_masked_before_it_is_cut() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // The token starts before the cut and ends after it: cut first, it would be half shown.
+        let line = format!("Error: {} {token}", "x".repeat(180));
+
+        let said = error_line(&line, "").unwrap();
+
+        assert!(!said.contains("ghp_"), "{said}");
+        assert!(!said.contains("abcdefghij"), "{said}");
+    }
 
     #[test]
     fn a_recorded_url_keeps_no_credentials() {

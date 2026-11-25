@@ -1,0 +1,514 @@
+//! How the user arranged their projects (`docs/design.md` §10, the sidebar): the order of the
+//! list and the groups they made, which projects are dragged into and out of. It is the user's view
+//! of their projects, kept by this machine's daemon with the rest of the sidebar's state
+//! (`docs/protocol.md`, "The draft and window methods"), never in a project.
+//!
+//! A project is named by its key, the name of its row (a project several machines share is one
+//! row, one key). A key that names no project of the list is ignored, and a project the
+//! arrangement does not name yet (a new one) is at the end of the list, outside any group.
+
+use serde_json::{Value, json};
+
+/// The key of the daemon's window state that holds the arrangement.
+pub const KEY: &str = "arrangement";
+
+/// A group of the user's: a name, whether it is unfolded, and the projects in it, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub open: bool,
+    pub projects: Vec<String>,
+}
+
+/// The longest name a group has.
+pub const NAME_LIMIT: usize = 60;
+
+/// The user's order and groups, as the daemon keeps them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Arrangement {
+    /// The projects outside any group, in order.
+    pub order: Vec<String>,
+    /// The groups, in order: they come first in the list.
+    pub groups: Vec<Group>,
+}
+
+/// One thing the user did to the arrangement. It is kept as it was done, not as the whole it
+/// left: the daemon's arrangement is read again when it is written, and the change applied to
+/// that copy, so that what another window arranged meanwhile is not erased.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// A group made. Its id is chosen where it is made, so that the changes after it can name it.
+    AddGroup {
+        id: String,
+        name: String,
+    },
+    RemoveGroup(String),
+    RenameGroup {
+        id: String,
+        name: String,
+    },
+    MoveProject {
+        present: Vec<String>,
+        key: String,
+        group: Option<String>,
+        index: usize,
+    },
+    MoveGroup {
+        id: String,
+        index: usize,
+    },
+    OpenGroup {
+        id: String,
+        open: bool,
+    },
+}
+
+impl Change {
+    /// A new group's change, with an id no other group is likely to have, in this window or
+    /// another: the clock in microseconds, and a count for the groups made in the same one.
+    pub fn add_group(name: &str) -> Self {
+        static MADE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_micros());
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::AddGroup {
+            id: format!("g{now:x}-{made}"),
+            name: name.trim().to_owned(),
+        }
+    }
+}
+
+/// What the list shows: the groups with the projects they hold now, then the projects outside any
+/// group.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub groups: Vec<Group>,
+    pub loose: Vec<String>,
+}
+
+impl Listed {
+    /// The group a project is in, if any.
+    pub fn group_of(&self, key: &str) -> Option<&str> {
+        self.groups
+            .iter()
+            .find(|group| group.projects.iter().any(|k| k == key))
+            .map(|group| group.id.as_str())
+    }
+
+    /// Every project, groups first, in the order drawn.
+    pub fn keys(&self) -> Vec<String> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.projects.iter().cloned())
+            .chain(self.loose.iter().cloned())
+            .collect()
+    }
+}
+
+impl Arrangement {
+    /// The arrangement as the daemon keeps it (`window.get`'s `state`, under `arrangement`).
+    pub fn of(kept: &Value) -> Self {
+        let keys = |value: &Value| -> Vec<String> {
+            value
+                .as_array()
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(|key| key.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let groups = kept["groups"]
+            .as_array()
+            .map(|groups| {
+                groups
+                    .iter()
+                    .filter_map(|group| {
+                        Some(Group {
+                            id: group["id"].as_str()?.to_owned(),
+                            name: group["name"].as_str()?.to_owned(),
+                            open: group["open"].as_bool().unwrap_or(true),
+                            projects: keys(&group["projects"]),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            order: keys(&kept["order"]),
+            groups,
+        }
+    }
+
+    /// What the daemon keeps (`window.set`, key `arrangement`), whole.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "order": self.order,
+            "groups": self.groups.iter().map(|group| {
+                json!({"id": group.id, "name": group.name, "open": group.open,
+                    "projects": group.projects})
+            }).collect::<Vec<_>>(),
+        })
+    }
+
+    /// The list for the projects `present`, in the order the daemon lists them: what the
+    /// arrangement names and the list has, then the projects it does not name, at the end. What it
+    /// names and the list has not (a project out of reach for now) is left out here, and kept.
+    pub fn listed(&self, present: &[String]) -> Listed {
+        let mut seen: Vec<String> = Vec::new();
+        let mut take = |keys: &[String]| -> Vec<String> {
+            let mut taken = Vec::new();
+            for key in keys {
+                if present.contains(key) && !seen.contains(key) {
+                    seen.push(key.clone());
+                    taken.push(key.clone());
+                }
+            }
+            taken
+        };
+        let groups = self
+            .groups
+            .iter()
+            .map(|group| Group {
+                projects: take(&group.projects),
+                ..group.clone()
+            })
+            .collect();
+        let mut loose = take(&self.order);
+        loose.extend(take(present));
+        Listed { groups, loose }
+    }
+
+    /// The projects of `present` the arrangement does not name yet, put at the end of the list:
+    /// a move counts places among the projects it names.
+    fn adopt(&mut self, present: &[String]) {
+        for key in present {
+            let named = self.order.contains(key)
+                || self.groups.iter().any(|group| group.projects.contains(key));
+            if !named {
+                self.order.push(key.clone());
+            }
+        }
+    }
+
+    /// A project dragged to `index` among the projects of `group` (`None`: outside any group),
+    /// counted once it has left its own place and among the projects `present`: those that are
+    /// not (out of reach for now) keep their places, and the project is put by those that are.
+    pub fn move_project(
+        &mut self,
+        present: &[String],
+        key: &str,
+        group: Option<&str>,
+        index: usize,
+    ) {
+        self.adopt(present);
+        if !present.iter().any(|k| k == key) {
+            return;
+        }
+        if group.is_some_and(|id| !self.groups.iter().any(|held| held.id == id)) {
+            return;
+        }
+        self.order.retain(|k| k != key);
+        for held in &mut self.groups {
+            held.projects.retain(|k| k != key);
+        }
+        let place = match group.and_then(|id| self.groups.iter_mut().find(|held| held.id == id)) {
+            Some(held) => &mut held.projects,
+            None => &mut self.order,
+        };
+        let there: Vec<usize> = place
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| present.contains(k))
+            .map(|(at, _)| at)
+            .collect();
+        let at = match there.get(index) {
+            Some(at) => *at,
+            None => there.last().map_or(place.len(), |last| last + 1),
+        };
+        place.insert(at, key.to_owned());
+    }
+
+    /// A group dragged to `index` among the groups, counted once it has left its own.
+    pub fn move_group(&mut self, id: &str, index: usize) {
+        let Some(at) = self.groups.iter().position(|group| group.id == id) else {
+            return;
+        };
+        let group = self.groups.remove(at);
+        self.groups.insert(index.min(self.groups.len()), group);
+    }
+
+    /// What the user did, done to this arrangement.
+    pub fn apply(&mut self, change: &Change) {
+        match change {
+            Change::AddGroup { id, name } => self.add_group(id, name),
+            Change::RemoveGroup(id) => self.remove_group(id),
+            Change::RenameGroup { id, name } => self.rename_group(id, name),
+            Change::MoveProject {
+                present,
+                key,
+                group,
+                index,
+            } => self.move_project(present, key, group.as_deref(), *index),
+            Change::MoveGroup { id, index } => self.move_group(id, *index),
+            Change::OpenGroup { id, open } => self.open_group(id, *open),
+        }
+    }
+
+    /// A new, empty group at the end of the groups, unfolded. A group already held under that
+    /// id is left as it is.
+    pub fn add_group(&mut self, id: &str, name: &str) {
+        if self.groups.iter().any(|group| group.id == id) {
+            return;
+        }
+        self.groups.push(Group {
+            id: id.to_owned(),
+            name: name.trim().to_owned(),
+            open: true,
+            projects: Vec::new(),
+        });
+    }
+
+    /// A group given another name.
+    pub fn rename_group(&mut self, id: &str, name: &str) {
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == id) {
+            group.name = name.trim().to_owned();
+        }
+    }
+
+    /// A group folded or unfolded.
+    pub fn open_group(&mut self, id: &str, open: bool) {
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == id) {
+            group.open = open;
+        }
+    }
+
+    /// A group removed: its projects go back to the list, at the end, in their order.
+    pub fn remove_group(&mut self, id: &str) {
+        let Some(at) = self.groups.iter().position(|group| group.id == id) else {
+            return;
+        };
+        let group = self.groups.remove(at);
+        self.order.extend(group.projects);
+    }
+
+    /// Whether a name is already a group's, whatever the case (beyond ASCII too), the group
+    /// `besides` left out: it may take its own name again, in another case.
+    pub fn names(&self, name: &str, besides: Option<&str>) -> bool {
+        let name = name.trim().to_lowercase();
+        self.groups
+            .iter()
+            .filter(|group| Some(group.id.as_str()) != besides)
+            .any(|group| group.name.to_lowercase() == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add(arrangement: &mut Arrangement, name: &str) -> String {
+        let change = Change::add_group(name);
+        arrangement.apply(&change);
+        let Change::AddGroup { id, .. } = change else {
+            unreachable!()
+        };
+        id
+    }
+
+    fn keys(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn projects_the_arrangement_does_not_name_go_at_the_end() {
+        let arrangement = Arrangement {
+            order: keys(&["b", "a"]),
+            groups: Vec::new(),
+        };
+        let listed = arrangement.listed(&keys(&["a", "b", "c"]));
+        assert_eq!(listed.loose, keys(&["b", "a", "c"]));
+    }
+
+    #[test]
+    fn a_key_that_names_no_project_is_ignored() {
+        let arrangement = Arrangement {
+            order: keys(&["gone", "a"]),
+            groups: vec![Group {
+                id: "g1".into(),
+                name: "Work".into(),
+                open: true,
+                projects: keys(&["b", "gone"]),
+            }],
+        };
+        let listed = arrangement.listed(&keys(&["a", "b"]));
+        assert_eq!(listed.groups[0].projects, keys(&["b"]));
+        assert_eq!(listed.loose, keys(&["a"]));
+    }
+
+    #[test]
+    fn a_project_is_moved_into_a_group_and_out_of_it() {
+        let present = keys(&["a", "b", "c"]);
+        let mut arrangement = Arrangement::default();
+        let id = add(&mut arrangement, "Work");
+        arrangement.move_project(&present, "b", Some(&id), 0);
+        let listed = arrangement.listed(&present);
+        assert_eq!(listed.groups[0].projects, keys(&["b"]));
+        assert_eq!(listed.loose, keys(&["a", "c"]));
+        arrangement.move_project(&present, "b", None, 1);
+        let listed = arrangement.listed(&present);
+        assert!(listed.groups[0].projects.is_empty());
+        assert_eq!(listed.loose, keys(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn removing_a_group_puts_its_projects_back_at_the_end() {
+        let present = keys(&["a", "b", "c"]);
+        let mut arrangement = Arrangement::default();
+        let id = add(&mut arrangement, "Work");
+        arrangement.move_project(&present, "a", Some(&id), 0);
+        arrangement.remove_group(&id);
+        assert!(arrangement.groups.is_empty());
+        assert_eq!(arrangement.listed(&present).loose, keys(&["b", "c", "a"]));
+    }
+
+    #[test]
+    fn groups_are_moved_among_themselves() {
+        let mut arrangement = Arrangement::default();
+        let first = add(&mut arrangement, "One");
+        let second = add(&mut arrangement, "Two");
+        assert_ne!(first, second);
+        arrangement.move_group(&second, 0);
+        let names: Vec<_> = arrangement.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Two", "One"]);
+    }
+
+    #[test]
+    fn a_project_absent_while_another_is_moved_returns_to_its_place_and_group() {
+        let all = keys(&["a", "b", "c", "d"]);
+        let mut arrangement = Arrangement::default();
+        let id = add(&mut arrangement, "Work");
+        arrangement.move_project(&all, "b", Some(&id), 0);
+        arrangement.move_project(&all, "c", Some(&id), 1);
+        arrangement.move_project(&all, "d", None, 0);
+        let before = arrangement.listed(&all);
+        assert_eq!(before.groups[0].projects, keys(&["b", "c"]));
+        assert_eq!(before.loose, keys(&["d", "a"]));
+
+        // `b` is out of reach (a machine that is off): the user moves others meanwhile.
+        let present = keys(&["a", "c", "d"]);
+        arrangement.move_project(&present, "a", None, 0);
+        arrangement.move_group(&id, 0);
+        arrangement.open_group(&id, true);
+        assert_eq!(arrangement.listed(&present).loose, keys(&["a", "d"]));
+
+        // It is back: in its group, before `c`, as it was.
+        let listed = arrangement.listed(&all);
+        assert_eq!(listed.groups[0].projects, keys(&["b", "c"]));
+        assert_eq!(listed.loose, keys(&["a", "d"]));
+    }
+
+    #[test]
+    fn a_name_is_taken_whatever_its_case_beyond_ascii() {
+        let mut arrangement = Arrangement::default();
+        add(&mut arrangement, "Équipe");
+        assert!(arrangement.names("équipe", None));
+        assert!(arrangement.names(" ÉQUIPE ", None));
+        assert!(!arrangement.names("Equipe", None));
+    }
+
+    #[test]
+    fn a_group_may_take_its_own_name_again_but_not_another_s() {
+        let mut arrangement = Arrangement::default();
+        add(&mut arrangement, "Work");
+        add(&mut arrangement, "Home");
+        let work = arrangement.groups[0].id.clone();
+        assert!(!arrangement.names("WORK", Some(&work)));
+        assert!(arrangement.names("home", Some(&work)));
+        arrangement.apply(&Change::RenameGroup {
+            id: work,
+            name: " Office ".to_owned(),
+        });
+        assert_eq!(arrangement.groups[0].name, "Office");
+    }
+
+    #[test]
+    fn it_is_what_the_daemon_keeps() {
+        let present = keys(&["a", "b"]);
+        let mut arrangement = Arrangement::default();
+        let id = add(&mut arrangement, "Work");
+        arrangement.move_project(&present, "b", Some(&id), 0);
+        assert_eq!(Arrangement::of(&arrangement.to_json()), arrangement);
+    }
+
+    #[test]
+    fn a_change_is_applied_to_what_another_window_arranged_meanwhile() {
+        let present = keys(&["a", "b"]);
+        // This window never heard of the group the other one made.
+        let mut mine = Arrangement::default();
+        let drag = Change::MoveProject {
+            present: present.clone(),
+            key: "a".into(),
+            group: None,
+            index: 1,
+        };
+        mine.apply(&drag);
+        let mut theirs = Arrangement::default();
+        let id = add(&mut theirs, "Work");
+        theirs.apply(&drag);
+        assert_eq!(theirs.groups[0].id, id);
+        assert_eq!(theirs.groups.len(), 1, "the group is kept");
+        assert_eq!(theirs.listed(&present).loose, keys(&["b", "a"]));
+    }
+
+    #[test]
+    fn a_group_added_twice_under_one_id_is_held_once() {
+        let mut arrangement = Arrangement::default();
+        let change = Change::add_group("Work");
+        arrangement.apply(&change);
+        arrangement.apply(&change);
+        assert_eq!(arrangement.groups.len(), 1);
+    }
+
+    #[test]
+    fn every_arrangement_change_applied_twice_is_held_once() {
+        let present = keys(&["a", "b", "c"]);
+        let mut start = Arrangement::default();
+        let work = add(&mut start, "Work");
+        let play = add(&mut start, "Play");
+        start.move_project(&present, "a", Some(&work), 0);
+        let changes = [
+            Change::add_group("Home"),
+            Change::RemoveGroup(work.clone()),
+            Change::MoveProject {
+                present: present.clone(),
+                key: "b".into(),
+                group: Some(play.clone()),
+                index: 0,
+            },
+            Change::MoveProject {
+                present: present.clone(),
+                key: "c".into(),
+                group: None,
+                index: 0,
+            },
+            Change::MoveGroup {
+                id: play.clone(),
+                index: 0,
+            },
+            Change::OpenGroup {
+                id: work.clone(),
+                open: false,
+            },
+        ];
+        for change in changes {
+            let mut once = start.clone();
+            once.apply(&change);
+            let mut twice = once.clone();
+            twice.apply(&change);
+            assert_eq!(twice, once, "{change:?} applied twice");
+        }
+    }
+}

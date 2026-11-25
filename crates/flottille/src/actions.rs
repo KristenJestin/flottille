@@ -625,6 +625,14 @@ pub fn compared(says: &[String]) -> Vec<&String> {
         .collect()
 }
 
+/// What a removal's card says when it would lose nothing.
+const NOTHING_LOST: &str = "Nothing would be lost";
+
+/// Whether the removal a card `says` would lose anything.
+pub fn removal_loses(says: &[String]) -> bool {
+    !says.iter().any(|said| said == NOTHING_LOST)
+}
+
 fn removal_words(removal: Removal) -> Vec<String> {
     let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
@@ -637,7 +645,7 @@ fn removal_words(removal: Removal) -> Vec<String> {
         says.push(format!("{STOPPED}{}", lines.join(", ")));
     }
     if losses.is_empty() {
-        says.push("Nothing would be lost".into());
+        says.push(NOTHING_LOST.into());
     } else {
         says.push(
             "This would be lost, and the workspace is removed only if your answer says to \
@@ -768,6 +776,9 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
         Some("create") => {
             say(names("reviewers").map(|n| format!("Its reviewers, besides the project's: {n}")));
             say(names("labels").map(|n| format!("Its labels: {n}")));
+            say(args["base"]
+                .as_str()
+                .map(|base| format!("It goes into the base {base}")));
             if args["delete_branch_on_merge"] == true {
                 // GitHub has no such flag per pull request: only a merge by Flottille deletes.
                 let github = matches!(
@@ -889,13 +900,19 @@ fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
     })
 }
 
-/// Whether the agent is a root, the agent the user talks to.
+/// Whether the agent is a root, the agent the user talks to. A child an agent of another machine
+/// launched has no parent here: its depth says it is a child.
 fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
+    is_root_agent(daemon, &grant.agent)
+}
+
+/// Whether the agent `agent` is a root.
+pub(crate) fn is_root_agent(daemon: &Daemon, agent: &str) -> bool {
     daemon
-        .read(|store| store.agent(&grant.agent))
+        .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none())
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0)
 }
 
 /// A task in words: its line, where it runs and what it is.
@@ -1465,15 +1482,19 @@ pub async fn remove_discarding(
 }
 
 /// `workspace` `remove` in Full: removed even with what it loses, which is what the user's answer
-/// to discard would cover, found now.
+/// to discard would cover, found now. A caller of another machine is let through only when its
+/// card said nothing would be lost: what it finds now is then refused, never discarded unseen.
 pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     let call: WorkspaceCall = match arguments("workspace", args) {
         Ok(call) => call,
         Err(refused) => return refused,
     };
-    let losses = match removal_losses(daemon, grant, &call).await {
-        Ok(removal) => removal.losses,
-        Err(refused) => return refused,
+    let losses = match crate::across::is_stand_in(&grant.agent) {
+        true => Vec::new(),
+        false => match removal_losses(daemon, grant, &call).await {
+            Ok(removal) => removal.losses,
+            Err(refused) => return refused,
+        },
     };
     crate::workspaces::workspace_remove(
         daemon,
@@ -2917,6 +2938,42 @@ fn settings_text(project: &Project, settings: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_child_of_another_machine_s_agent_is_refused_a_session_by_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = crate::tree::tests::a_child_of_another_machine();
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &child);
+        let grant = Grant {
+            agent: child.id.clone(),
+            epoch: 0,
+            tools: Vec::new(),
+            place: crate::place::Place {
+                project: "app".into(),
+                workspace: None,
+                root: dir.path().into(),
+                repositories: Vec::new(),
+                branch: String::new(),
+                variables: Default::default(),
+                home: None,
+            },
+            launched: false,
+            reads: None,
+        };
+
+        for kind in ["led", "handed"] {
+            let says = launch_says(
+                &daemon,
+                &grant,
+                &json!({"kind": kind, "title": "Another", "brief": "Do more."}),
+            )
+            .await;
+            assert!(
+                matches!(&says, Err(Outcome::Refused(why)) if why == CHILD_ROOTS),
+                "{kind}"
+            );
+        }
+    }
 
     #[test]
     fn only_the_writes_are_a_family_the_gate_holds() {

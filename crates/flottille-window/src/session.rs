@@ -24,7 +24,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::channel::mpsc::UnboundedSender;
 use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
@@ -32,8 +31,8 @@ use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
     Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
     changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
-    presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
-    toast, toggle_id, turning,
+    presence, presence_of, section_label, selectable, space, text_region, tint, tipped,
+    tipped_when_cut, toast, toggle_id, turning,
 };
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
@@ -64,7 +63,7 @@ use crate::end_led::{self, LedEnd};
 use crate::exceptions::ExceptionList;
 use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
-use crate::link::{Connect, Update};
+use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -264,7 +263,7 @@ fn local_offset(ms: u64) -> i64 {
 #[derive(Clone)]
 pub struct Follow {
     pub connect: Connect,
-    pub updates: UnboundedSender<Update>,
+    pub updates: Updates,
     pub opener: Opener,
 }
 
@@ -283,10 +282,17 @@ pub struct Opened {
     pub started_by: Option<String>,
     /// The agent that leads it, by the name it goes by; `None` for a session no agent leads.
     pub led_by: Option<String>,
+    /// The agent of another machine whose child its root is (`agent b1 of pc`): its parent writes
+    /// to it, never the user, so no composer is drawn.
+    pub child_of: Option<String>,
 }
 
 pub struct SessionPage {
     shell: WeakEntity<Shell>,
+    /// Its session's machine (`None`: this one), and the actions it asks that machine with:
+    /// given when the page is made, never the machine shown when it asks (#1271).
+    machine: Option<String>,
+    asks: crate::actions::Actions,
     opened: Opened,
     follow: Follow,
     layout: Layout,
@@ -328,6 +334,8 @@ pub struct SessionPage {
     /// asked, the oldest first: their cards are in the rail's "Waiting for you".
     vault_asks: Vec<VaultAsk>,
     decisions: HashMap<u64, String>,
+    /// The held launches this window allowed after sharing their files: how many it shared.
+    shared: HashMap<u64, usize>,
     /// How many pages of the shown agent's conversation are read, from its end.
     pages: usize,
     /// The shown agent's conversation was read by the current link.
@@ -425,6 +433,7 @@ impl SessionPage {
         reply: Entity<Reply>,
         ask_dock: Entity<crate::ask_dock::AskDock>,
         follow: Follow,
+        (machine, asks): (Option<String>, crate::actions::Actions),
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -455,6 +464,8 @@ impl SessionPage {
         let _reply = cx.observe(&reply, |this, _, cx| this.sync_pending(cx));
         let mut page = Self {
             shell: shell.clone(),
+            machine,
+            asks: asks.clone(),
             follow,
             layout,
             status,
@@ -472,13 +483,14 @@ impl SessionPage {
             reply,
             room: ask_dock.read(cx).cells(),
             ask_dock,
-            queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone())),
+            queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone()).asking(asks.clone())),
             command_panel,
             run_drawer,
             watching: None,
             requests: HashMap::new(),
             vault_asks: Vec::new(),
             decisions: HashMap::new(),
+            shared: HashMap::new(),
             pages: 1,
             read: false,
             histories: 0,
@@ -1284,7 +1296,7 @@ impl SessionPage {
 
     /// [`SessionPage::select`], for the window's history going back to a place: it does not
     /// record it again.
-    /// Opened by a switch to the machine it runs on: its header, its conversation and its
+    /// Opened from the row of another machine's session: its header, its conversation and its
     /// composer enter staggered, as a page that shows up.
     pub fn arrive(&mut self, cx: &mut Context<Self>) {
         if !self.arrived {
@@ -1336,10 +1348,13 @@ impl SessionPage {
     }
 
     /// Asks the daemon, off the UI thread.
-    fn perform(&self, command: Command, cx: &mut Context<Self>) {
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+    fn perform(&self, command: Command, _: &mut Context<Self>) {
+        self.asks.send(command);
+    }
+
+    /// The machine of its session, `None` for this one.
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
     }
 
     /// What the daemon answered to a ticket linked from the rail: the rail says why when it was
@@ -1530,6 +1545,40 @@ impl SessionPage {
         self.perform(command, cx);
     }
 
+    /// Allow on a held launch that needs files: they are made and shared from `from_step` on,
+    /// then the launch is allowed. Each step comes back to [`SessionPage::allowing`], the
+    /// approval to [`SessionPage::answered`].
+    pub fn allow_sharing(
+        &mut self,
+        number: u64,
+        needs: crate::waiting::Needs,
+        from_step: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let command = Command::AllowSharing {
+            session: self.opened.id.clone(),
+            number,
+            needs,
+            from_step,
+        };
+        self.perform(command, cx);
+    }
+
+    /// A step of an Allow that shares files, for its card.
+    pub fn allowing(
+        &mut self,
+        number: u64,
+        at: Option<usize>,
+        step: crate::waiting::Step,
+        why: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.waiting(cx);
+        waiting.update(cx, |waiting, cx| {
+            waiting.allowing(number, at, step, why, cx)
+        });
+    }
+
     /// What the daemon answered to an answer given on a card.
     pub fn answered(
         &mut self,
@@ -1538,10 +1587,15 @@ impl SessionPage {
         refused: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let waiting = self.waiting(cx);
+        if decision.as_deref() == Some("once")
+            && let Some(files) = waiting.read(cx).shared(number)
+        {
+            self.shared.insert(number, files);
+        }
         if let Some(decision) = decision {
             self.decisions.insert(number, decision);
         }
-        let waiting = self.waiting(cx);
         waiting.update(cx, |waiting, cx| waiting.answered(number, refused, cx));
         self.refresh_conversation(cx);
     }
@@ -1631,8 +1685,7 @@ impl SessionPage {
                 session: self.shown.clone(),
                 name,
             };
-            // The shell is handing this page its updates: it asks once they are over.
-            crate::commands::perform_later(&self.shell, command, cx);
+            self.asks.send(command);
         }
     }
 
@@ -1650,7 +1703,7 @@ impl SessionPage {
             session: self.shown.clone(),
             name: file.to_owned(),
         };
-        crate::commands::perform_later(&self.shell, command, cx);
+        self.asks.send(command);
     }
 
     /// A picture read back from the daemon: the rows that show it draw it. A pasted text comes
@@ -1903,16 +1956,14 @@ impl SessionPage {
         &mut self,
         seq: u64,
         answers: Vec<flottille_core::question::Answer>,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
         let command = Command::AnswerQuestion {
             session: self.opened.id.clone(),
             seq,
             answers,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
     }
 
     /// What the daemon answered to the answer of the question of `seq`.
@@ -2173,6 +2224,8 @@ impl SessionPage {
                 )
             }),
             asker: request.map(|r| self.said_name(&r.agent)),
+            needs: request.and_then(|r| r.needs.clone()),
+            shared: self.shared.get(&number).copied(),
             decision,
         })
     }
@@ -2244,7 +2297,12 @@ impl Render for SessionPage {
                 cx,
             ))
             .child({
-                let (shell, id) = (self.shell.clone(), self.opened.id.clone());
+                // Another machine's session is known in the window by its row.
+                let id = match &self.machine {
+                    Some(machine) => crate::model::elsewhere_id(machine, &self.opened.id),
+                    None => self.opened.id.clone(),
+                };
+                let shell = self.shell.clone();
                 Button::icon("session-rename", Icon::Edit, "Rename the session").on_click(
                     move |_, window, cx| {
                         shell
@@ -2408,6 +2466,7 @@ impl Render for SessionPage {
                 },
             ))
             .map(|d| match (root, self.ended_line()) {
+                (true, None) if self.opened.child_of.is_some() => d.child(self.read_only(cx)),
                 (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
                 (false, _) => d.child(self.read_only(cx)),
@@ -2596,7 +2655,7 @@ impl SessionPage {
     /// `None` while the root is shown.
     pub fn read_only_text(&self) -> Option<(String, String)> {
         if self.shown == self.opened.id {
-            return None;
+            return self.child_text().map(|said| (said, String::new()));
         }
         Some((
             format!(
@@ -2608,7 +2667,20 @@ impl SessionPage {
         ))
     }
 
-    /// In place of the composer while a sub-agent is read: it belongs to the conversation.
+    /// What the bar in place of the composer says of a root that is a child of an agent of
+    /// another machine: `None` for a session of the user's.
+    pub fn child_text(&self) -> Option<String> {
+        self.opened.child_of.as_ref().map(|parent| {
+            format!(
+                "This conversation is a child of {parent}, which launched it from there: only \
+                 its parent writes to it."
+            )
+        })
+    }
+
+    /// In place of the composer while a sub-agent is read: it belongs to the conversation. And
+    /// while the conversation is a child of an agent of another machine: it belongs to that agent,
+    /// and there is nothing here to go back to.
     fn read_only(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (said, back) = self.read_only_text().unwrap_or_default();
@@ -2627,12 +2699,15 @@ impl SessionPage {
             .py(space::MD)
             .text_size(px(13.))
             .text_color(p.mute)
+            .aria_label(said.clone())
             .child(div().flex_1().min_w_0().child(SharedString::from(said)))
-            .child(Button::quiet("back-to-root", back).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.select(&root, cx);
-                },
-            )))
+            .when(!back.is_empty(), |d| {
+                d.child(Button::quiet("back-to-root", back).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.select(&root, cx);
+                    },
+                )))
+            })
             .test_support()
     }
 }
@@ -3816,7 +3891,18 @@ impl ConversationView {
         let Some(Segment::Group(group)) = self.segments.get(segment) else {
             return div().into_any_element();
         };
-        let (open, pieces) = (group.open, group_line(&group.summary, group.cut));
+        // A request that waits for the user before any step ran (a launch held for them): the
+        // line says what the session waits for, not `0 steps · 0.0s`.
+        let deciding = group.summary.steps == 0
+            && group
+                .needs
+                .iter()
+                .any(|&at| matches!(self.model.blocks()[at], Block::Approval { .. }));
+        let pieces = match deciding {
+            true => vec!["Waits for your decision".to_owned()],
+            false => group_line(&group.summary, group.cut),
+        };
+        let open = group.open;
         let failed = (group.summary.failed > 0).then(|| format!("{} failed", group.summary.failed));
         let retried =
             (group.summary.retried > 0).then(|| format!("{} retried", group.summary.retried));
@@ -4251,6 +4337,10 @@ pub struct ApprovalCard {
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
+    /// What a held launch needs shared before it is allowed, when it needs anything.
+    pub needs: Option<crate::waiting::Needs>,
+    /// How many files this window shared before it allowed it.
+    pub shared: Option<usize>,
     /// `deny`, `once` or `cancelled`, once decided.
     pub decision: Option<String>,
 }
@@ -4277,6 +4367,10 @@ impl ApprovalCard {
             other => other,
         };
         let mut parts = vec![said.to_owned()];
+        parts.extend(self.shared.map(|files| match files {
+            1 => "1 file shared".to_owned(),
+            files => format!("{files} files shared"),
+        }));
         parts.extend(self.asked.clone());
         parts.extend(self.asker.clone());
         if parts.len() == 1 {
@@ -6183,7 +6277,7 @@ impl Render for Row {
                     .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let Some(page) = page.upgrade() else {
                             return;
                         };
@@ -6194,7 +6288,7 @@ impl Render for Row {
                                 let (machine, agent) = (there.machine.clone(), there.agent.clone());
                                 shell
                                     .update(cx, |shell, cx| {
-                                        shell.open_elsewhere(machine, agent, cx)
+                                        shell.open_elsewhere(machine, agent, window, cx)
                                     })
                                     .ok();
                             }
@@ -7906,11 +8000,11 @@ fn remote_row(
                         ))),
                 ),
         )
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             if let Some(shell) = &shell {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.open_elsewhere(machine.clone(), agent.clone(), cx)
+                        shell.open_elsewhere(machine.clone(), agent.clone(), window, cx)
                     })
                     .ok();
             }
@@ -8610,6 +8704,20 @@ impl Render for SessionRail {
         let several = repositories.len() > 1;
         let forge_pending = self.place.as_ref().is_some_and(|place| place.forge_pending);
         let mut lines: Vec<AnyElement> = Vec::new();
+        // The icon before each repository says where the session works, as the sidebar's does.
+        let (place_icon, place_said) = match &self.workspace {
+            None => (
+                Icon::Folder,
+                SharedString::from("Works in the project folder itself"),
+            ),
+            Some(_) => (
+                Icon::Branch,
+                SharedString::from(match self.place.as_ref().and_then(|p| p.folder.as_ref()) {
+                    Some(folder) => format!("Works in a workspace of its own: {folder}"),
+                    None => "Works in a workspace of its own".to_owned(),
+                }),
+            ),
+        };
         for (path, name, facts, status) in repositories {
             let changes = match facts {
                 RepositoryFacts::Changes(Some(c)) if c.added == 0 && c.removed == 0 => {
@@ -8633,12 +8741,28 @@ impl Render for SessionRail {
                     .text_color(p.faint)
                     .child("unreadable")
                     .into_any_element(),
-                RepositoryFacts::Branch(branch) => div()
-                    .text_color(p.faint)
-                    .child(SharedString::from(
-                        branch.unwrap_or_else(|| "no branch".to_owned()),
-                    ))
-                    .into_any_element(),
+                // A long branch is cut with an ellipsis, its whole name in a tooltip: the
+                // repository's name beside it keeps its room.
+                RepositoryFacts::Branch(branch) => {
+                    let branch =
+                        SharedString::from(branch.unwrap_or_else(|| "no branch".to_owned()));
+                    tipped_when_cut(
+                        div()
+                            .id(ElementId::Name(
+                                format!("rail-repository-{name}-branch").into(),
+                            ))
+                            .min_w_0()
+                            .text_color(p.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(branch.clone()),
+                        branch,
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
+                }
             };
             lines.push(
                 div()
@@ -8658,36 +8782,43 @@ impl Render for SessionRail {
                             .gap(space::SM)
                             .text_size(px(13.))
                             .medium()
-                            .child(
+                            .child(tipped(
                                 div()
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-icon").into(),
                                     ))
+                                    .aria_label(place_said.clone())
                                     .w(px(FACT_ICON))
                                     .flex_none()
                                     .child(
-                                        icon(Icon::Repository)
-                                            .size(px(FACT_ICON))
-                                            .text_color(p.faint),
-                                    )
-                                    .test_support(),
-                            )
+                                        icon(place_icon).size(px(FACT_ICON)).text_color(p.faint),
+                                    ),
+                                place_said.clone(),
+                                FACT_ICON,
+                                window,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-label").into(),
                                     ))
-                                    .flex_1()
-                                    .min_w_0()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .aria_label(SharedString::from(name.clone()))
                                     .child(SharedString::from(name.clone()))
                                     .test_support(),
                             )
+                            // The facts keep the rest of the line, at its right edge.
+                            .child(div().flex_1())
                             .child(
                                 div()
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-value").into(),
                                     ))
-                                    .flex_none()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
                                     .mono(11.5)
                                     .child(changes)
                                     .test_support(),
@@ -8934,16 +9065,11 @@ impl Render for SessionRail {
             .filter(|_| self.workspace.is_some());
         let ticket_error = self.ticket_error.clone();
         let mut facts: Vec<(&str, String)> = Vec::new();
-        match (&self.workspace, &self.place) {
-            (Some(_), Some(place)) => {
-                if !place.bases.is_empty() {
-                    facts.push(("From", place.bases.join(", ")));
-                }
-            }
-            (None, _) => facts.push(("Place", "the project folder".into())),
-            _ => {}
+        if let (Some(_), Some(place)) = (&self.workspace, &self.place)
+            && !place.bases.is_empty()
+        {
+            facts.push(("From", place.bases.join(", ")));
         }
-        facts.push(("Machine", "this PC".into()));
         let workspace = div()
             .id("rail-workspace")
             .flex()
@@ -8963,6 +9089,8 @@ impl Render for SessionRail {
                 !self.place_known,
                 workspace_skeleton(),
                 div()
+                    .id("rail-workspace-read")
+                    .test_support()
                     .flex()
                     .flex_col()
                     .child(presence(
@@ -9137,8 +9265,7 @@ impl Render for SessionRail {
     }
 }
 
-/// The size of every value in the Workspace section's facts (From, Place, Machine, Ticket,
-/// Pull request).
+/// The size of every value in the Workspace section's facts (From, Ticket, Pull request).
 const FACT_SIZE: f32 = 12.;
 
 /// The width of the icon column of the Workspace section's lines.
@@ -9175,7 +9302,6 @@ fn workspace_skeleton() -> impl IntoElement {
         .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
         .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
         .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
-        .child(skeleton_line("rail-skeleton-machine".to_owned(), 56.))
         .test_support()
 }
 
@@ -9483,7 +9609,8 @@ pub fn pending_part(key: u64, part: &str) -> ElementId {
 /// the daemon sends the instructions of each command the message uses with it. Each command the
 /// message uses is a chip in the text, where it was typed, as each picture is (#773, #846).
 pub struct Reply {
-    shell: WeakEntity<Shell>,
+    /// The actions of its session's machine, given when it is made (#1271).
+    asks: crate::actions::Actions,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
     session: String,
     project: String,
@@ -9559,6 +9686,8 @@ pub struct Reply {
 impl Reply {
     pub fn new(
         shell: WeakEntity<Shell>,
+        asks: crate::actions::Actions,
+        machine: Option<String>,
         session: String,
         project: String,
         window: &mut Window,
@@ -9606,11 +9735,15 @@ impl Reply {
                 },
             ),
         ];
-        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
-        let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
+        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()).asking(asks.clone()));
+        let options =
+            cx.new(|_| SessionOptions::new(shell.clone(), session.clone()).asking(asks.clone()));
         let reply = Self {
-            shell,
-            keeping: Keeping::new(DraftKey::Session(session.clone())),
+            asks,
+            keeping: Keeping::new(DraftKey::Session {
+                machine,
+                agent: session.clone(),
+            }),
             session,
             project,
             commands: None,
@@ -9695,6 +9828,11 @@ impl Reply {
         self.sending
     }
 
+    /// An interruption was asked and not answered yet.
+    pub fn is_interrupting(&self) -> bool {
+        self.interrupting
+    }
+
     /// The messages sent and not recorded yet, the oldest first.
     pub fn pending(&self) -> &[Pending] {
         &self.pending
@@ -9725,10 +9863,7 @@ impl Reply {
     /// update is over: the shell may be the one updating (it started or answered something).
     fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
         if let Some(write) = self.draft_to_write(cx, false) {
-            let shell = self.shell.clone();
-            cx.defer(move |cx| {
-                shell.update(cx, |shell, _| shell.perform(write)).ok();
-            });
+            self.asks.send(write);
         }
     }
 
@@ -9772,11 +9907,9 @@ impl Reply {
         self.keeping.read_failed(cx, Self::read_draft_again);
     }
 
-    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+    fn read_draft_again(&mut self, _: &mut Context<Self>) {
         let key = self.keeping.key().clone();
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
-            .ok();
+        self.asks.send(Command::DraftRead { key });
     }
 
     /// The daemon answered a write of the draft.
@@ -9994,9 +10127,7 @@ impl Reply {
             session: self.session.clone(),
             resume: !on,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
@@ -10083,9 +10214,7 @@ impl Reply {
         let command = Command::Interrupt {
             session: self.session.clone(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
@@ -10196,12 +10325,11 @@ impl Reply {
 
     /// Asks the daemon for the project's commands: the `/` list offers them, and the chips know
     /// them.
-    fn list_commands(&self, cx: &mut Context<Self>) {
+    fn list_commands(&self, _: &mut Context<Self>) {
         let command = Command::Commands {
             project: self.project.clone(),
         };
-        // Later: the shell may be the one setting the text, as it hands a reply its answer.
-        crate::commands::perform_later(&self.shell, command, cx);
+        self.asks.send(command);
     }
 
     /// The project's commands, as the daemon listed them.
@@ -10277,11 +10405,9 @@ impl Reply {
                 let command = Command::ReloadTools {
                     session: self.session.clone(),
                 };
-                self.shell
-                    .update(cx, |shell, _| shell.perform(command))
-                    .ok();
+                self.asks.send(command);
             } else {
-                crate::extensions::review::start(&self.shell, &self.session, cx);
+                crate::extensions::review::start(&self.asks, &self.session);
             }
             cx.notify();
             return;
@@ -10503,9 +10629,7 @@ impl Reply {
             texts: pending.texts.clone(),
             compact: self.compact_offer(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
@@ -11300,6 +11424,8 @@ mod tests {
             why: None,
             source: None,
             asker: Some("lead".into()),
+            needs: None,
+            shared: None,
             decision: Some("once".into()),
         };
         assert_eq!(card.record().as_deref(), Some("Allowed · Read .env · lead"));
@@ -11308,6 +11434,19 @@ mod tests {
             ..card
         };
         assert_eq!(pending.record(), None);
+        let shared = ApprovalCard {
+            asked: Some("Start a session led by pc".into()),
+            shared: Some(2),
+            ..pending
+        };
+        let allowed = ApprovalCard {
+            decision: Some("once".into()),
+            ..shared
+        };
+        assert_eq!(
+            allowed.record().as_deref(),
+            Some("Allowed · 2 files shared · Start a session led by pc · lead")
+        );
     }
 
     #[test]

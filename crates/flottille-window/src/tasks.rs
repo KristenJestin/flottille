@@ -20,8 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
-    Window, div, px,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -32,7 +31,6 @@ use crate::commands::{
 };
 use crate::project::{only_at_root, repository_label};
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch};
-use crate::shell::Shell;
 
 /// How often the project page reads its runs again while one runs or its output is open.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
@@ -402,7 +400,7 @@ enum Writing {
 
 /// The "Tasks" section of the project's Settings.
 pub struct TasksSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     listed: Option<Vec<TaskInfo>>,
     /// The rows as drawn: a removed task folds away before it is gone.
@@ -434,7 +432,7 @@ pub struct TasksSection {
 }
 
 impl TasksSection {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,
@@ -1456,7 +1454,7 @@ pub fn ran(name: &str, place: Option<Option<&str>>, refused: Option<String>, cx:
 /// project, the user's and its agents', which Work shows in their places, and the run drawer
 /// their rows open.
 pub struct ProjectTasks {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     listed: Option<Vec<TaskInfo>>,
     /// Why the list could not be read.
@@ -1476,7 +1474,7 @@ pub struct ProjectTasks {
 }
 
 impl ProjectTasks {
-    pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String, cx: &mut Context<Self>) -> Self {
         let this = cx.entity().downgrade();
         let commands = cx.new(|_| CommandList::new(this.clone()));
         // The list's own ticker moves the times of the runs drawn here.

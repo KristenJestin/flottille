@@ -14,19 +14,18 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
-    px,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
 use crate::modals::Modals;
-use crate::shell::Shell;
 
 /// What the section says the vault is for.
-pub const SENTENCE: &str = "Secrets agents use without seeing them. Your keyring keeps them; \
-                            agents see only their names and what they are for.";
+pub const SENTENCE: &str = "Secrets agents use through Flottille's tools, without seeing them \
+                            in Ask and Auto. In Full, a command they run can read them. Your \
+                            keyring keeps them.";
 
 /// How an entry is used, said once under the sentence (rule 14).
 pub const USAGE: &str = "An agent names an entry; Flottille puts the secret where it goes. A \
@@ -125,7 +124,7 @@ pub const SHARE_SENTENCE: &str = "Its secret goes from this machine's keyring in
 pub const NO_MACHINE: &str = "No other machine of yours is online.";
 
 pub struct VaultSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The window's host of dialogs: the entry's form opens through it, over any page.
     modals: Entity<Modals>,
     listed: Option<Vec<VaultEntry>>,
@@ -250,7 +249,7 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
 }
 
 impl VaultSection {
-    pub fn new(shell: WeakEntity<Shell>, modals: Entity<Modals>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, modals: Entity<Modals>) -> Self {
         Self {
             shell,
             modals,
@@ -438,6 +437,24 @@ impl VaultSection {
         self.connection = connection;
     }
 
+    /// "Edit" from an agent's proposed edit (`vault_ask.rs`): the entry's own form of an edit, on
+    /// `entry` as the proposal leaves it, its secret left empty to keep it, `why` under what it
+    /// is for and the `host` its URL sends the secret to. The user changes what they want and
+    /// saves, or closes it and nothing changes.
+    pub fn edit_proposed(
+        &mut self,
+        entry: &VaultEntry,
+        why: String,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(Some(entry), window, cx);
+        self.bound = entry.bound.clone();
+        self.why = Some(why);
+        self.host = host.zip(entry.url.clone());
+    }
+
     /// "New entry…" on an agent's request to write a connection that names `entry`, not made yet:
     /// its name and, as its address, the `host` the request sends it to; the secret is typed here.
     pub fn add_for_request(
@@ -458,10 +475,14 @@ impl VaultSection {
         self.request_back = Some(number);
     }
 
-    /// The request whose dialog reads it again, once the entry made for it is saved.
-    pub fn take_request_return(&mut self) -> Option<u64> {
+    /// The request whose dialog reads it again, once the entry made for it is saved, and its
+    /// machine: this vault's (`None`: this one).
+    pub fn take_request_return(&mut self) -> Option<(u64, Option<String>)> {
         match self.form {
-            Form::Closed => self.request_back.take(),
+            Form::Closed => self
+                .request_back
+                .take()
+                .map(|number| (number, self.shell.machine().map(str::to_owned))),
             Form::Editing(_) => None,
         }
     }
@@ -1204,7 +1225,8 @@ impl Render for VaultSection {
                                 "no-vault",
                                 Icon::Key,
                                 "No entry yet. Add a secret an agent needs, such as a tracker's \
-                                 token: agents use it through Flottille's tools and never see it.",
+                                 token. In Ask and Auto agents use it through Flottille's tools \
+                                 without seeing it. In Full, a command they run can read it.",
                             ),
                         )
                         .space(space::MD),

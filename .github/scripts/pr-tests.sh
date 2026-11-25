@@ -13,6 +13,9 @@
 #   that read `ci.yml`, run `package.sh`…);
 # - the binaries on a line `Tests: <name> <name>…` of the pull request's description (a name that
 #   is a grouped file's, `window_conversation`, runs that file as above);
+# - for a changed file of the run sandbox (`mounts.rs`, `landlock.rs`, `ssh_owned.rs` and the run
+#   tool `runs.rs` of `crates/flottille/src/`), the file `real_programs` of the tests, which runs
+#   real programs through it (the fakes of the other tests read nothing as a real program does);
 # - when no binary is selected, the unit tests of the crates whose `src/` the pull request
 #   changes, if the crate has a library and is not one of the big ones (compiling them is the
 #   cost this avoids).
@@ -116,6 +119,11 @@ files=$(git diff --name-only --no-renames --diff-filter=AM "$BASE...$HEAD")
 while IFS= read -r path; do
   case "$path" in
     crates/*/tests/*) select_test_file "$path" ;;
+    # The run sandbox: real programs run through it, a fake would not tell.
+    crates/flottille/src/mounts.rs | crates/flottille/src/landlock.rs | \
+      crates/flottille/src/ssh_owned.rs | crates/flottille/src/runs.rs)
+      add_file flottille real_programs
+      ;;&
     crates/*/src/*)
       crate=${path#crates/}
       crate=${crate%%/*}

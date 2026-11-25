@@ -11,7 +11,7 @@ use gpui_kit::{AppContext as _, Entity, TestAppContext, WeakEntity};
 
 fn write_spec(cx: &mut TestAppContext) -> Entity<WriteSpec> {
     init(cx, Desktop::new(false).env());
-    cx.new(|_| WriteSpec::new(WeakEntity::new_invalid(), "app".into()))
+    cx.new(|_| WriteSpec::new(WeakEntity::new_invalid().into(), "app".into()))
 }
 
 /// Draws the rows `rows`, each `(row, ticket, title)`, as the ticket list does.

@@ -321,9 +321,11 @@ impl VersionSection {
             return;
         }
         self.asking = true;
+        // The version is this machine's own, in every machine's Settings: its daemon is asked,
+        // whichever is in front, now or once a confirmation is answered (#1271).
         self.shell
             .update(cx, |shell, _| {
-                shell.perform(Command::Update { method, params })
+                shell.perform_on(None, Command::Update { method, params })
             })
             .ok();
         cx.notify();
