@@ -144,6 +144,34 @@ class NotificationsOnThePhoneTest {
     }
 
     @Test
+    fun a_swiped_away_notification_never_comes_back() {
+        told(request)
+        // Swiped away, or tapped (it cancels itself): no longer on the screen.
+        manager.cancel(request.machine, request.notification.toInt())
+        until("the notification gone") { drawn(request) == null }
+        // The same notice, said again with other words: it does not ring a second time.
+        phone.state.value = phone.state.value.copy(notices = listOf(request.copy(excerpt = "Run make test")))
+        Thread.sleep(2_000)
+        assertEquals(null, drawn(request))
+    }
+
+    @Test
+    fun allow_and_deny_need_the_phone_unlocked_and_the_lock_screen_hides_the_excerpt() {
+        val drawn = told(request)
+        assertEquals(listOf("Allow", "Deny"), drawn.titles())
+        assertTrue(drawn.actions.all { it.isAuthenticationRequired })
+        assertEquals(Notification.VISIBILITY_PRIVATE, drawn.visibility)
+        val public = drawn.publicVersion
+        assertNotNull(public)
+        assertTrue(public.actions.isNullOrEmpty())
+        val shown = listOfNotNull(
+            public.extras.getCharSequence(Notification.EXTRA_TITLE),
+            public.extras.getCharSequence(Notification.EXTRA_TEXT),
+        ).joinToString(" ")
+        assertTrue(shown, "Run make" !in shown)
+    }
+
+    @Test
     fun a_question_opens_its_ask_card() {
         phone.state.value = phone.state.value.copy(
             asks = listOf(Ask("server", "a1", 3, "Which branch?", listOf(AskQuestion("Which branch?", emptyList(), false)))),
