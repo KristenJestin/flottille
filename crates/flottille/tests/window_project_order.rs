@@ -1247,6 +1247,11 @@ impl Relay {
         self.held.load(Ordering::SeqCst)
     }
 
+    /// What was held goes on to the daemon, late.
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+    }
+
     /// The connections are lost: what was held never reaches the daemon.
     fn drop_connections(&self) {
         for (toward, outside) in self.open.lock().unwrap().drain(..) {
@@ -1305,4 +1310,35 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
         names(&["alpha"]),
         "the window keeps it too"
     );
+}
+
+/// What the daemon keeps of the arrangement comes back to the window one change at a time, and
+/// each answer is taken by a poll of the window: a daemon that answers late (a loaded runner) must
+/// still be heard by a test that waits for it, which therefore keeps the window going.
+#[gpui_kit::test]
+fn removing_a_group_is_kept_when_the_daemon_answers_late(cx: &mut TestAppContext) {
+    let user = user();
+    for name in ["alpha", "bravo", "charlie"] {
+        project(&user, name);
+    }
+    let relay = Relay::default();
+    let (shell, cx) = window_through(&user, relay.connector(&user), cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("charlie"))
+    });
+    settle(&shell, cx);
+
+    // The creation of the group is stuck on its way: what the user does next waits behind it.
+    relay.hold();
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    shell.update_in(cx, |shell, window, cx| shell.remove_group(&id, window, cx));
+    settle(&shell, cx);
+    assert!(relay.holding(), "the first change is stuck in the relay");
+    relay.release();
+
+    eventually("the daemon forgot the group", || {
+        kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
+    });
 }
