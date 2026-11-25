@@ -1205,3 +1205,60 @@ fn a_review_while_the_machine_is_off_says_to_call_again_when_it_is_back() {
     assert!(text.contains(&named), "{text}");
     on(&server);
 }
+
+/// The deliveries of `kind` stored for `agent` of `machine`: their body.
+fn delivered_there(machine: &Machine, agent: &str, kind: &str) -> Vec<String> {
+    Store::open_read_only(&machine.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_deliveries(agent, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|delivery| delivery.kind == kind)
+        .map(|delivery| delivery.body)
+        .collect()
+}
+
+#[test]
+fn a_lead_on_another_machine_is_told_the_user_answered() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    server
+        .user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            {"mcp": {"tool": "vault", "arguments": {"action": "ask", "name": "staging-login",
+                "why": "to sign in to staging"}}},
+            {"say": "Waiting for the user's answer on the vault entry."}
+        ]}]),
+    );
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "a vault entry asked: staging-login");
+    let number = server.user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .unwrap();
+
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    eventually("the lead there is told", || {
+        !delivered_there(&pc, &root, "session-request-answered").is_empty()
+    });
+    a_while();
+    let told = delivered_there(&pc, &root, "session-request-answered");
+    assert_eq!(told.len(), 1, "{told:?}");
+    for word in [
+        session.as_str(),
+        &format!("request #{number}"),
+        "staging-login",
+        "dismissed",
+    ] {
+        assert!(told[0].contains(word), "{word}: {}", told[0]);
+    }
+}

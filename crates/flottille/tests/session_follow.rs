@@ -1343,3 +1343,110 @@ fn the_answer_of_a_vault_ask_names_the_sessions_that_joined_it() {
     assert_eq!(answered[0].data["joined"], json!([joiner]), "{answered:?}");
     drop(lead);
 }
+
+/// A followed session, in Ask, whose child "Reader" asked to read `.env`: a call the gate held for
+/// the session, which forwarded it to the user. The lead's id, the session's id, the child's id
+/// and the request's number.
+fn forwarded_by_a_child(user: &User) -> (String, String, String, u64) {
+    user.fake_script(json!({"turns": [
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for my parent."}]},
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Go on.", "do": [{"say": "Going on."}]}
+    ]}));
+    let (lead, _, session, second) = followed(user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    let (answer, child) = launch(user, &second, "Reader", "Read the env.", "child");
+    assert!(!answer.error, "{}", answer.text);
+    let (child, _) = child.unwrap();
+    let mut number = 0;
+    eventually("the child's call held by its parent", || {
+        let held = store(user).pending_requests(&session).unwrap();
+        match held.iter().find(|request| request.agent == child) {
+            Some(request) => {
+                number = request.number;
+                true
+            }
+            None => false,
+        }
+    });
+    let forwarded = second.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
+    );
+    assert!(!forwarded.error, "{}", forwarded.text);
+    (lead, session, child, number)
+}
+
+#[test]
+fn a_request_a_led_session_s_child_forwards_is_said_to_its_lead() {
+    let user = User::with_fake_agent();
+    let (lead, session, child, number) = forwarded_by_a_child(&user);
+    let said = format!("request #{number},");
+    let wakes_saying = || {
+        wakes(&user, &lead)
+            .into_iter()
+            .filter(|wake| wake.contains(&said))
+            .collect::<Vec<_>>()
+    };
+
+    // The session at rest: its next turn's wake says what its child waits for.
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    eventually("a wake says the child's request", || {
+        !wakes_saying().is_empty()
+    });
+    let woken = wakes_saying().remove(0);
+    for word in [
+        "ended a turn: it waits for the user.",
+        "\"Reader\"",
+        child.as_str(),
+        "a call held for approval: fs_read",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+    let following = subscriptions(&user, &lead).remove(0);
+    let waits = following["waits"].as_array().unwrap();
+    assert_eq!(waits.len(), 1, "{following}");
+    assert_eq!(waits[0]["number"], number, "{following}");
+    assert_eq!(waits[0]["by"], child.as_str(), "{following}");
+    assert!(
+        waits[0]["what"].as_str().unwrap().contains("\"Reader\""),
+        "{following}"
+    );
+
+    // Said once: a later turn does not say it again.
+    let before = turns(&user, &session);
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+    eventually("the next turn", || turns(&user, &session) > before);
+    settle();
+    assert_eq!(wakes_saying().len(), 1, "{:?}", wakes(&user, &lead));
+}
+
+#[test]
+fn the_answer_to_a_child_s_request_is_told_to_the_lead_once() {
+    let user = User::with_fake_agent();
+    let (lead, _, child, number) = forwarded_by_a_child(&user);
+
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    settle();
+    let told = delivered(&user, &lead, ANSWERED);
+    assert_eq!(told.len(), 1, "{told:?}");
+    for word in [
+        "\"Login\"",
+        "\"Reader\"",
+        child.as_str(),
+        &format!("request #{number}"),
+        "allowed",
+    ] {
+        assert!(told[0].contains(word), "{word}: {}", told[0]);
+    }
+}
