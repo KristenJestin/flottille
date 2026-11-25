@@ -1485,9 +1485,10 @@ fn a_child_s_request_of_a_session_led_from_another_machine_is_said_and_answered_
         .call("agent.send", json!({"agent": session, "message": "Go on."}))
         .unwrap();
 
+    // The prompts are read as JSON: the child is found by its id, its title's quotes escaped.
     prompted(
         &pc,
-        &format!("asked by its child \"Reader\" (agent {child})"),
+        &format!("(agent {child}): a vault entry asked: staging-login"),
     );
     server
         .user
