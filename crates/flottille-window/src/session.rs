@@ -1078,6 +1078,19 @@ impl SessionPage {
         let has_pull = self.subject.as_ref().is_some_and(|s| s.pull.is_some());
         let key_t = fade("session-about-ticket-fade", has_key, PANEL, window, cx);
         let pull_t = fade("session-about-pull-fade", has_pull, PANEL, window, cx);
+        let has_mark = has_pull
+            && self
+                .subject
+                .as_ref()
+                .and_then(|s| s.pull.as_ref())
+                .is_some_and(|pull| pull.mark.is_some());
+        let mark_t = fade(
+            "session-about-pull-checks-fade",
+            has_mark,
+            PANEL,
+            window,
+            cx,
+        );
         // Drawn while it is there or still folding away; from 0 as it comes.
         let key = self.about_key.clone().filter(|_| has_key || key_t > 0.0);
         let pull = self.about_pull.clone().filter(|_| has_pull || pull_t > 0.0);
@@ -1131,25 +1144,33 @@ impl SessionPage {
                         .id("session-about-pull")
                         .flex()
                         .items_center()
-                        .gap(space::XS)
                         .aria_label(SharedString::from(format!("#{}", pull.number)))
                         .child(gpui_design_system::Tag::new(
                             "session-about-pull-key",
                             format!("#{}", pull.number),
                         ))
-                        .child(changing(
-                            "session-about-pull-checks-change",
-                            checks,
-                            move |checks| match mark {
-                                Some(mark) => div()
-                                    .id("session-about-pull-checks")
-                                    .aria_label(checks)
-                                    .child(icon(mark).size(px(11.)).text_color(ink))
-                                    .test_support()
-                                    .into_any_element(),
-                                None => div().into_any_element(),
-                            },
-                        ))
+                        // The mark's room and the gap before it widen as the checks come.
+                        .child(
+                            div()
+                                .flex_none()
+                                .overflow_hidden()
+                                .max_w(px(11. * mark_t))
+                                .ml(space::XS * mark_t)
+                                .opacity(mark_t)
+                                .child(changing(
+                                    "session-about-pull-checks-change",
+                                    checks,
+                                    move |checks| match mark {
+                                        Some(mark) => div()
+                                            .id("session-about-pull-checks")
+                                            .aria_label(checks)
+                                            .child(icon(mark).size(px(11.)).text_color(ink))
+                                            .test_support()
+                                            .into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                )),
+                        )
                         .test_support()
                         .into_any_element();
                     unfolding(pull_t, chip)
