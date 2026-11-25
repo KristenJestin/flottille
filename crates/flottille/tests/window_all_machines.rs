@@ -224,6 +224,34 @@ fn a_value_saved_with_the_hub_out_of_reach_says_it_waits_for_it(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn all_machines_is_left_by_any_way_of_choosing_a_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    general(&shell, cx);
+    choose(&shell, "all", cx);
+    assert!(
+        !present(cx, "settings-tabs-agents"),
+        "All machines is shown"
+    );
+
+    // The server chosen another way than the picker, then this machine again.
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
+    settle(&shell, cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown().as_deref() == Some("server"))
+    });
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
+    settle(&shell, cx);
+
+    assert!(
+        present(cx, "settings-tabs-agents"),
+        "this machine's whole Settings, not All machines"
+    );
+}
+
+#[gpui_kit::test]
 fn a_machine_says_once_it_follows_all_machines_and_what_is_its_own(cx: &mut TestAppContext) {
     let (_hub, pc, _server) = pc_and_server();
     let (shell, cx) = window(&pc, cx);
