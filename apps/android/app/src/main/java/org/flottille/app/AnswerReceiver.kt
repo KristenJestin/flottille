@@ -34,10 +34,11 @@ class AnswerReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.Default).launch {
             val hold = phone.keepConnected()
             try {
+                // The answer within the wait too: past the seconds Android gives, the process may go.
                 withTimeout(ANSWER_WAIT) {
                     phone.views().first { view -> view.machines.any { it.name == machine && it.state == MachineState.Online } }
+                    phone.answer(machine, number, allow)
                 }
-                phone.answer(machine, number, allow)
                 app.notices.handled(machine, notification)
             } catch (refused: PhoneException) {
                 // Decided already, elsewhere: nothing waits any more.
@@ -60,12 +61,13 @@ class AnswerReceiver : BroadcastReceiver() {
         private const val EXTRA_NOTIFICATION = "org.flottille.app.ANSWER_NOTIFICATION"
         private const val EXTRA_ALLOW = "org.flottille.app.ANSWER_ALLOW"
 
-        fun pending(context: Context, notice: Notice, allow: Boolean, code: Int): PendingIntent =
+        fun pending(context: Context, notice: Notice, allow: Boolean): PendingIntent =
             PendingIntent.getBroadcast(
                 context,
-                code * 2 + if (allow) 1 else 0,
+                0,
                 Intent(context, AnswerReceiver::class.java)
                     .setAction(ACTION_ANSWER)
+                    .setData(noticeUri(notice, if (allow) "allow" else "deny"))
                     .putExtra(EXTRA_MACHINE, notice.machine)
                     .putExtra(EXTRA_NUMBER, notice.request)
                     .putExtra(EXTRA_NOTIFICATION, notice.notification)

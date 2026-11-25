@@ -10,6 +10,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -142,7 +143,8 @@ class StartReceiver : BroadcastReceiver() {
  * What the runners told, drawn once each, for the life of the process (`docs/remote.md`,
  * "Notifications"): a request with Allow and Deny (Deny only on a proposal to write a connection,
  * neither on a `viewer`), a question, a report or a failure that opens its session. A dismissed one
- * is removed; one answered from its notification is not drawn again.
+ * is removed; one answered from its notification, swiped away or tapped is not drawn again. Allow
+ * and Deny need the phone unlocked, and the lock screen shows no excerpt.
  */
 class Notices(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
@@ -155,7 +157,8 @@ class Notices(private val context: Context) {
         view.dismissed.forEach { handled(it.machine, it.notification) }
         view.notices.forEach { notice ->
             val key = key(notice.machine, notice.notification)
-            if (key in done || drawn[key] == notice) return@forEach
+            // Once: drawn again, one the user swiped away or tapped would ring a second time.
+            if (key in done || key in drawn) return@forEach
             drawn[key] = notice
             manager.notify(notice.machine, notice.notification.toInt(), build(notice, view, said = null))
         }
@@ -175,7 +178,6 @@ class Notices(private val context: Context) {
     }
 
     private fun build(notice: Notice, view: PhoneView, said: String?): Notification {
-        val code = key(notice.machine, notice.notification).hashCode()
         val title = notice.title.ifEmpty {
             when (notice.kind) {
                 "request" -> "A request waits for you"
@@ -188,22 +190,34 @@ class Notices(private val context: Context) {
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(title)
             .setContentText(said ?: listOf(notice.machine, notice.excerpt).filter { it.isNotEmpty() }.joinToString(" · "))
-            .setContentIntent(opening(notice, code))
+            .setContentIntent(opening(notice))
             .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, HubService.CHANNEL_NEEDS_YOU)
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setContentTitle(title)
+                    .setContentText(notice.machine)
+                    .build(),
+            )
             .setOnlyAlertOnce(true)
             .setCategory(if (notice.kind == "request" || notice.kind == "question") NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_STATUS)
         val answerable = said == null && notice.kind == "request" && notice.request > 0 && view.role != "viewer"
         if (answerable) {
             val proposal = view.requests.any { it.machine == notice.machine && it.number == notice.request && it.proposesAConnection }
             // A proposal to write a connection is read on a computer before it is allowed, as in the window.
-            if (!proposal) builder.addAction(0, "Allow", AnswerReceiver.pending(context, notice, allow = true, code))
-            builder.addAction(0, "Deny", AnswerReceiver.pending(context, notice, allow = false, code))
+            if (!proposal) builder.addAction(unlocked("Allow", AnswerReceiver.pending(context, notice, allow = true)))
+            builder.addAction(unlocked("Deny", AnswerReceiver.pending(context, notice, allow = false)))
         }
         return builder.build()
     }
 
+    /** An answer that a phone left on a table does not give: Android asks for its unlock first. */
+    private fun unlocked(title: String, answer: PendingIntent) =
+        NotificationCompat.Action.Builder(0, title, answer).setAuthenticationRequired(true).build()
+
     /** Its session's page, through the app's own entry point; the app, for what is no session's. */
-    private fun opening(notice: Notice, code: Int): PendingIntent {
+    private fun opening(notice: Notice): PendingIntent {
         val intent = if (notice.session.isEmpty()) {
             Intent(context, MainActivity::class.java)
         } else {
@@ -214,11 +228,24 @@ class Notices(private val context: Context) {
         }
         return PendingIntent.getActivity(
             context,
-            code,
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            0,
+            intent.setData(noticeUri(notice, "open")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
     }
 
     private fun key(machine: String, notification: Long) = "$machine:$notification"
 }
+
+/**
+ * What tells one notice's intents apart (`what` is `open`, `allow` or `deny`): Android keeps one
+ * pending intent per intent and request code, and a code made from a hash could be another
+ * notice's.
+ */
+fun noticeUri(notice: Notice, what: String): Uri = Uri.Builder()
+    .scheme("flottille")
+    .authority("notice")
+    .appendPath(notice.machine)
+    .appendPath(notice.notification.toString())
+    .appendPath(what)
+    .build()
