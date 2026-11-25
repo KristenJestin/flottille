@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -571,7 +572,13 @@ class SessionPageTest {
         rule.onNodeWithContentDescription("Agents").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("tree").assertIsDisplayed()
+        // The pilot first, then its children; the ended ones folded until asked for.
+        assertHas("tree-pilot", "Fix the login")
         assertHas("child:c1", "running cargo test")
+        rule.onNodeWithTag("child:c2").assertDoesNotExist()
+        assertHas("tree-ended", "Ended")
+        rule.onNodeWithTag("tree-ended").performClick()
+        rule.waitForIdle()
         assertHas("child:c2", "ended: it reported")
         rule.onNodeWithContentDescription("Close").performClick()
         rule.waitForIdle()
@@ -610,6 +617,35 @@ class SessionPageTest {
         rule.waitForIdle()
         rule.onNode(hasContentDescription("Send") and hasClickAction()).assertIsDisplayed()
         rule.onNodeWithText("Send").assertDoesNotExist()
+    }
+
+    @Test
+    fun an_answered_request_folds_into_a_one_line_record() {
+        val phone = phone(requests = listOf(request(4, "git push --force-with-lease origin login"), request(5, "rm -rf build")))
+        start(phone)
+        open()
+        // Inline in the conversation, where it was asked, with Allow and Deny.
+        rule.onNode(hasTestTag("request:4") and hasAnyAncestor(hasTestTag("conversation"))).assertExists()
+        rule.onNodeWithTag("allow:4").performClick()
+        rule.onNodeWithTag("deny:5").performClick()
+        rule.waitForIdle()
+        phone.state.value = phone.state.value.copy(requests = emptyList())
+        rule.mainClock.advanceTimeBy(1_000)
+        // Answered, it is one line saying what was asked and what the user said.
+        rule.onNodeWithTag("request:4").assertDoesNotExist()
+        assertHas("request-record:4", "git push --force-with-lease origin login")
+        assertHas("request-record:4", "Allowed")
+        assertHas("request-record:5", "Denied")
+    }
+
+    @Test
+    fun the_mode_chip_is_in_the_top_bar() {
+        val phone = phone(page(mode = "full"))
+        start(phone)
+        open()
+        rule.onNode(hasTestTag("mode") and hasAnyAncestor(hasTestTag("top-bar"))).assertExists()
+        rule.onNode(hasTestTag("mode") and hasAnyAncestor(hasTestTag("composer-bar"))).assertDoesNotExist()
+        assertHas("mode", "Full")
     }
 
     /** The node tagged [tag] holds [text], itself or somewhere inside it: a card is a few texts, a control merges its own. */
