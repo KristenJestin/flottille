@@ -1115,6 +1115,30 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE routine_runs ADD COLUMN body TEXT;
 "#,
     ),
+    (
+        "routine_made_by",
+        r#"
+    -- The session of the agent that made a routine with the tool `routine` (#1129); none for
+    -- the user's own.
+    ALTER TABLE routines ADD COLUMN made_by TEXT;
+"#,
+    ),
+    (
+        "routine_edited_by",
+        r#"
+    -- The session of the agent that edited a routine last with the tool `routine` (#1129).
+    ALTER TABLE routines ADD COLUMN edited_by TEXT;
+"#,
+    ),
+    (
+        "routine_run_flag",
+        r#"
+    -- A session that a routine's run started, or one of its tree, set when the run starts and
+    -- given to the children it makes: the tool `routine` reads it on the session's own row,
+    -- whatever becomes of its routine (a removal forgets its runs).
+    ALTER TABLE agents ADD COLUMN routine_run INTEGER NOT NULL DEFAULT 0;
+"#,
+    ),
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1795,6 +1819,11 @@ impl Store {
         transaction.execute(
             "UPDATE agents SET read_only = 1 WHERE id = ?1 \
              AND (SELECT read_only FROM agents WHERE id = ?2) = 1",
+            params![agent.id, agent.parent],
+        )?;
+        transaction.execute(
+            "UPDATE agents SET routine_run = 1 WHERE id = ?1 \
+             AND (SELECT routine_run FROM agents WHERE id = ?2) = 1",
             params![agent.id, agent.parent],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -6867,6 +6896,36 @@ mod tests {
         assert_eq!(store.agents().unwrap(), std::slice::from_ref(&agent));
         assert_eq!(store.agent("other").unwrap(), None);
         assert_eq!(store.agent_events(&agent.id, 0, 10).unwrap(), [event]);
+    }
+
+    #[test]
+    fn a_child_of_a_routine_run_is_one_whatever_its_parent_becomes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let root = an_agent();
+        store
+            .create_agent(&root, ("agent.created", json!({})))
+            .unwrap();
+        assert!(!store.routine_run_session(&root.id).unwrap());
+        store.set_routine_run_session_flag(&root.id).unwrap();
+        let child = Agent {
+            id: "child0000000".into(),
+            parent: Some(root.id.clone()),
+            ..an_agent()
+        };
+        store
+            .create_agent(&child, ("agent.created", json!({})))
+            .unwrap();
+        store
+            .connection
+            .execute("UPDATE agents SET parent = NULL WHERE id = ?1", [&child.id])
+            .unwrap();
+
+        assert!(store.routine_run_session(&root.id).unwrap());
+        assert!(
+            store.routine_run_session(&child.id).unwrap(),
+            "its own flag"
+        );
+        assert!(!store.routine_run_session("gone").unwrap());
     }
 
     #[test]

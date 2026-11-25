@@ -39,6 +39,8 @@ mod review;
 mod routine_events;
 #[path = "../routine_items.rs"]
 mod routine_items;
+#[path = "../routine_tool.rs"]
+mod routine_tool;
 #[path = "../routines.rs"]
 mod routines;
 #[path = "../runs.rs"]

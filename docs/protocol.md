@@ -3114,7 +3114,7 @@ session of the routine's project, at its time or when its event comes. A routine
  "schedule": "weekdays 08:30", "event": null, "zone": "Europe/Paris", "mode": "read_only",
  "rings": "something", "paused": false, "missed_hours": 12,
  "next_at": 1795000200000, "delayed": null, "created_at": 1794900000000,
- "updated_at": 1794900000000}
+ "updated_at": 1794900000000, "made_by": null, "edited_by": null}
 ```
 
 - `schedule`: days and an hour, never a cron line: `every day 07:00` (`daily 07:00`),
@@ -3153,6 +3153,16 @@ session of the routine's project, at its time or when its event comes. A routine
   otherwise.
 - `missed_hours`: a run missed while the daemon was off runs once at its next start when it was
   due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
+- `made_by`: the session whose agent made it with the tool `routine` (`docs/tools.md`,
+  "Routines"), `{"session", "title"}`, its title as it is now (null while it has none); null for
+  one the user made. Set when it is made, never changed: an edit, the user's or an agent's, keeps
+  it. The user edits and removes such a routine as any other. A run of such a routine starts no
+  higher than that session's mode at the time of the run: `auto` runs in Ask while it is in Ask
+  (an ended session's last mode; Ask when it is gone), and the run's `mode` says the one it got.
+- `edited_by`: the session whose agent edited it last with the tool `routine`, as `made_by`
+  is given; null while no agent has. The user's own edits leave it as it is.
+- `name`: unique across projects; one shaped as a routine's id (twelve hexadecimal digits) is
+  refused, since `routine` takes an id or a name.
 
 A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
 "outcome", "summary", "why", "trigger", "opened", "items", "left", "body"}`. `session` is its root session (null for a skipped run), kept once it

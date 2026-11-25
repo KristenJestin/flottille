@@ -195,7 +195,7 @@ and the 2026 practice around it:
    used families.
 
    **Since #1292, the families an agent rarely calls are read on demand**: `services`, `setup`,
-   `project`, `connections`, `vault` and `agent_launch` (`routine` next, #1129) are listed with a short
+   `project`, `connections`, `vault`, `agent_launch` and `routine` (#1129) are listed with a short
    description that keeps what the family is, the rule not to miss and one example, and a schema
    that keeps every argument's name, type, enum and bound but not its sentence; their whole text
    (the full description, then each argument's sentence) is their guide, given with the agent's
@@ -221,6 +221,7 @@ and the 2026 practice around it:
    | Before #1292 (30 tools; with `routine`, #1289, 62,480: over the guard) | 30 | 59,565 |
    | After #1292 (five families read on demand, repeats said once; `routine` counted whole) | 30 + 1 | 55,557 + 2,915 = 58,472 |
    | After #1292, round 3 (`workspace`'s `machine` argument, #1371, +190; `agent_launch` read on demand too; `vault`, with its `propose`, and `routine` whole counted) | 30 + 1 | 58,155 |
+| After #1289, round 6 (`routine` in the list, listed short, read on demand; no longer counted a second time by an allowance; whole it is 58,399) | 31 | 57,291 |
 
    By role before #1292: a root 59,565, a child 50,331, a child at the depth limit 41,958; after
    it 55,557, 47,668 and 39,295 (the size test's count: the definitions as listed, title and

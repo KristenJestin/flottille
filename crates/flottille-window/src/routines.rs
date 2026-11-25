@@ -41,6 +41,11 @@ pub struct Routine {
     pub unread: u64,
     /// Its last run, from `routine.list`.
     pub last: Option<Run>,
+    /// The session that made it with the tool `routine`, as the window names it: its title, the
+    /// agent's words; none for the user's own.
+    pub made_by: Option<String>,
+    /// The session that edited it last with the tool `routine`, named as `made_by` is.
+    pub edited_by: Option<String>,
 }
 
 /// The event a routine runs on: its kind, and the fields of its kind (`docs/protocol.md`).
@@ -221,6 +226,14 @@ impl Event {
     }
 }
 
+/// The session a routine's `made_by` or `edited_by` names, as the window says it: its title, the
+/// agent's words, or its id while it has none.
+fn by(value: &Value) -> Option<String> {
+    value["session"]
+        .as_str()
+        .map(|session| plain(&value["title"]).unwrap_or_else(|| format!("session {session}")))
+}
+
 /// A line of the agent's, with no control and no invisible character (a bidirectional override
 /// would make it read as another text).
 fn plain(value: &Value) -> Option<String> {
@@ -347,6 +360,8 @@ impl Routine {
             delayed: text(&value["delayed"]),
             unread: value["unread"].as_u64().unwrap_or_default(),
             last: Run::of(&value["last"]),
+            made_by: by(&value["made_by"]),
+            edited_by: by(&value["edited_by"]),
         })
     }
 

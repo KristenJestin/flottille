@@ -677,6 +677,33 @@ pub fn session_leave(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Why an agent's write that leaves a routine running in `ask` or `auto` comes to the user, every
+/// time: the sessions it starts by itself act without anyone asked first.
+pub const ROUTINE_RUNS: &str = "it leaves a routine in ask or auto, whose runs start sessions \
+    that act by themselves: the user decides, every time, in every mode, Full included";
+
+/// The verdict on a call of `routine` that leaves one running in `ask` or `auto`: base, never
+/// judged, and held in Full (`asks_routine`), with the reasons it had besides.
+pub fn routine_runs(verdict: Verdict) -> Verdict {
+    let mut found = Found::default();
+    found.base(ROUTINE_RUNS.into());
+    match verdict {
+        Verdict::Deny(_) => return verdict,
+        Verdict::Ask(ask) => {
+            for reason in ask.reasons {
+                found.judge(reason);
+            }
+        }
+        Verdict::Allow => {}
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call leaves a routine in `ask` or `auto`: only the user answers it.
+pub fn asks_routine(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == ROUTINE_RUNS)
+}
+
 /// Why `agent_stop` of a session that is not the caller's child comes to the user, every time:
 /// it ends the user's other conversation, and no leave is kept.
 pub const END_SESSION: &str = "it ends a session of the user's, not one of this agent's \

@@ -183,6 +183,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("workspace", "link_ticket") => Some("ticket"),
         ("services", "add" | "edit" | "remove") => Some("services"),
         ("workspace", "rename_branch") => Some("branch"),
+        ("routine", _) if crate::routine_tool::writes(args) => Some("routines"),
         _ => None,
     }
 }
@@ -204,6 +205,10 @@ pub fn asked(family: &str) -> String {
             "it adds, changes or removes a service of the machine, which every project shares"
         }
         "branch" => "it renames the branch of a workspace, which its pull requests then follow",
+        "routines" => {
+            "it creates, changes, pauses, runs or removes a routine of the project, which starts \
+             sessions by itself"
+        }
         _ => "it changes the project's settings",
     }
     .into()
@@ -487,6 +492,9 @@ pub async fn prepared(
             &grant.place.project,
             args,
         );
+    }
+    if tool == crate::routine_tool::TOOL {
+        return crate::routine_tool::says(daemon, grant, args);
     }
     if tool == "run" {
         return Ok(crate::services::starts_said(

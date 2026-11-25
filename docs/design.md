@@ -641,7 +641,11 @@ Work that starts by itself: every weekday morning, the list of tickets waiting f
 review, read from the tracker without changing anything. A **routine** is kept by the daemon: a
 name, a project, a prompt (the user's own words), an agent with its provider, model and effort, a
 **schedule** or an **event**, a **mode** and where its result **rings** (`docs/protocol.md`, "The routine
-methods"; `flottille routine`, `docs/cli.md`).
+methods"; `flottille routine`, `docs/cli.md`). The agent the user talks to reads, makes and runs
+them too, with the tool `routine` (`docs/tools.md`, "Routines"), through the gate as every write
+of the project, and never with a mode above its own session's; a write that leaves a routine in
+`ask` or `auto` is the user's to decide in every mode, Full included; a routine an agent made or
+edited says so on its page (`Made by`, `Edited by` and the session's title).
 
 - **Each run is a new root session** of the project, in its folder, started by the daemon as a
   click would start it, the prompt its first message and the routine's name its title. It is
@@ -1364,7 +1368,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (§5.10) lists the project's routines, each with its trigger, its mode and its last run, and a
   dot while its last result with something to say is not opened; the tab's label counts the
   results not opened (hidden at zero). A routine opens its page in the tab (`Routines / Tickets to
-  review`): its trigger, mode, agent and prompt, **Run now**, **Pause** or **Resume**, **Edit**,
+  review`): its trigger, mode, agent, who made it and who edited it last when an agent did
+  (`Made by`, `Edited by` and the session's title, each unfolding when it comes) and prompt, **Run now**, **Pause** or **Resume**, **Edit**,
   **Remove…** and its history, each run a session, ended ones too. A run's **result** page,
   opened from the tab, the history or a notification, shows its report as a reply is drawn (the
   markdown the result gave beside its items, else its summary), then its **items** as the kit's

@@ -114,7 +114,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 34] = [
+const SERVED: [Definition; 35] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -554,6 +554,38 @@ const SERVED: [Definition; 34] = [
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
                 "text": {"type": "string", "description": "set_rules: the project's rules, whole, at most 8000 characters; they replace its current ones and come after the global ones."},
                 "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "routine",
+        title: "The project's routines",
+        description: "This project's routines: work the daemon starts by itself, each run a new \
+            session asked the routine's prompt, on a schedule (`weekdays 08:30`) or an event. \
+            list, show and result read them; create, edit, pause, resume, run (now) and remove \
+            are done once the judge or the user allows them. A routine's mode (read_only, the \
+            default; ask; auto) is never above your session's: in Ask, read_only or ask. \
+            {\"action\": \"create\", \"name\": \"Tickets to review\", \"prompt\": \
+            \"List the tickets waiting for my review\", \"schedule\": \"weekdays 08:30\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "result", "create", "edit", "pause", "resume", "run", "remove"]},
+                "routine": {"type": "string", "description": "show, result, edit, pause, resume, run, remove: the routine's name."},
+                "name": {"type": "string", "description": "create: its name, unique; edit: its new name."},
+                "prompt": {"type": "string", "description": "create, edit: what each run's session is asked, the user's words."},
+                "schedule": {"type": "string", "description": "create, edit: days and an hour, `every day 07:00`, `weekdays 08:30`, `mondays 09:00`; or event."},
+                "event": {"type": "object", "description": "create, edit: the event it runs on instead of a schedule, {kind: workflow_run | review_requested | mentioned | assigned, ...its fields}, as `flottille routine add --on` takes it."},
+                "zone": {"type": "string", "description": "create, edit: the schedule's time zone (Europe/Paris); the machine's when left out."},
+                "mode": {"type": "string", "enum": ["read_only", "ask", "auto"], "description": "create, edit: what its runs may do; read_only by default."},
+                "rings": {"type": "string", "enum": ["something", "new", "never"], "description": "create, edit: when its result rings the user."},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "effort": {"type": "string"},
+                "missed_hours": {"type": "integer", "minimum": 1, "maximum": 168, "description": "create, edit: a run missed while the machine was off runs within these hours."},
+                "date": {"type": "string", "description": "result: the day of the run, YYYY-MM-DD in the routine's zone; the last result when left out."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1062,15 +1094,31 @@ const AGENT_LAUNCH_WHOLE: &str = "kind (required): child, a part of your own tas
     held for the user. new_workspace: name its branch by the repository's convention. \
     provider, model and effort are yours when left out, and role is worker.";
 
+/// The whole description of `routine`, its guide (`docs/tools.md`, "Guides read on demand").
+const ROUTINE_WHOLE: &str = "This project's routines: work the daemon starts by itself, each run a new \
+    session asked the routine's prompt, on a schedule (`weekdays 08:30`) or an event. \
+    list and show (its settings, next run and history, each run with its session, which \
+    session_read reads) read them; result gives a run's result (its summary, its items \
+    marked new since the run before, what left, its report), the last one or that of \
+    date (YYYY-MM-DD). create, edit, pause, resume, run (now) and remove are done once \
+    the judge or the user allows them. A routine's mode (read_only, the default; ask; \
+    auto) is never above your session's: in Ask, read_only or ask. A create, an edit or a \
+    resume that leaves a routine in ask or auto is the user's to decide, in every mode. \
+    A session a routine's run started reads routines and writes none, and a read-only \
+    routine's run writes nothing at all: both are refused. \
+    {\"action\": \"create\", \"name\": \"Tickets to review\", \"prompt\": \
+    \"List the tickets waiting for my review\", \"schedule\": \"weekdays 08:30\"}.";
+
 /// The families an agent rarely calls, listed short: their whole description, with each
 /// argument's sentence, is their guide, read on demand (`docs/tools.md`, "Guides read on demand").
-const ON_DEMAND: [(&str, &str); 6] = [
+const ON_DEMAND: [(&str, &str); 7] = [
     ("services", SERVICES_WHOLE),
     ("setup", SETUP_WHOLE),
     ("project", PROJECT_WHOLE),
     ("connections", CONNECTIONS_WHOLE),
     ("vault", VAULT_WHOLE),
     ("agent_launch", AGENT_LAUNCH_WHOLE),
+    ("routine", ROUTINE_WHOLE),
 ];
 
 /// What a family read on demand says of its guide, after its short description.
@@ -2827,6 +2875,7 @@ async fn played_whole(
                                     && crate::actions::removal_loses(&says))
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
+                                && !gate::asks_routine(&ask)
                                 && !gate::asks_launch_elsewhere(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
@@ -3120,6 +3169,9 @@ pub fn judged(
     if let Some(why) = crate::routines::refuses(daemon, &grant.agent, tool, args) {
         return (gate::Verdict::Deny(why), Vec::new());
     }
+    if let Some(why) = crate::routine_tool::refuses_a_run(daemon, &grant.agent, tool, args) {
+        return (gate::Verdict::Deny(why), Vec::new());
+    }
     let first = match tool {
         "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
         _ => Vec::new(),
@@ -3189,6 +3241,10 @@ fn verdict_of(
         && let Some(refused) = gate::too_long("brief", &args["brief"])
     {
         return refused;
+    }
+    if tool == crate::routine_tool::TOOL && crate::routine_tool::leaves_running(daemon, grant, args)
+    {
+        return gate::routine_runs(classified(daemon, grant, tool, args));
     }
     let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
         return with_services(
@@ -3859,6 +3915,7 @@ async fn performed_once(
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         "session_title" => crate::titles::session_title(daemon, grant, args),
         crate::routines::TOOL => crate::routines::result(daemon, grant, args),
+        crate::routine_tool::TOOL => crate::routine_tool::tool(daemon, grant, args),
         tool if crate::extensions::gives(tool) => {
             crate::extensions::perform(daemon, grant, tool, args).await
         }
@@ -4606,6 +4663,12 @@ mod tests {
         ] {
             assert!(launch.contains(said), "agent_launch lost: {said}\n{launch}");
         }
+        // A routine is never above the session that makes it: said before the first call.
+        let routine = listed("routine");
+        assert!(
+            routine.contains("never above your session's"),
+            "routine lost: {routine}"
+        );
         // A secret never goes in a connection's variables or headers.
         let connections = listed("connections");
         assert!(
@@ -4644,16 +4707,14 @@ mod tests {
             one family tool with actions (as forge and tickets), guidance read on demand (as \
             skill_read), or tool search for rarely used families. A tool cannot be withheld by \
             context.";
-        // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
-        // definition's size (2,915 characters, measured on that branch), before it is listed
-        // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 58,155 characters of the 60,000,
-        // a margin of 1,845 (measured on this branch, round 3, 2026-11-24; child 46,993, leaf
-        // 40,643). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
-        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back, and the
-        // `propose` action of `vault` (listed short too) took 118. The limits are not raised, and
-        // no tool is trimmed.
-        const ROUTINE: usize = 2_915;
+        // The roots list is measured with the tool `vault` (an entry exists) and `routine`, both
+        // listed short as the other rarely used families are: 57,291 characters of the 60,000
+        // (measured on this branch, round 6, 2026-11-25; `routine` whole is 58,399). Round 5
+        // failed with 61,314 because `routine` was counted twice, by the list and by an
+        // allowance made before it joined the list. Round 2 left 130, and `workspace` took 190
+        // with its `machine` argument (#1371), which made 60,060; `agent_launch` is listed short,
+        // which gave 2,023 back, and the `propose` action of `vault` (listed short too) took
+        // 118. The limits are not raised, and no tool is trimmed.
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
             ("a root", true, false),
@@ -4662,11 +4723,10 @@ mod tests {
         ] {
             let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, true);
             let names = served(&claude::PROVIDER, &list);
-            let coming = if root { 1 } else { 0 };
             assert!(
-                names.len() + coming <= TOOLS,
+                names.len() <= TOOLS,
                 "{} tools for {role}, at most {TOOLS}. {advice}",
-                names.len() + coming
+                names.len()
             );
             let chars: usize = names
                 .into_iter()
@@ -4674,8 +4734,7 @@ mod tests {
                     let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
                     tool.unwrap().len()
                 })
-                .sum::<usize>()
-                + coming * ROUTINE;
+                .sum::<usize>();
             biggest = biggest.max(chars);
         }
         assert!(
