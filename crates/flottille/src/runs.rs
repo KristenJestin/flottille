@@ -2,8 +2,9 @@
 //! `docs/reference/hemera.md` §3 "Commands"), and the tasks the user runs from the window.
 //!
 //! A run is a line split without a shell and spawned in a session of its own, with the
-//! place's variables and an environment that keeps forges out of reach: no forge token, the forge
-//! command lines' configuration in an empty folder, and no git hook. The call waits
+//! place's variables and, in Ask and Auto, an environment that keeps forges out of reach: no forge
+//! token, the forge command lines' configuration in an empty folder, and no git hook (a run in
+//! Full gets the daemon's environment as it is, `docs/tools.md`). The call waits
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::{AgentState, new_id};
+use flottille_core::agent::{AgentState, GateMode, new_id};
 use flottille_core::approval;
 use flottille_core::command::split_line;
 use flottille_core::project::{Ready, TaskUrl};
@@ -495,7 +496,13 @@ pub async fn run(
         true => String::new(),
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
-    let env = match environment(daemon, place, &repository) {
+    // Read at each run's start: a switch reaches the next run, never one that goes on.
+    let full = crate::judge::mode(daemon, agent) == GateMode::Full;
+    let env = match full {
+        true => own_environment(place, &repository),
+        false => environment(daemon, place, &repository),
+    };
+    let env = match env {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -503,7 +510,8 @@ pub async fn run(
     // remote's program that receives it is git's own, over a `remote.<name>.receivepack` a run
     // may have written: git takes the first it reads, the repository's, so only the line's own
     // option wins over it (the gate refuses the agent's).
-    let pushing = approved && gate::is_push(&words);
+    // In Full, a push is a run of the user's own as any other: never lent (`own_environment`).
+    let pushing = approved && !full && gate::is_push(&words);
     // The words added to it below (its probe's `--dry-run`) must be read as options of their own.
     if pushing && let Err(refusal) = crate::message_checks::push_options(&words) {
         return Outcome::Refused(refusal);
@@ -597,6 +605,7 @@ pub async fn run(
     let checked_with = match (&lifted, &to_paths) {
         (Some(lifted), _) => Some((lifted, true)),
         (None, Some(to_paths)) => Some((to_paths, false)),
+        (None, None) if full && gate::is_push(&words) => Some((&env, true)),
         (None, None) => None,
     };
     if let Some((pushed_env, outside)) = checked_with {
@@ -677,6 +686,7 @@ pub async fn run(
         Readying { probe, notify },
         guarded,
         &needs,
+        full,
     ) {
         return Outcome::Failed(why);
     }
@@ -788,6 +798,7 @@ pub async fn run_for_user(
         },
         None,
         &task.needs,
+        false,
     )?;
     Ok(id)
 }
@@ -860,6 +871,22 @@ pub(crate) fn environment(
         env.remove(&OsString::from(name));
     }
     Ok(env)
+}
+
+/// The environment of a run of a session in Full: the daemon's, as a command the user typed (the
+/// SSH agent, the session bus, the display, the forge command lines' sign-ins, the user's git
+/// settings and hooks), with the place's variables filled. Nothing is held back from it, the
+/// keyring the bus reaches included (`start`).
+fn own_environment(
+    place: &Place,
+    repository: &str,
+) -> Result<BTreeMap<OsString, OsString>, String> {
+    let names = names(place, repository);
+    let mut filled = BTreeMap::new();
+    for (name, template) in &place.variables {
+        filled.insert(name.clone(), variables::fill(template, &names)?);
+    }
+    Ok(variables::environment(std::env::vars_os(), &[&filled]))
 }
 
 /// The environment of a program the daemon runs beside it for every project, in no place (a
@@ -1154,7 +1181,8 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
 /// what it is in from the start: a run that ends at once must find it already detached to have
 /// its end delivered. It runs in the sandbox with `env`, or outside it with `lifted`, the
 /// environment of a push the gate let through (`fn lifted`); its probes run in the sandbox with
-/// `env` either way.
+/// `env` either way. A run of a session in `full` is the user's own, as in their terminal: no
+/// namespace, no Landlock, its `env` the daemon's (`own_environment`).
 #[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
@@ -1168,12 +1196,13 @@ fn start(
     readying: Readying,
     guarded: Option<Guard>,
     needs: &[String],
+    full: bool,
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
-    // A lifted push has the daemon's own display already, and needs none.
-    let display = match lifted {
-        Some(_) => None,
-        None => shown(daemon, &run).map(|shown| {
+    // A lifted push, and a run in Full, have the daemon's own display already, and need none.
+    let display = match lifted.is_some() || full {
+        true => None,
+        false => shown(daemon, &run).map(|shown| {
             env.extend(shown.env);
             shown.folder
         }),
@@ -1198,13 +1227,22 @@ fn start(
         .stderr(writer)
         .kill_on_drop(true);
     crate::children::in_own_session(&mut command);
-    if !outside {
+    // A run in Full is the user's own, as in their terminal: confined in no way.
+    if !outside && !full {
         crate::landlock::confined_but(&mut command, display.as_ref());
     }
     let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
-    let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
+    let child = spawned.map_err(|e| {
+        // Its namespace refused, as `flottille doctor` says it.
+        let refused = crate::mounts::whole_refused()
+            .filter(|_| !outside && !full && e.raw_os_error() == Some(libc::ENOSYS));
+        match refused {
+            Some(why) => format!("cannot run {}: {why}", words[0]),
+            None => format!("cannot run {}: {e}", words[0]),
+        }
+    })?;
     let pid = child.id().ok_or("the run ended at once")?;
     let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
         .map_err(|e| format!("cannot read the output of {}: {e}", words[0]))?;
@@ -1991,6 +2029,7 @@ pub async fn restart_by_user(
             readying,
             guarded,
             &needs,
+            false,
         )
     }) {
         // The stop was the user's and its end was not told: the agent hears of both.
@@ -2549,6 +2588,7 @@ pub(crate) fn start_service(
         },
         None,
         &[],
+        false,
     )?;
     Ok(id)
 }

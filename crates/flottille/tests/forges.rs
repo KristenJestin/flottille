@@ -389,6 +389,92 @@ fn gh_not_signed_in_is_said_and_nothing_else_is_asked_of_it() {
 }
 
 #[test]
+fn gh_that_cannot_be_checked_says_why_and_is_not_called_signed_out() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    // gh prints every failure of its API call (DNS, refused, 5xx, rate limit) in the shape of a bad
+    // token, with the real cause on its `- Error:` line and the account's login on the first.
+    user.gh_script(json!({
+        "user": {"login": "octocat"},
+        "status_fail": "error connecting to api.github.com\n  - Token: gho_inventedTokenOfATestOnly1234567890"
+    }));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(problem.contains("gh could not be checked"), "{problem}");
+    assert!(
+        problem.contains("error connecting to api.github.com"),
+        "{problem}"
+    );
+    assert!(problem.contains("could not be refreshed"), "{problem}");
+    assert!(!problem.contains("not signed in"), "{problem}");
+    assert!(!problem.contains("gh auth login"), "{problem}");
+    assert!(!problem.contains("gho_inventedToken"), "{problem}");
+    assert!(
+        !problem.contains("octocat"),
+        "a login is never shown: {problem}"
+    );
+    assert_eq!(repository(&forge, "api")["pull_request"], Value::Null);
+}
+
+#[test]
+fn gh_that_answers_401_is_not_signed_in() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    user.gh_script(json!({
+        "status_fail": "HTTP 401: Bad credentials (https://api.github.com/graphql)"
+    }));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(
+        problem.contains("gh is not signed in to github.com"),
+        "{problem}"
+    );
+    assert!(!problem.contains("could not be checked"), "{problem}");
+}
+
+#[test]
+fn a_gh_check_that_could_not_be_made_is_logged_with_its_reason() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    user.gh_script(json!({
+        "user": {"login": "octocat"},
+        "status_fail": "HTTP 502: Bad Gateway (https://api.github.com/graphql)"
+    }));
+
+    forge(&user);
+
+    let log = std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap();
+    let line = log
+        .lines()
+        .find(|line| line.contains("flottille daemon: forges:"))
+        .unwrap_or_else(|| panic!("no line of the forges in {log}"));
+    assert!(line.contains("gh could not be checked"), "{line}");
+    assert!(line.contains("HTTP 502: Bad Gateway"), "{line}");
+    assert!(!line.contains("not signed in"), "{line}");
+    assert!(!line.contains("octocat"), "{line}");
+}
+
+#[test]
+fn gh_that_does_not_answer_is_could_not_check_with_no_answer_in_n_seconds() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_FORGE_TIMEOUT_MS", "300");
+    fixture(&user);
+    user.gh_script(json!({"delay_ms": 5000}));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(problem.contains("gh could not be checked"), "{problem}");
+    assert!(problem.contains("no answer in 1 s"), "{problem}");
+    assert!(!problem.contains("not signed in"), "{problem}");
+}
+
+#[test]
 fn the_state_changes_when_gh_answers_differently_and_an_event_says_so() {
     let user = User::new()
         .with_fake_gh()

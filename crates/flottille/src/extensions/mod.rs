@@ -118,6 +118,12 @@ pub async fn family_call(
     connections::requests::tool(daemon, args, approved, place).await
 }
 
+/// Whether `kind` is the name an extension tells a lead of another machine under (a review's
+/// result), as it tells one here: the only one ever sent across.
+pub(crate) fn tells_across(kind: &str) -> bool {
+    kind == review::EXTENSION.name
+}
+
 /// Every extension, in the order of their settings' tabs.
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,
@@ -764,6 +770,18 @@ pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
     connections::provide(socket)
 }
 
+/// `flottille browser-network`: holds the network namespace of a connection's browser
+/// (`connections::network`).
+pub fn browser_network() -> ! {
+    connections::network::hold()
+}
+
+/// Whether a connection's browser can run in a network of its own here, and why not
+/// (`flottille doctor`).
+pub fn browser_network_available() -> Result<(), String> {
+    connections::network::available()
+}
+
 /// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what
 /// a tunnel of another machine's client may reach (`tunnel.rs`).
 pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<connections::SignInWaiting> {
@@ -1065,7 +1083,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let launched = launched(daemon, &grant.agent).map(|(by, kind)| (by.name, kind));
     Some(verdict(tool, owner.name, root, launched, args, || {
         (tool.gate)(daemon, grant, args)
@@ -1146,6 +1164,7 @@ pub fn start_session(
             preparing: workspace.is_some(),
             role,
             parent: None,
+            remote_parent_depth: None,
             title: Some(title.to_owned()),
             brief: message.to_owned(),
             provider: None,

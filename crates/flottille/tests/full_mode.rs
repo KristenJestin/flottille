@@ -369,6 +369,88 @@ fn a_session_started_by_an_agent_in_an_ask_tree_starts_in_ask() {
     assert_eq!(mode_of(&user, &started(&user, "Docs")), "ask");
 }
 
+/// A project `kit`, another project of the same user, over a throwaway repository.
+fn another_project(user: &User) {
+    let folder = user.path("work/kit");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "kit\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "kit"}))
+        .unwrap();
+}
+
+/// The agent of `mcp` launches `args` (titled): the user allows it if the gate held it, and the
+/// started session's id once it exists.
+fn launched(user: &User, mcp: &Mcp, args: Value) -> String {
+    let title = args["title"].as_str().unwrap().to_owned();
+    let answer = mcp.call("agent_launch", args);
+    assert!(!answer.error, "{}", answer.text);
+    if let Some(number) = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse::<u64>().unwrap())
+    {
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+    }
+    let found = std::cell::RefCell::new(None);
+    eventually(&format!("the session {title}"), || {
+        *found.borrow_mut() = user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["title"] == title.as_str())
+            .map(|a| a["id"].as_str().unwrap().to_owned());
+        found.borrow().is_some()
+    });
+    found.into_inner().unwrap()
+}
+
+#[test]
+fn a_default_of_full_lends_nothing_to_a_session_an_agent_starts_whatever_its_kind() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    another_project(&user);
+    // The default the user chose for the sessions they start: Full, chosen after this root began.
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+
+    for root in ["ask", "auto"] {
+        set_mode(&user, &id, root);
+        for (kind, project) in [("led", None), ("handed", None), ("led", Some("kit"))] {
+            let title = format!("{root} {kind} {}", project.unwrap_or("app"));
+            let mut args = json!({"kind": kind, "title": title, "brief": "Write the docs."});
+            if let Some(project) = project {
+                args["project"] = project.into();
+            }
+            let session = launched(&user, &mcp, args);
+            // Never Full, and never above the root that launched it.
+            assert_eq!(mode_of(&user, &session), root, "{title}");
+        }
+    }
+    // The user's own next session is the one the default is for.
+    let own = user
+        .call("agent.run", json!({"project": "app", "message": "mine"}))
+        .unwrap();
+    assert_eq!(mode_of(&user, own["agent"]["id"].as_str().unwrap()), "full");
+}
+
+#[test]
+fn a_resumed_session_keeps_its_mode_whatever_the_default_became() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, _, _) = session(&user);
+    set_mode(&user, &id, "ask");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+
+    user.resume(&id);
+
+    assert_eq!(mode_of(&user, &id), "ask");
+}
+
 #[test]
 fn a_session_the_user_starts_starts_in_auto() {
     let user = User::with_fake_agent().with_fake_launchers();
@@ -662,13 +744,16 @@ fn in_full_inline_interpreter_code_passes() {
     assert_eq!(judge_prompts(&user), 0, "the judge was asked");
 }
 
+// The four below are of a confined run: a run in Full is the user's own
+// (`full_runs.rs`), so they run in Auto, the judge allowing every call.
+
 #[test]
 fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
     let user = User::with_fake_agent()
         .with_allowing_judge()
         .with_fake_launchers();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
 
     let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
     assert!(
@@ -693,7 +778,7 @@ fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
 fn a_run_gets_no_session_bus_address() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
 
     let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
 
@@ -713,7 +798,7 @@ fn a_run_cannot_open_the_session_bus_socket_by_its_path() {
     }
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
     let bus = user.path("runtime/bus");
     let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
 
@@ -738,7 +823,7 @@ fn a_run_cannot_read_the_user_s_runtime_folder() {
     }
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
     let note = user.path("runtime/note");
     std::fs::write(&note, "kept from runs").unwrap();
     let elsewhere = user.path("home/note");

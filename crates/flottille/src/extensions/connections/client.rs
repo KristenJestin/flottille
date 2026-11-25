@@ -83,6 +83,9 @@ struct Server {
     headless: Mutex<Option<String>>,
     /// The browser its server or a login started, which outlives them: closed when it stops.
     browser: Mutex<Option<super::adapters::Browser>>,
+    /// Its vault's runtime folder, made once and kept while the daemon runs: every browser of the
+    /// connection is confined with it, held by its inode, and may outlive any server or login.
+    vault: Mutex<Option<crate::display::Folder>>,
 }
 
 #[derive(Default)]
@@ -194,8 +197,11 @@ struct Running {
     cut: Cut,
     /// The runtime folder of its shown browser, removed when it stops, and its variables.
     display: Option<crate::display::Shown>,
-    /// Why its browser runs headless though the user shows it, when it cannot be shown.
+    /// Why its browser runs headless though a call asked to show it, when it cannot be shown.
     headless: Option<String>,
+    /// Whether a call asked to show its browser: the mode it was started for, which a call that
+    /// asks the other restarts it for.
+    headed: bool,
 }
 
 impl Running {
@@ -277,6 +283,19 @@ pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
 /// The browser `browser` may now run for the connection, to close when its server stops.
 pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapters::Browser) {
     *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
+}
+
+/// The connection's vault folder (`display::vault`): the one its browsers were confined with,
+/// made the first time.
+pub(super) fn vault_of(daemon: &Daemon, name: &str) -> Result<crate::display::Folder, String> {
+    let server = server_of(daemon, name);
+    let mut vault = server.vault.lock().unwrap();
+    if let Some(folder) = vault.as_ref() {
+        return Ok(folder.clone());
+    }
+    let folder = crate::display::vault(&daemon.paths, name)?;
+    *vault = Some(folder.clone());
+    Ok(folder)
 }
 
 /// The display folder of the browser that may run for the connection, while it is not closed.
@@ -539,7 +558,11 @@ fn cut_during_start(
 /// cut. The adapter is known only once the server said what it is: it is taken from the pin, and
 /// a server that turns out to be another (its first review, a version that moved) is started
 /// once more with the options of its own.
-async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+async fn start(
+    daemon: &Arc<Daemon>,
+    declaration: &Declaration,
+    headed: bool,
+) -> Result<Running, String> {
     // Declared before the check of its URL existed, or by hand: it fails alone until it is
     // edited.
     if let Some(why) = declaration.url_fault() {
@@ -549,7 +572,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         .pin
         .as_ref()
         .and_then(super::adapters::applying);
-    let running = start_with(daemon, declaration, pinned).await?;
+    let running = start_with(daemon, declaration, pinned, headed).await?;
     let found = super::adapters::applying(&running.listing);
     let same = match (pinned, found) {
         (Some(a), Some(b)) => std::ptr::eq(a, b),
@@ -560,7 +583,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         return Ok(running);
     }
     stop_running(running).await;
-    start_with(daemon, declaration, found).await
+    start_with(daemon, declaration, found, headed).await
 }
 
 /// `start`, with the options of `adapter`.
@@ -568,6 +591,7 @@ async fn start_with(
     daemon: &Arc<Daemon>,
     declaration: &Declaration,
     adapter: Option<&'static super::adapters::Adapter>,
+    headed: bool,
 ) -> Result<Running, String> {
     let start = daemon
         .extensions
@@ -586,35 +610,72 @@ async fn start_with(
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
+            // Before anything runs: with the adapter's options, or on a first start whose
+            // command names its program, since the server that answers is then the adapter's.
+            if let Some(why) = adapter
+                .or_else(|| super::adapters::named_by(words))
+                .and_then(|adapter| adapter.command_refused(words, &declaration.env))
+            {
+                return Err(why);
+            }
             let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
+            // The folder of the connection's browser, its profile in it: given back to its server
+            // alone (`browsers.rs`).
+            let mut profile = None;
+            // The adapter's server gets its vault's folder, which its browser's plugin reaches.
+            let mut vault = None;
+            // And its browser's network, where it can be made.
+            let mut network = None;
             let options = match adapter {
                 Some(_) => {
+                    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
+                    let own = vault.insert(vault_of(daemon, &declaration.name)?);
+                    if let Some(program) = super::adapters::command_line(declaration) {
+                        // Without one it runs as before, its browser in the runs' network, and
+                        // login refuses: the gap is said (`flottille doctor`, the review).
+                        match super::adapters::network(daemon, &program, &folder, own).await {
+                            Ok(made) => network = Some(made),
+                            Err(why) => eprintln!(
+                                "flottille daemon: connection {}: its browser runs in the runs' \
+                                 network, and its login refuses to fill: {why}",
+                                declaration.name
+                            ),
+                        }
+                    }
                     (display, headless) =
-                        super::adapters::shown(daemon, declaration, &declaration.name);
+                        super::adapters::shown(daemon, declaration, &declaration.name, headed);
                     if let Some(browser) =
                         super::adapters::browser(daemon, declaration, display.as_ref())
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(&folder, display.is_some())?
+                    let options = super::adapters::start_options(
+                        declaration,
+                        own,
+                        &given,
+                        display.is_some(),
+                    )?;
+                    profile = Some(given);
+                    options
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
-            if adapter.is_some() {
-                super::adapters::display(
-                    &mut env,
-                    display.as_ref().map(|shown| &shown.env),
-                    &folder,
-                );
-            }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
                 given.push(secret.clone());
                 env.insert(OsString::from(name), OsString::from(secret));
+            }
+            // Last: the connection's own variables never move the browser's folders.
+            if let Some(vault) = &vault {
+                super::adapters::display(
+                    &mut env,
+                    display.as_ref().map(|shown| &shown.env),
+                    vault,
+                )?;
             }
             let mut command = tokio::process::Command::new(&words[0]);
             command
@@ -627,11 +688,22 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::landlock::confined_but(
-                crate::children::in_own_session(&mut command),
-                display.as_ref().map(|shown| &shown.folder),
-            ))
-            .map_err(|error| format!("{}: {error}", words[0]))?;
+            let reached: Vec<&crate::display::Folder> = display
+                .as_ref()
+                .map(|shown| &shown.folder)
+                .into_iter()
+                .chain(vault.as_ref())
+                .collect();
+            if let Some(network) = &network {
+                network.entered(&mut command);
+            }
+            crate::children::in_own_session(&mut command);
+            match &profile {
+                Some(profile) => crate::landlock::confined_browser(&mut command, &reached, profile),
+                None => crate::landlock::confined_given(&mut command, &reached),
+            };
+            let mut child = crate::children::spawn(&mut command)
+                .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())
@@ -760,6 +832,7 @@ async fn start_with(
                 cut: cut.clone(),
                 display,
                 headless,
+                headed,
             })
             .await;
             return Err(why);
@@ -790,6 +863,7 @@ async fn start_with(
         cut,
         display,
         headless,
+        headed,
     })
 }
 
@@ -974,6 +1048,18 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
     }
 }
 
+/// The vault folder of the connection `name`, once it is removed and its browser closed
+/// (`stop`), removed with it: the next connection of its name gets one afresh.
+pub async fn vault_removed(daemon: &Arc<Daemon>, name: &str) {
+    let server = server_of(daemon, name);
+    // Under the turn: no login nor start of a server of its name makes anything there meanwhile.
+    let _turn = server.turn.lock().await;
+    server.vault.lock().unwrap().take();
+    let vault = daemon.paths.runtime.join("vault").join(name);
+    super::network::ended(&vault);
+    let _ = std::fs::remove_dir_all(vault);
+}
+
 /// The browser the server or a login of it started, closed: the next start applies the switch.
 async fn closed(daemon: &Daemon, server: &Server) {
     let browser = server.browser.lock().unwrap().take();
@@ -1060,7 +1146,14 @@ pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<L
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;
     }
-    let running = match start(daemon, declaration).await {
+    // Its browser goes on in the mode that runs: no call asked for another.
+    let running = match start(
+        daemon,
+        declaration,
+        browser_display(daemon, &declaration.name).is_some(),
+    )
+    .await
+    {
         Ok(running) => running,
         Err(why) => {
             let why = not_started(&why, |why| {
@@ -1085,7 +1178,7 @@ pub async fn call(
     grant: &Grant,
     name: &str,
     action: &str,
-    arguments: Map<String, Value>,
+    mut arguments: Map<String, Value>,
 ) -> Outcome {
     let server = server_of(daemon, name);
     let mut turn = server.turn.lock().await;
@@ -1106,8 +1199,27 @@ pub async fn call(
     {
         stop_running(running).await;
     }
+    // The call that opens the browser says whether to show it; any other goes on in the mode that
+    // runs. The other mode restarts the server and closes the browser, so that the next one starts
+    // in the mode asked, on the same profile (`adapters::start_options`).
+    let current = turn.as_ref().map_or_else(
+        || browser_display(daemon, name).is_some(),
+        |running| running.headed,
+    );
+    let wanted =
+        super::adapters::applying(&pin).and_then(|adapter| adapter.headed(action, &arguments));
+    if let Some(wanted) = wanted
+        && wanted != current
+    {
+        if let Some(running) = turn.take() {
+            *server.leader.lock().unwrap() = None;
+            stop_running(running).await;
+        }
+        closed(daemon, &server).await;
+    }
+    let headed = wanted.unwrap_or(current);
     if turn.is_none() {
-        let running = match start(daemon, &declaration).await {
+        let running = match start(daemon, &declaration, headed).await {
             Ok(running) => running,
             Err(why) if super::row(daemon, name).signed_out.is_some() => {
                 drop(turn);
@@ -1118,6 +1230,13 @@ pub async fn call(
                 *server.failing.lock().unwrap() = Some(why.clone());
                 drop(turn);
                 super::changed_event(daemon, name, Some(&why));
+                // Flottille's own refusal, before anything ran: no word of the server's.
+                if super::adapters::is_start_refusal(&why) {
+                    return Outcome::Failed(format!(
+                        "the connection {name} did not start: Flottille refused to start it, \
+                         its server ran nothing. {why}"
+                    ));
+                }
                 return failed_framed(
                     &format!(
                         "the connection {name} did not start; what follows may be its server's own words"
@@ -1143,13 +1262,20 @@ pub async fn call(
         super::changed_event(daemon, name, None);
     }
     let running = turn.as_ref().expect("started");
+    // Asked to show the browser that could not be: the agent is told, not left to wait for a window.
+    let not_shown = running.headless.clone().filter(|_| wanted == Some(true));
+    // agent-browser's own `headed` is above its configuration: the server is told the mode that
+    // runs, so a browser that could not be shown opens the page headless instead of failing.
+    if wanted.is_some() && arguments.contains_key("headed") {
+        arguments.insert("headed".into(), json!(running.display.is_some()));
+    }
     let params = CallToolRequestParams::new(action.to_owned()).with_arguments(arguments);
     // A cut that ended no call (an event stream that went on after it) is not this call's.
     running.cut.take();
     let answered = tokio::time::timeout(CALL_LIMIT, running.service.call_tool(params)).await;
     let now = super::now_of(daemon, name).map(|(_, _, state)| state);
     let stopping = !matches!(now, Some(State::Ready));
-    let outcome = match answered {
+    let mut outcome = match answered {
         Err(_) => {
             if let Some(running) = turn.take() {
                 *server.leader.lock().unwrap() = None;
@@ -1202,6 +1328,12 @@ pub async fn call(
             grant,
         ),
     };
+    if let (Outcome::Done(text), Some(why)) = (&mut outcome, not_shown) {
+        text.push_str(&format!(
+            "\nFlottille: the browser is not shown, it runs headless: {}",
+            crate::mcp::masked(&why, &grant.place)
+        ));
+    }
     if stopping && let Some(running) = turn.take() {
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;

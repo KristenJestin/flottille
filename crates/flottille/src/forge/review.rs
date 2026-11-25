@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     Checkout, Forge, ForgeCall, NO_FORGE, after, bitbucket, chosen, declared_forge, gh_json,
-    gh_text, place_checkouts, signed_in,
+    gh_text, place_checkouts, signed_in_to_write,
 };
 use crate::daemon::Daemon;
 use crate::mcp::Outcome;
@@ -108,7 +108,7 @@ async fn resolved(
         )));
     }
     if matches!(forge, Forge::GitHub { .. })
-        && let Err(problem) = signed_in().await
+        && let Err(problem) = signed_in_to_write().await
     {
         return Err(Outcome::Failed(problem));
     }

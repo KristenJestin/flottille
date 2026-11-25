@@ -219,12 +219,31 @@ impl Mcp {
         self.call_with_images_meta(tool, arguments, Some(meta))
     }
 
+    /// A call, and the guide of the tool's family that came with its answer, the first time
+    /// (`docs/tools.md`, "Guides read on demand").
+    pub fn call_with_guide(&self, tool: &str, arguments: Value) -> (Answer, Option<String>) {
+        let (answer, _, guide) = self.call_whole(tool, arguments, None);
+        (answer, guide)
+    }
+
     fn call_with_images_meta(
         &self,
         tool: &str,
         arguments: Value,
         meta: Option<Value>,
     ) -> (Answer, Vec<(String, String)>) {
+        let (answer, images, _) = self.call_whole(tool, arguments, meta);
+        (answer, images)
+    }
+
+    /// A call's answer: its text, without the guide block a first call of a family carries, its
+    /// images and that guide.
+    fn call_whole(
+        &self,
+        tool: &str,
+        arguments: Value,
+        meta: Option<Value>,
+    ) -> (Answer, Vec<(String, String)>, Option<String>) {
         let client = self.client.as_ref().unwrap();
         let mut params = CallToolRequestParams::new(tool.to_owned())
             .with_arguments(arguments.as_object().cloned().unwrap_or_default());
@@ -237,9 +256,15 @@ impl Mcp {
             .unwrap_or_else(|e| panic!("{tool} answers: {e}"));
         let result = serde_json::to_value(result).unwrap();
         let blocks = result["content"].as_array().unwrap();
+        let guide = blocks
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .find(|text| text.starts_with("[flottille:guide "))
+            .map(str::to_owned);
         let text = blocks
             .iter()
             .filter_map(|c| c["text"].as_str())
+            .filter(|text| !text.starts_with("[flottille:guide "))
             .collect::<Vec<_>>()
             .join("");
         let images = blocks
@@ -258,32 +283,12 @@ impl Mcp {
                 error: result["isError"] == true,
             },
             images,
+            guide,
         )
     }
 
     fn call_with_meta(&self, tool: &str, arguments: Value, meta: Option<Value>) -> Answer {
-        let client = self.client.as_ref().unwrap();
-        let mut params = CallToolRequestParams::new(tool.to_owned())
-            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
-        if let Some(meta) = meta {
-            params.meta = Some(serde_json::from_value(meta).unwrap());
-        }
-        let result = self
-            .runtime
-            .block_on(client.call_tool(params))
-            .unwrap_or_else(|e| panic!("{tool} answers: {e}"));
-        let result = serde_json::to_value(result).unwrap();
-        let text = result["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("");
-        Answer {
-            text,
-            error: result["isError"] == true,
-        }
+        self.call_whole(tool, arguments, meta).0
     }
 }
 

@@ -1988,10 +1988,11 @@ impl Render for CommandPanel {
             key: if running { "Started" } else { "Ended" },
             value: when,
         });
+        // Of another machine's page, the run is that machine's: "this PC" would be this one.
         facts.push(Fact {
             id: "machine",
             key: "Machine",
-            value: "this PC".to_owned(),
+            value: crate::machines::shown_machine(cx).unwrap_or_else(|| "this PC".to_owned()),
         });
         let command = Fact {
             id: "command",

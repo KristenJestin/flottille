@@ -447,7 +447,16 @@ pub fn ssh_command() -> OsString {
         }
         None => "ssh".into(),
     };
-    format!("{ssh} {SSH_OPTIONS}").into()
+    let mut command = format!("{ssh} {SSH_OPTIONS}");
+    // A test build's machine configuration, read in place of the account's: one that includes a
+    // root-owned file, whatever the machine's own includes (`ssh_owned.rs`).
+    if let Some(system) =
+        std::env::var_os(crate::ssh_owned::SYSTEM).filter(|_| cfg!(debug_assertions))
+    {
+        let quoted = system.to_string_lossy().replace('\'', "'\\''");
+        command.push_str(&format!(" -F '{quoted}'"));
+    }
+    command.into()
 }
 
 /// The options every `ssh` the daemon's git runs is given first, which win over the

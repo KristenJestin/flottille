@@ -179,10 +179,12 @@ fn took(daemon: &Daemon, agent: &str, taken: &[(String, String)]) {
     // A led session's pilot answers with `session_send`, whose key names it; another session's
     // message answers nothing.
     // A pilot of another machine's too, through its daemon.
+    // Its key names the caller there, not the stand-in its launch records here.
     let remote = crate::across::caller_of(daemon, &found, "led");
-    let pilot = match found.led {
-        true => found.launched_by.clone(),
-        false => remote,
+    let pilot = match (remote, found.led) {
+        (Some(remote), _) => Some(remote),
+        (None, true) => found.launched_by.clone(),
+        (None, false) => None,
     };
     let from_pilot = |id: &str| {
         pilot

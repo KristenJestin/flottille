@@ -36,6 +36,30 @@ pub struct ProjectList {
     pub projects: Vec<LightProject>,
 }
 
+/// The pilots of another machine of a runner's led sessions: what lets every window draw such a
+/// session under its pilot (`docs/remote.md`, "One list of every machine"). A message of its own,
+/// as [`ProjectList`] is, for the same reason: `pilot` of a [`LightSession`] is a session of the
+/// same list, and an id of another machine there, or a field a machine of before does not know,
+/// would make it refuse the whole list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PilotList {
+    pub pilots: Vec<LightPilot>,
+}
+
+/// A session of the sender's list led from another machine: that machine by its name among the
+/// members, and the pilot by its id there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightPilot {
+    /// The session's id, one of the sender's list.
+    pub session: String,
+    /// The machine of its pilot, by its name.
+    pub machine: String,
+    /// Its pilot's id on that machine.
+    pub pilot: String,
+}
+
 /// A project as another machine's list shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +190,34 @@ impl ProjectList {
                     "a project names {MOST_REMOTES} remotes at most, of {REMOTE_LIMIT} characters \
                      at most"
                 ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PilotList {
+    /// Whether another machine's pilots are ones to keep: within the bounds of a list, every id
+    /// one of the sender's form, every name one a client may show as it is, each session once.
+    pub fn check(&self) -> Result<(), String> {
+        if self.pilots.len() > MOST_SESSIONS {
+            return Err(format!("a list names {MOST_SESSIONS} pilots at most"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for pilot in &self.pilots {
+            if !an_id(&pilot.session) || !an_id(&pilot.pilot) {
+                return Err(
+                    "an id of a list is 1 to 64 letters, digits, dashes or underscores".to_owned(),
+                );
+            }
+            if pilot.machine.is_empty() || !showable(&pilot.machine, NAME_LIMIT) {
+                return Err(format!(
+                    "a machine of a list is 1 to {NAME_LIMIT} characters, none of them a control \
+                     or an invisible one"
+                ));
+            }
+            if !seen.insert(pilot.session.as_str()) {
+                return Err(format!("the session {} has two pilots", pilot.session));
             }
         }
         Ok(())
@@ -323,6 +375,58 @@ mod tests {
             wire.as_object().unwrap().keys().collect::<Vec<_>>(),
             ["sessions"]
         );
+    }
+
+    #[test]
+    fn the_pilots_of_another_machine_are_bounded() {
+        let pilot = |session: &str, machine: &str, id: &str| LightPilot {
+            session: session.to_owned(),
+            machine: machine.to_owned(),
+            pilot: id.to_owned(),
+        };
+        let list = PilotList {
+            pilots: vec![pilot("a1", "pc", "r1"), pilot("b2", "pc", "r1")],
+        };
+        assert_eq!(list.check(), Ok(()));
+        for odd in [
+            vec![pilot("a1", "pc", "r1@00ff")],
+            vec![pilot("../a", "pc", "r1")],
+            vec![pilot("a1", "", "r1")],
+            vec![pilot("a1", "p\u{202e}c", "r1")],
+            vec![pilot("a1", "pc", "r1"), pilot("a1", "lab", "r2")],
+        ] {
+            assert!(PilotList { pilots: odd }.check().is_err());
+        }
+        let many = PilotList {
+            pilots: (0..=MOST_SESSIONS)
+                .map(|at| pilot(&format!("s{at}"), "pc", "r1"))
+                .collect(),
+        };
+        assert!(many.check().is_err());
+    }
+
+    #[test]
+    fn a_machine_of_before_still_reads_the_sessions_and_refuses_the_pilots_alone() {
+        use crate::link::{MachineMessage, Message};
+        let sessions = Message::Machine(MachineMessage::Sessions(SessionList {
+            sessions: vec![session("a1")],
+        }));
+        let pilots = Message::Machine(MachineMessage::Pilots(PilotList {
+            pilots: vec![LightPilot {
+                session: "a1".to_owned(),
+                machine: "pc".to_owned(),
+                pilot: "r1".to_owned(),
+            }],
+        }));
+        let machine = |message: &Message| serde_json::to_value(message).unwrap()["machine"].clone();
+        let Before::Sessions(older) = serde_json::from_value(machine(&sessions)).unwrap();
+        assert_eq!(older.sessions.len(), 1);
+        assert!(serde_json::from_value::<Before>(machine(&pilots)).is_err());
+        for message in [sessions, pilots] {
+            let back: Message =
+                serde_json::from_value(serde_json::to_value(&message).unwrap()).unwrap();
+            assert_eq!(back, message);
+        }
     }
 
     /// What a machine of before knows of this link's messages: its list of sessions as this one

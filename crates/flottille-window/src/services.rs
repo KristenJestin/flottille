@@ -31,7 +31,6 @@ use crate::commands::{
     stack,
 };
 use crate::runs::{CommandOutput, CommandPanel, address_link, ready_mark};
-use crate::shell::Shell;
 use crate::tasks::{
     AddressKind, ReadyFields, ReadyKind, TaskInfo, names_of, needs_field, needs_line, ready_and_url,
 };
@@ -521,7 +520,7 @@ impl Render for ServiceForm {
 
 /// The services page, reached from the top bar: the machine's, not a project's.
 pub struct ServicesPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     listed: Option<Vec<ServiceInfo>>,
     /// Why the list cannot be read.
     problem: Option<SharedString>,
@@ -559,7 +558,7 @@ pub struct ServicesPage {
 }
 
 impl ServicesPage {
-    pub fn new(shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, cx: &mut Context<Self>) -> Self {
         let this = cx.entity().downgrade();
         let form = cx.new(|_| ServiceForm::new(this.clone()));
         let panel = cx.new(|_| CommandPanel::new(this));

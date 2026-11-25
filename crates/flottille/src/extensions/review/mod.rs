@@ -673,7 +673,7 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<Vec<PullRequest>>
 /// The review a session asked for, or why not: said before any agent starts.
 async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Value, Failure> {
     let project = super::active(daemon, &EXTENSION, &session.project)?;
-    if session.parent.is_some() {
+    if session.is_child() {
         return Err(Failure::refused(
             "a review reads a session's change: this agent is a child, review its session",
         ));
@@ -949,7 +949,7 @@ async fn start_pull(
     from: Option<&str>,
 ) -> std::result::Result<Value, Failure> {
     let project = super::active(daemon, &EXTENSION, &caller.project)?;
-    if caller.parent.is_some() {
+    if caller.is_child() {
         return Err(Failure::refused(
             "a review of a pull request is asked by a session: this agent is a child",
         ));
@@ -1485,7 +1485,7 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
         .into_iter()
         .filter(|agent| {
             agent.project == project
-                && agent.parent.is_none()
+                && !agent.is_child()
                 && !agent.state.is_final()
                 && agent.workspace.as_deref() == Some(workspace.name.as_str())
         })
@@ -1648,7 +1648,8 @@ fn tool_gate(_: &Daemon, _: &Grant, _: &Value) -> std::result::Result<(), String
 }
 
 fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called {
-    let (daemon, agent) = (daemon.clone(), grant.agent.clone());
+    let (daemon, grant) = (daemon.clone(), grant.clone());
+    let agent = grant.agent.clone();
     Box::pin(async move {
         let asked: ToolCall = match serde_json::from_value(args) {
             Ok(asked) => asked,
@@ -1718,7 +1719,11 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called 
                         )
                     })
                     .map_err(|failure| failure.message),
-                Some(id) => start_led(&daemon, &caller, &id).await,
+                // A session it leads on another machine: its review is started there.
+                Some(id) => match crate::across::review_led(&daemon, &grant, &caller, &id).await {
+                    Some(outcome) => return outcome,
+                    None => start_led(&daemon, &caller, &id).await,
+                },
             },
             "run_pass" => run_pass(&daemon, &caller, asked.pass, asked.brief).await,
             "report" => report(&daemon, &caller, asked).await,
@@ -2146,12 +2151,24 @@ fn tell_lead(daemon: &Arc<Daemon>, review: &Review, said: impl FnOnce(&str) -> S
     let Some(lead) = session.launched_by.as_deref().filter(|_| session.led) else {
         return;
     };
-    super::tell(
-        daemon,
-        &EXTENSION,
-        lead,
-        &said(&crate::tree::named(&session)),
-    );
+    let body = said(&crate::tree::named(&session));
+    // A lead of another machine is told there: its stand-in here is never woken.
+    if crate::across::is_stand_in(lead) {
+        // Its findings were delivered to the session: a body too long for the link is cut, and
+        // says where the pilot reads them.
+        let here = crate::across::own_name(daemon).unwrap_or_else(|| "its machine".to_owned());
+        crate::across::tell(
+            daemon,
+            &session.id,
+            EXTENSION.name,
+            &crate::across::fitted(&body, &session.id, &here),
+            flottille_core::approval::BETWEEN_TURNS,
+            false,
+            false,
+        );
+        return;
+    }
+    super::tell(daemon, &EXTENSION, lead, &body);
 }
 
 /// What is wrong with a finding as the pilot gave it.

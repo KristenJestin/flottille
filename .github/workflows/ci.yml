@@ -101,6 +101,7 @@ jobs:
       hub: ${{ steps.hub.outputs.hub }}
       alpha: ${{ steps.alpha.outputs.alpha }}
       android: ${{ steps.android.outputs.android }}
+      browser: ${{ steps.browser.outputs.browser }}
     steps:
       # A feature branch's pull request publishes the branch's alpha, once `verify` passed (`build`,
       # `publish`): it has no push run to do it. Only a branch of this repository, named
@@ -140,6 +141,9 @@ jobs:
           rust=false
           while IFS= read -r path; do
             case "$path" in
+              # The client metadata document is read by a test of the daemon (it must agree
+              # with the client): a change of it runs the suite.
+              site/oauth/*) rust=true; break ;;
               apps/android/* | site/*) ;;
               *)
                 echo "::notice::${path:-no file}: the Rust suite runs."
@@ -173,6 +177,36 @@ jobs:
             esac
           done <<< "$files"
           echo "android=$android" >> "$GITHUB_OUTPUT"
+      # The real browser's job (`real-browser`) runs for a pull request that changes what its tests
+      # exercise: the connections extension, the sandbox a run and the browser's network are made
+      # in, the browsers' own code and the tests themselves. Every push runs it. A failure here
+      # says nothing (`browser` stays empty): it then runs.
+      - name: Does the real browser's job have to run
+        id: browser
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "browser=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          browser=false
+          while IFS= read -r path; do
+            case "$path" in
+              crates/flottille/src/extensions/connections/* | crates/flottille/src/landlock.rs | \
+                crates/flottille/src/mounts.rs | crates/flottille/src/browsers.rs | \
+                crates/flottille/tests/connections.rs | .github/workflows/ci.yml)
+                echo "::notice::$path: the real browser's tests run."
+                browser=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          if [ -z "$files" ]; then browser=true; fi
+          echo "browser=$browser" >> "$GITHUB_OUTPUT"
       # A pull request runs a fast check, not the whole suite (docs/releases.md, "What CI checks"):
       # `check`, and the tests it touches (`.github/scripts/pr-tests.sh`), which `test-selected`
       # runs. Only this step says `suite=false`: a failure of it says nothing, and the whole suite
@@ -263,6 +297,9 @@ jobs:
           prefix-key: v2-rust
           # Clippy's own artefacts, apart from the tests' (`test`).
           shared-key: check
+          # A pull request reads dev's caches and writes none: its own would be read by it alone,
+          # and evict dev's from the repository's 10 GB.
+          save-if: ${{ github.event_name != 'pull_request' }}
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
@@ -302,6 +339,7 @@ jobs:
           # The name of the job that wrote the cache before the suite was split: the
           # dependencies already cached are kept.
           shared-key: verify
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Have the window's system libraries
         run: |
           sudo apt-get update
@@ -359,6 +397,9 @@ jobs:
       # made, and its tests would be skipped. Lifted, they run.
       - name: Let the tests make user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The real programs the sandbox's test runs (`real_programs`): the runner has all but pnpm.
+      - name: Have pnpm
+        run: sudo npm install --global pnpm@10
       - run: mkdir -p "$GITHUB_WORKSPACE/target/tmp"
       - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
       # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
@@ -429,6 +470,9 @@ jobs:
       # made, and its tests would be skipped. Lifted, they run.
       - name: Let the tests make user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The real programs the sandbox's test runs (`real_programs`): the runner has all but pnpm.
+      - name: Have pnpm
+        run: sudo npm install --global pnpm@10
       # The profile `ci` retries a failed test twice, as on the partitions: a flaky one is listed.
       - run: cargo nextest run --locked --profile ci $SELECTED
       - name: Flaky tests
@@ -453,6 +497,89 @@ jobs:
         if: always()
         run: df -h /
         continue-on-error: true
+
+  # The tests that drive the real agent-browser (`connections::`: its sign-in from the vault, its
+  # network, its kept profile) need agent-browser, passt's `pasta` and a Chrome, which no other job
+  # has: there each prints `skipped:` and passes, so a change of the browser's sandbox could pass
+  # unseen. Here they are installed, and `FLOTTILLE_REAL_BROWSER=required` turns a skip into a
+  # failure. Runs on every push and for a pull request that touches the files `changes` lists; the
+  # runner's own Chrome is the browser (a test's HOME has none), the version of agent-browser the
+  # adapter is checked on (`adapters.rs`, 0.43.x). Weston is installed for the headed tests of the
+  # window's browser (#1066), which start one of their own.
+  real-browser:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.browser != 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      FLOTTILLE_REAL_BROWSER: required
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: verify
+          # As `test-selected`: the dependencies `build-tests` cached on dev.
+          add-rust-environment-hash-key: false
+          save-if: false
+      - name: Have the window's system libraries and the browser's
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev passt weston
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Have agent-browser
+        run: |
+          sudo npm install --global agent-browser@0.43.0
+          echo "FLOTTILLE_TEST_AGENT_BROWSER=$(command -v agent-browser)" >> "$GITHUB_ENV"
+          agent-browser --version
+          command -v pasta
+      - name: Build the fakes the tests spawn
+        run: |
+          fakes=()
+          for crate in crates/flottille-fake-*; do fakes+=(-p "${crate#crates/}"); done
+          cargo build --locked "${fakes[@]}"
+      # As `test`: lifted, the sandbox's user namespace is made, and the tests do not skip.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # All of `connections::`, so that a real test added later is run as well; a skip among them
+      # fails (`FLOTTILLE_REAL_BROWSER`). The passing tests' output is kept: it says which ran.
+      - run: cargo nextest run --locked --profile ci --success-output final --test group_remote -E 'test(/^connections::/)'
+
+
+  # The tests that hold a rule over the whole repository, on every pull request the Rust suite
+  # runs for, whatever it selects: no pull request changes their files, so `test-selected` never
+  # picked them, and they failed dev eleven times in two days (21-23 November 2026). The unit
+  # tests of the binary (every command has its section of docs/cli.md, every child is spawned by
+  # the daemon), every command's place in the window, and the rules of the window's code.
+  guards:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite == 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: verify
+          # As `test-selected`: the dependencies `build-tests` cached on dev.
+          add-rust-environment-hash-key: false
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - run: cargo nextest run --locked --profile ci --bin flottille --test window_rules --test group_daemon -E 'binary(=flottille) | binary(=window_rules) | (binary(=group_daemon) & test(/^window_parity::/))'
 
   # nextest does not run doc tests: this job does, once, beside the partitions. It builds the
   # libraries itself, from the cache `build-tests` writes (this one only reads it).
@@ -503,10 +630,26 @@ jobs:
         with:
           prefix-key: v2-rust
           shared-key: android
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk@4.1.2
+      # Gradle's downloads, the Robolectric jars above all: Maven Central refused them with 429,
+      # Too Many Requests, three tries in a row, six runs of dev in two days (21-23 November
+      # 2026). Kept from one run to the next, they are fetched once per version. A pull request
+      # reads them and keeps none, as with the caches above.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.sh') }}
+          restore-keys: gradle-
       - run: apps/android/ci.sh
+      - uses: actions/cache/save@v4
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.sh') }}
       # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
       # every push, for every channel: the version of `tools/version.sh`. This job runs the
       # branch's own code and holds no secret: the APK it builds is unsigned, and a copy of it is
@@ -602,7 +745,7 @@ jobs:
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and the tests skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]
+    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, real-browser, hub, android]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -615,11 +758,19 @@ jobs:
           DOC: ${{ needs.doc-tests.result }}
           TEST: ${{ needs.test.result }}
           SELECTED: ${{ needs.test-selected.result }}
+          GUARDS: ${{ needs.guards.result }}
           SUITE: ${{ needs.changes.outputs.suite }}
           RUST: ${{ needs.changes.outputs.rust }}
           HUB: ${{ needs.hub.result }}
           ANDROID: ${{ needs.android.result }}
+          REAL_BROWSER: ${{ needs.real-browser.result }}
         run: |
+          # The real browser's tests (skipped when the pull request leaves its files alone, a
+          # pass): red or cancelled, never merged.
+          if [ "$REAL_BROWSER" = failure ] || [ "$REAL_BROWSER" = cancelled ]; then
+            echo "::error::real-browser: $REAL_BROWSER."
+            exit 1
+          fi
           # The Android job (the phone's core, its emulator run): skipped when the pull request
           # leaves the app and the core alone, a pass; red or cancelled, never merged.
           if [ "$ANDROID" = failure ] || [ "$ANDROID" = cancelled ]; then
@@ -632,16 +783,16 @@ jobs:
             echo "::error::hub: $HUB."
             exit 1
           fi
-          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$BUILD" = skipped ] && [ "$DOC" = skipped ] && [ "$TEST" = skipped ] && [ "${SELECTED:-skipped}" = skipped ]; then
+          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$BUILD" = skipped ] && [ "$DOC" = skipped ] && [ "$TEST" = skipped ] && [ "${SELECTED:-skipped}" = skipped ] && [ "${GUARDS:-skipped}" = skipped ]; then
             echo "::notice::The Rust suite was not needed for this change."
             exit 0
           fi
-          # A pull request (`suite=false`, said by `changes` alone) runs `check` and the tests it
-          # touches: skipped is a pass for those only when it touches none. Whatever else it says
-          # is the whole suite's, which must have passed.
+          # A pull request (`suite=false`, said by `changes` alone) runs `check`, the guards and the
+          # tests it touches: skipped is a pass for those only when it touches none. Whatever else
+          # it says is the whole suite's, which must have passed.
           if [ "$SUITE" = false ]; then
-            if [ "$CHECK" = success ] && { [ "$SELECTED" = success ] || [ "$SELECTED" = skipped ]; }; then exit 0; fi
-            echo "::error::check: $CHECK, selected tests: $SELECTED."
+            if [ "$CHECK" = success ] && [ "$GUARDS" = success ] && { [ "$SELECTED" = success ] || [ "$SELECTED" = skipped ]; }; then exit 0; fi
+            echo "::error::check: $CHECK, guards: $GUARDS, selected tests: $SELECTED."
             exit 1
           fi
           if [ "$CHECK" = success ] && [ "$BUILD" = success ] && [ "$DOC" = success ] && [ "$TEST" = success ]; then exit 0; fi
@@ -790,6 +941,8 @@ jobs:
         uses: rui314/setup-mold@v1
       - if: steps.version.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build
         if: steps.version.outputs.skip != 'true'
         env:
@@ -883,6 +1036,7 @@ jobs:
         with:
           prefix-key: v1-rust
           shared-key: hub-${{ matrix.target }}
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build the hub
         run: cargo build --release --locked -p flottille-hub --target ${{ matrix.target }}
       - name: the_static_binary_runs_with_no_shared_library

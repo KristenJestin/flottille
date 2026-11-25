@@ -31,6 +31,8 @@ mod message_checks;
 mod pr_edit;
 #[path = "../services.rs"]
 mod services;
+#[path = "../stacked_base.rs"]
+mod stacked_base;
 #[path = "../workspace_actions.rs"]
 mod workspace_actions;
 #[path = "../workspaces.rs"]

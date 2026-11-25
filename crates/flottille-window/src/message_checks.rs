@@ -10,12 +10,11 @@ use gpui_design_system::{
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Render, SharedString, Styled, Subscription, TestSupportExt as _, Window, div, px,
 };
 
 use crate::actions::Command;
 use crate::commands::perform_later;
-use crate::shell::Shell;
 
 /// What the section says they are for.
 pub const SENTENCE: &str = "Command lines run on a message before an agent commits, opens a pull \
@@ -24,7 +23,7 @@ pub const SENTENCE: &str = "Command lines run on a message before an agent commi
                             why. They are yours: the repository's own hooks never run.";
 
 pub struct MessageChecks {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<TextareaState>>,
@@ -38,7 +37,7 @@ pub struct MessageChecks {
 }
 
 impl MessageChecks {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

@@ -189,7 +189,11 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             Some(id) => daemon.read(|store| store.agent(id))?,
             None => None,
         };
-        let Some(agent) = agent.filter(|agent| agent.parent.is_none() || daemon_s) else {
+        // A child of another machine's agent reports and fails to that agent; only its question to
+        // the user, while its parent's machine is off, is the user's.
+        let Some(agent) = agent.filter(|agent| {
+            daemon_s || (agent.parent.is_none() && (!agent.is_child() || kind == "question"))
+        }) else {
             if daemon_s {
                 entries.push(json!({
                     "seq": event.seq, "at": event.at, "kind": kind,
@@ -224,6 +228,19 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
             "unchecked" | "put_back" => json!(daemon_text(kind, &event.data)),
+            "vault" if event.data["edit"].is_object() => {
+                let fields: Vec<&str> = event.data["edit"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|edit| edit.keys().map(String::as_str))
+                    .collect();
+                json!(format!(
+                    "It proposes an edit of the vault entry {} ({}), its secret kept: {}",
+                    event.data["name"].as_str().unwrap_or_default(),
+                    fields.join(", "),
+                    event.data["why"].as_str().unwrap_or_default()
+                ))
+            }
             "vault" => {
                 let whose = if event.data["every"] == true {
                     "every project".to_owned()

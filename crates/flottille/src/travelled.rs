@@ -193,21 +193,7 @@ pub(crate) fn fit_path(path: &str) -> bool {
             .all(|part| !matches!(part, "" | "." | ".." | ".git"))
 }
 
-/// The vault entry the file `path` of the project `project` is offered as: `<project>-<path>`,
-/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most. Two files may
-/// have one name (`a/b` and `a-b`): the entry is bound to the one it was made of
-/// (`flottille_core::vault::file_use`), which alone it is laid as, and the other is refused it.
-pub fn entry_for(project: &str, path: &str) -> String {
-    format!("{project}-{path}")
-        .chars()
-        .map(|c| match c {
-            '/' => '-',
-            c if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') => c,
-            _ => '_',
-        })
-        .take(64)
-        .collect()
-}
+pub use flottille_core::vault::entry_for;
 
 /// A file the setup of a launch's project copies, which this machine's project lacks: made, once
 /// the launch is allowed, from the vault entry `entry`, made of that file (bound to `bound`) and
@@ -584,6 +570,7 @@ pub(crate) fn classed(
             tools: Vec::new(),
             place: launch_place(&after, &asked.branch),
             launched: false,
+            reads: None,
         },
         after: &after,
         from,

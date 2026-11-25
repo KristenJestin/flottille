@@ -192,7 +192,8 @@ pub fn check(daemon: &Arc<Daemon>) {
     let roots = daemon.read(Store::agents).unwrap_or_default();
     for root in roots
         .iter()
-        .filter(|a| a.parent.is_none() && a.state == AgentState::Idle)
+        // A child of another machine's agent is its parent's: it ends with it.
+        .filter(|a| !a.is_child() && a.state == AgentState::Idle)
     {
         let Some(since) = quiet_since(daemon, root) else {
             continue;

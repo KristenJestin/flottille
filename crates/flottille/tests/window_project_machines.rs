@@ -15,7 +15,12 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
+use flottille_window::machines::News;
 use flottille_window::model::elsewhere_id;
+use flottille_window::project::{
+    machine_block_id, machine_session_ago_id, machine_session_mark_id, session_row_id,
+};
+use flottille_window::shell::Selection;
 use flottille_window::tree::{
     by_machine_id, group_header_id, machine_id, machine_mark_id, project_apart_id, project_id,
     project_mark_id, project_offline_id, projects_menu_id, session_id,
@@ -136,11 +141,13 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     }
 }
 
-fn present(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> bool {
+fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
+    let id = id.into();
     cx.update(|window, _| window.try_find(id).is_some())
 }
 
-fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> {
+fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Option<String> {
+    let id = id.into();
     cx.update(|window, _| {
         window
             .try_find(id)
@@ -619,4 +626,457 @@ fn the_window_draws_no_frame_at_rest_with_marks_and_with_sections(cx: &mut TestA
         (0, 0),
         "sections: (drawn, asked)"
     );
+}
+
+// The shared project's page (#1266): its sessions of every machine, where a session starts, and
+// its settings' switch between the machines that have it.
+
+/// A user one of whose providers is ready, as the window sees it: a machine of theirs can run an
+/// agent, and its composer starts.
+fn ready_user() -> User {
+    let user = User::with_fake_providers();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// A hub, `pc` and `server`, each able to run an agent.
+fn ready_machines() -> (TestHub, Machine, Machine) {
+    pc_and_server_on(Machine::of(ready_user()), ready_user())
+}
+
+/// `pc` has been told the projects `names` of `machine`.
+fn told_by(pc: &Machine, machine: &str, names: &[&str]) {
+    eventually(&format!("pc is told {machine}'s projects"), || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        let held: Vec<String> = lists["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|listed| listed["name"] == machine)
+            .flat_map(|listed| listed["projects"].as_array().cloned().unwrap_or_default())
+            .map(|p| p["name"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        names.iter().all(|name| held.iter().any(|h| h == name))
+    });
+}
+
+/// The window on `pc`, tall enough for the whole page, its machines read.
+fn page_window<'a>(
+    pc: &Machine,
+    others: &[&str],
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(pc, cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let others: Vec<String> = others.iter().map(|name| (*name).to_owned()).collect();
+    until(
+        &shell,
+        cx,
+        "the machines and this one's providers are read",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.providers().offered().next().is_some()
+                    && s.machines().read(cx).machines().is_some_and(|read| {
+                        others
+                            .iter()
+                            .all(|name| read.machine(name).is_some_and(|m| m.online()))
+                    })
+            })
+        },
+    );
+    settle(&shell, cx);
+    (shell, cx)
+}
+
+fn show(shell: &Entity<Shell>, selection: Selection, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| s.open(selection, window, cx));
+    settle(shell, cx);
+}
+
+fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(shell, cx);
+}
+
+fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, _| s.machine_shown())
+}
+
+#[gpui_kit::test]
+fn its_page_lists_the_sessions_of_both_machines(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let here = session(&pc, "app", "Fix the pc part");
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "both sessions on the page", |cx| {
+        present(cx, session_row_id(&here)) && present(cx, session_row_id(&row))
+    });
+    assert_eq!(shown(&shell, cx), None, "this machine's page of it");
+    // The server's session is in the server's block, with the server's icon; this machine's in
+    // its place, as before.
+    assert!(present(cx, machine_block_id("server")));
+    assert!(!present(cx, machine_block_id("pc")));
+    let mark = label(cx, machine_session_mark_id(&row)).unwrap_or_default();
+    assert!(
+        mark.contains(" in "),
+        "the server's icon in its colour: {mark}"
+    );
+    assert_eq!(
+        label(cx, machine_block_id("server")).as_deref(),
+        Some("server · online")
+    );
+
+    // The server's page of it lists this machine's session the same way.
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-server", cx);
+    until(
+        &shell,
+        cx,
+        "the server's page with this machine's session",
+        |cx| {
+            shown(&shell, cx).as_deref() == Some("server")
+                && present(cx, machine_block_id("pc"))
+                && present(cx, session_row_id(&here))
+                && present(cx, session_row_id(&row))
+        },
+    );
+    let mark = label(cx, machine_session_mark_id(&here)).unwrap_or_default();
+    assert!(
+        mark.contains(" in "),
+        "this machine's icon in its colour: {mark}"
+    );
+    assert!(!present(cx, machine_block_id("server")));
+}
+
+#[gpui_kit::test]
+fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAppContext) {
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
+    crate::remote::pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop", "online");
+    // `app` everywhere; `site` on the server only; `web` on the server and the laptop.
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    add(&laptop, "app", APP);
+    add(&server, "site", SITE);
+    add(&server, "web", "https://git.example/acme/web.git");
+    add(&laptop, "web", "https://git.example/acme/web.git");
+    told_by(&pc, "server", &["app", "site", "web"]);
+    told_by(&pc, "laptop", &["app", "web"]);
+
+    let (shell, cx) = page_window(&pc, &["server", "laptop"], cx);
+    // Where a session can start is what each machine offers over its link.
+    until(
+        &shell,
+        cx,
+        "the window knows what each machine offers",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.machines().read(cx).machines().is_some_and(|read| {
+                    read.has_project(Some("server"), "site")
+                        && read.has_project(Some("server"), "web")
+                        && read.has_project(Some("laptop"), "web")
+                })
+            })
+        },
+    );
+    // This machine has it and can run it: the session runs here, nothing asked.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "app's composer", |cx| {
+        present(cx, "place-picker")
+    });
+    let providers = shell.read_with(cx, |s, _| {
+        let p = s.providers();
+        format!(
+            "known {} offered {} why {:?}",
+            p.known,
+            p.offered().count(),
+            p.why_none()
+        )
+    });
+    assert_eq!(shown(&shell, cx), None, "{providers}");
+    assert!(!present(cx, "composer-ask"));
+
+    // Not here, on one machine online: there, nothing asked.
+    show(&shell, Selection::Project("site".into()), cx);
+    until(&shell, cx, "site's page on the server", |cx| {
+        shown(&shell, cx).as_deref() == Some("server") && present(cx, "place-picker")
+    });
+    assert!(!present(cx, "composer-ask"));
+
+    // Not here, on two: the start asks which, and starts nothing before.
+    show(&shell, Selection::Project("web".into()), cx);
+    until(&shell, cx, "web's composer asks", |cx| {
+        present(cx, "composer-ask") && present(cx, "machine-picker")
+    });
+    let asked = label(cx, "composer-ask").unwrap_or_default();
+    assert!(
+        asked.contains("server") && asked.contains("laptop"),
+        "{asked}"
+    );
+    let can_start = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.composer_of("web")
+                .is_some_and(|composer| composer.read(cx).asks_where().is_none())
+        })
+    };
+    assert!(!can_start(&shell, cx));
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-laptop", cx);
+    until(&shell, cx, "web on the laptop, asked no more", |cx| {
+        shown(&shell, cx).as_deref() == Some("laptop") && !present(cx, "composer-ask")
+    });
+
+    // The choice is kept for the project: web opens on the laptop again, asking nothing, and the
+    // daemon keeps it with the window's own state.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "app on this machine", |cx| {
+        shown(&shell, cx).is_none()
+    });
+    show(&shell, Selection::Project("web".into()), cx);
+    until(&shell, cx, "web on the laptop again", |cx| {
+        shown(&shell, cx).as_deref() == Some("laptop") && present(cx, "place-picker")
+    });
+    assert!(!present(cx, "composer-ask"));
+    eventually("the daemon keeps the choice", || {
+        pc.user
+            .call("window.get", json!({}))
+            .is_ok_and(|state| state["state"]["sidebar"]["starts"]["web"] == "laptop")
+    });
+}
+
+#[gpui_kit::test]
+fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    add(&pc, "site", SITE);
+    told(&pc, &["app"]);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    // A project on this machine only has no switch.
+    show(&shell, Selection::ProjectSettings("site".into()), cx);
+    until(&shell, cx, "site's settings", |cx| {
+        present(cx, "project-settings-header")
+    });
+    assert!(!present(cx, "project-settings-machine"));
+
+    show(&shell, Selection::ProjectSettings("app".into()), cx);
+    until(&shell, cx, "app's switch of machines", |cx| {
+        present(cx, "project-settings-machine")
+    });
+    assert_eq!(
+        label(cx, "project-settings-machine-field").as_deref(),
+        Some("Settings of")
+    );
+    click(&shell, "project-settings-machine", cx);
+    // This machine first, then the other one that has it.
+    let top = |cx: &mut VisualTestContext, id: &str| bounds(cx, id.to_owned()).origin.y;
+    until(&shell, cx, "both machines offered", |cx| {
+        present(cx, "project-settings-machine-here")
+            && present(cx, "project-settings-machine-server")
+    });
+    assert!(top(cx, "project-settings-machine-here") < top(cx, "project-settings-machine-server"));
+    click(&shell, "project-settings-machine-server", cx);
+    until(&shell, cx, "the server's settings of app", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::ProjectSettings("app".into()))
+            })
+            && present(cx, "project-settings-machine")
+    });
+    // And back to this machine's.
+    click(&shell, "project-settings-machine", cx);
+    click(&shell, "project-settings-machine-here", cx);
+    until(&shell, cx, "this machine's settings of app", |cx| {
+        shown(&shell, cx).is_none()
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::ProjectSettings("app".into()))
+            })
+    });
+}
+
+// The shared project's page at rest (#1411): nothing is drawn once it settled, whatever the other
+// machines hold, and a read of them that changes nothing on it draws nothing.
+
+/// A shared project `app` on `pc`, `server` and a paired `laptop`: the server has a session that
+/// has a turn that runs while the page opens (held until `release` is written in its agent's
+/// folder, which the scenario does once the page shows it) and one that ended, the laptop one that ended and then went off. The window on `pc` shows the page of
+/// `app`, settled: it asks for no animation frame.
+fn shared_page_settled(
+    cx: &mut TestAppContext,
+) -> (
+    TestHub,
+    Machine,
+    Machine,
+    Entity<Shell>,
+    &mut VisualTestContext,
+) {
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
+    crate::remote::pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop", "online");
+    for machine in [&pc, &server, &laptop] {
+        add(machine, "app", APP);
+    }
+    told_by(&pc, "server", &["app"]);
+    told_by(&pc, "laptop", &["app"]);
+    session(&server, "app", "Ship the server part");
+    session(&laptop, "app", "Tidy the laptop part");
+    server.user.provider_script(
+        "claude",
+        json!({"turns": [{"when": "Keep watching", "do": [{"hold": "release"}]}]}),
+    );
+    let running = server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "Keep watching"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the server's session works", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": running}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "working")
+    });
+    // The laptop's session stays in this machine's copy of its list while it is off.
+    eventually("pc is told the laptop's session", || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        lists["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|listed| {
+                listed["name"] == "laptop"
+                    && listed["sessions"].as_array().is_some_and(|s| !s.is_empty())
+            })
+    });
+    let stop = laptop.user.run(&["daemon", "stop"]);
+    assert!(stop.status.success(), "{}", laptop.log());
+    pc.wait_for("laptop", "offline");
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "both machines' blocks", |cx| {
+        present(cx, machine_block_id("server")) && present(cx, machine_block_id("laptop"))
+    });
+    // Its turn ends with the page shown: the page takes the snapshot that says so. A session that
+    // runs spins its mark, by design, and is no rest (`window_at_rest.rs` waits for every agent
+    // to be idle); the page is measured once it ended.
+    std::fs::write(server.user.path("fake-claude/release"), "").unwrap();
+    eventually("the server's session ends its turn", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": running}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    // The window's copy of the server's list says it too before the page is measured.
+    until(&shell, cx, "the server's list says no session runs", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines().read(cx).machines().is_some_and(|read| {
+                read.lists
+                    .machines
+                    .iter()
+                    .filter(|(name, _)| name == "server")
+                    .flat_map(|(_, listed)| listed)
+                    .all(|session| session.state == "idle")
+            })
+        })
+    });
+    quiet(&shell, cx);
+    (hub, pc, server, shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_shared_project_s_page_draws_nothing_at_rest(cx: &mut TestAppContext) {
+    let (_hub, _pc, _server, shell, cx) = shared_page_settled(cx);
+    assert_eq!(
+        label(cx, machine_block_id("laptop"))
+            .as_deref()
+            .map(|said| said.starts_with("laptop · offline since ")),
+        Some(true)
+    );
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+#[gpui_kit::test]
+fn a_snapshot_of_another_machine_that_changes_nothing_draws_nothing(cx: &mut TestAppContext) {
+    let (_hub, _pc, _server, shell, cx) = shared_page_settled(cx);
+    // The machines' worker tells what it read again after each thing the window asked, whether it
+    // changed or not (`Remote::ask`): the same read, as the daemon says it, comes again.
+    let read = shell
+        .read_with(cx, |s, cx| s.machines().read(cx).machines().cloned())
+        .expect("the machines are read");
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        if gone.is_zero() || gone == Duration::from_millis(16 * 100) {
+            let again = read.clone();
+            shell.update_in(cx, |s, window, cx| {
+                s.machines().update(cx, |machines, cx| {
+                    machines.news(News::Read(Box::new(again)), window, cx)
+                })
+            });
+        }
+        asked += step(&shell, Duration::from_millis(16), cx);
+        gone += Duration::from_millis(16);
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    assert_eq!((drawn, asked), (0, 0), "(drawn, asked)");
+}
+
+/// What the drawn time ago of the row of `session` of `machine` says.
+fn said_ago(machine: &str, session: &str, cx: &mut VisualTestContext) -> Option<String> {
+    label(cx, machine_session_ago_id(&elsewhere_id(machine, session)))
+}
+
+/// The frames the window draws over `by` of its clock, which the clock of its page reads as well.
+fn frames_over(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> u64 {
+    cx.update(|window, _| window.reset_layout_stats());
+    step(shell, by, cx);
+    cx.update(|window, _| window.layout_stats().frames)
+}
+
+#[gpui_kit::test]
+fn another_machine_s_session_rows_say_how_long_ago_as_time_goes_by(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the server part");
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "the server's session on the page", |cx| {
+        said_ago("server", &there, cx).is_some()
+    });
+    quiet(&shell, cx);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("now"));
+
+    // The clock of the page runs and the text is the same: nothing is drawn.
+    flottille_window::shell::move_clock_on_this_thread(Duration::from_secs(10));
+    assert_eq!(frames_over(&shell, Duration::from_secs(30), cx), 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("now"));
+
+    // Two minutes on, the row says so, drawn once.
+    flottille_window::shell::move_clock_on_this_thread(Duration::from_secs(120));
+    assert!(frames_over(&shell, Duration::from_secs(30), cx) > 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("2m"));
+
+    // And again nothing, while the text is the same.
+    quiet(&shell, cx);
+    assert_eq!(frames_over(&shell, Duration::from_secs(30), cx), 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("2m"));
 }
