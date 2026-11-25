@@ -279,14 +279,17 @@ impl fmt::Display for Finding {
     }
 }
 
-/// A finding that is intended: in `scenario`, the `kind` of `element` (its path, or its last
-/// ids), because `why`.
+/// A finding that is intended: in `scenario`, the `kind` of `element` (ids of its path, see
+/// [`Finding::is_about`]), because `why`. A `racy` entry is for a finding that depends on when
+/// the daemon answers (a read that lands during an entrance is hidden by it): it is not reported
+/// as unused when it did not happen.
 #[derive(Clone, Copy, Debug)]
 pub struct Allow {
     pub scenario: &'static str,
     pub kind: Kind,
     pub element: &'static str,
     pub why: &'static str,
+    pub racy: bool,
 }
 
 /// What the checker found in a recording.
@@ -331,7 +334,9 @@ pub fn check(recording: &Recording, allow: &[Allow]) -> Verdict {
     verdict.unused = allow
         .iter()
         .enumerate()
-        .filter(|(at, entry)| entry.scenario == recording.scenario && !used.contains(at))
+        .filter(|(at, entry)| {
+            entry.scenario == recording.scenario && !entry.racy && !used.contains(at)
+        })
         .map(|(_, entry)| *entry)
         .collect();
     verdict
