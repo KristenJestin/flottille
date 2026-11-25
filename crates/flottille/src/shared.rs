@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use flottille_link::{MachineKey, Members, PublicKey, Sealed, check_shared};
+use flottille_link::{MachineKey, Members, PublicKey, SHARED_NAMES, Sealed, check_shared};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,9 +27,9 @@ pub const ABOUT_SHARE: &str = "about.share";
 
 /// The values of all machines, by name, and the field of `about.share` each one is.
 pub const NAMES: [(&str, &str); 3] = [
-    ("about.name", "name"),
-    ("about.pronouns", "pronouns"),
-    ("about.notes", "notes"),
+    (SHARED_NAMES[0], "name"),
+    (SHARED_NAMES[1], "pronouns"),
+    (SHARED_NAMES[2], "notes"),
 ];
 
 /// A value as this machine checked it.

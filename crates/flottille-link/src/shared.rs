@@ -46,6 +46,9 @@ pub const NAME_LIMIT: usize = 64;
 pub const SEALED_LIMIT: usize = 40 * 1024;
 /// The most values the hub keeps.
 pub const MOST_VALUES: usize = 32;
+/// The names of the values of all machines: the hub keeps no other, so that a member's machine
+/// cannot take its places with names of its own. A setting shared later adds its name here.
+pub const SHARED_NAMES: &[&str] = &["about.name", "about.pronouns", "about.notes"];
 
 /// Bytes, in base64 in JSON.
 #[derive(Clone, PartialEq, Eq)]
