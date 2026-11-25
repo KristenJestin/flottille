@@ -31,6 +31,8 @@ mod window_questions;
 mod window_runs_on;
 #[path = "../window_session_options.rs"]
 mod window_session_options;
+#[path = "../window_session_subject.rs"]
+mod window_session_subject;
 #[path = "../window_session_titles.rs"]
 mod window_session_titles;
 #[path = "../window_sessions.rs"]
