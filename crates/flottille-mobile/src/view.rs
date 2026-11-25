@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flottille_link::{Members, PeerState, PublicKey, Role};
-use flottille_protocol::words::{self, THE_CONVERSATION};
+use flottille_protocol::prompt::{is_replay, sections};
+use flottille_protocol::words::{self, THE_CONVERSATION, woken_by};
 
 use crate::tunnel::{TunnelEnd, TunnelView};
 use serde_json::Value;
@@ -130,7 +131,8 @@ pub struct RunView {
     pub url: String,
 }
 
-/// One entry of a conversation: `user`, `agent`, `thought`, `tool` or `link`, and its text.
+/// One entry of a conversation: `user`, `agent`, `thought`, `tool`, `link` or `delivery`, and its
+/// text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Entry {
     /// The number of the event the entry starts at: stable, and what orders the page.
@@ -141,6 +143,11 @@ pub struct Entry {
     pub images: Vec<String>,
     /// A `link` entry's address, the one an agent showed (`agent.link_shown`); empty for the rest.
     pub link: String,
+    /// What a `delivery` entry is, as the window names it (`woken by`, `report`, `message`, or the
+    /// daemon's kind): something Flottille sent the agent, never the user's words. Its `text` is
+    /// the delivery's body, folded under `summary`, its one line. Empty for the rest.
+    pub delivery: String,
+    pub summary: String,
 }
 
 /// An agent of the session's tree, as `agent.tree` gives it.
@@ -784,7 +791,11 @@ impl View {
                     ended: matches!(followed.state.as_str(), "ended" | "failed"),
                     state: followed.state.clone(),
                     more: followed.more,
-                    entries: entries(followed.events.values()),
+                    entries: entries(
+                        followed.events.values(),
+                        !followed.info["parent"].is_null(),
+                        &followed.children,
+                    ),
                     children: followed.children.clone(),
                     runs: runs(followed.events.values()),
                 }
@@ -803,14 +814,24 @@ impl View {
 }
 
 /// The entries of a conversation's events, oldest first: the pieces of one reply (or one thought)
-/// are one entry.
-fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
+/// are one entry, and a prompt is one entry per delivery it holds (`child`: the page is a child's,
+/// whose brief is its parent's words). `children` names the children a report comes from.
+fn entries<'a>(
+    events: impl Iterator<Item = &'a Value>,
+    child: bool,
+    children: &[ChildView],
+) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut message: Option<String> = None;
     for event in events {
         let data = &event["data"];
+        if event["name"] == "agent.prompted" {
+            entries.extend(delivered(event, child, children));
+            message = None;
+            continue;
+        }
         let (kind, piece) = match event["name"].as_str().unwrap_or_default() {
-            "agent.prompted" | "agent.user_message" => ("user", false),
+            "agent.user_message" => ("user", false),
             "agent.message" => ("agent", true),
             "agent.thought" => ("thought", true),
             // The card of the link is what the user sees of a `web` `show_link`, not the step.
@@ -849,11 +870,115 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
                 } else {
                     String::new()
                 },
+                delivery: String::new(),
+                summary: String::new(),
             }),
         }
         message = if piece { id } else { None };
     }
     entries
+}
+
+/// The entries of one prompt, a delivery each, as the window draws them: the user's words (and a
+/// root's brief, which the user wrote) are the user's message, with the prompt's pictures; any
+/// other delivery is said in one line, its body folded under it. What replays the conversation
+/// after a compaction is not news, and is left out.
+fn delivered(event: &Value, child: bool, children: &[ChildView]) -> Vec<Entry> {
+    let data = &event["data"];
+    let seq = event["seq"].as_u64().unwrap_or_default();
+    let found = sections(data["text"].as_str().unwrap_or_default());
+    let ids: Vec<&str> = data["deliveries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    // One id per delivery: when they do not line up, nothing is known of which is a replay.
+    let aligned = ids.len() == found.len();
+    let replays = |at: usize| aligned && is_replay(ids[at]);
+    let mut images: Vec<String> = data["images"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(text)
+        .collect();
+    let mut out = Vec::new();
+    for (at, (kind, body)) in found.into_iter().enumerate() {
+        if replays(at) {
+            continue;
+        }
+        let entry = |kind: &str, text: String, delivery: &str, summary: String| Entry {
+            seq,
+            kind: kind.to_owned(),
+            text,
+            images: Vec::new(),
+            link: String::new(),
+            delivery: delivery.to_owned(),
+            summary,
+        };
+        out.push(match kind.as_str() {
+            "" | "user" => entry("user", body, "", String::new()),
+            "brief" if !child => entry("user", body, "", String::new()),
+            "subscription" => {
+                let line = woken_by(&body);
+                entry("delivery", body, "woken by", line)
+            }
+            "child-report" => {
+                let from = children
+                    .iter()
+                    .find(|each| body.contains(each.agent.as_str()))
+                    .map(|each| each.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| "a sub-agent".into());
+                entry("delivery", body, "report", format!("Report from {from}"))
+            }
+            // Another agent's words: the line says who wrote, the body is what it wrote.
+            "session" | "launched" => {
+                let (first, rest) = body.split_once('\n').unwrap_or((&body, ""));
+                let said = first.trim().trim_end_matches(':').to_owned();
+                let label = if kind == "session" {
+                    "message"
+                } else {
+                    "started by"
+                };
+                entry("delivery", rest.trim().to_owned(), label, said)
+            }
+            _ => {
+                let label = if kind == "brief" || kind == "parent" {
+                    "brief"
+                } else {
+                    kind.as_str()
+                };
+                let line = first_line(&body);
+                entry("delivery", body, label, line)
+            }
+        });
+    }
+    // The pictures went with the user's words: a message of its own when they came alone.
+    if !images.is_empty() {
+        match out.iter_mut().find(|entry| entry.kind == "user") {
+            Some(mine) => mine.images = std::mem::take(&mut images),
+            None => out.push(Entry {
+                seq,
+                kind: "user".into(),
+                text: String::new(),
+                images,
+                link: String::new(),
+                delivery: String::new(),
+                summary: String::new(),
+            }),
+        }
+    }
+    out
+}
+
+/// A text's first line that says something, on one line.
+fn first_line(body: &str) -> String {
+    let line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The commands of a session that run and have an address, oldest first: from `run.started`,

@@ -172,7 +172,7 @@ internal fun ViewState.toPhoneView(): PhoneView {
                 child = page.child,
                 ended = page.ended,
                 more = page.more,
-                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images, it.link) },
+                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images, it.link, it.delivery, it.summary) },
                 children = page.children.map { Child(it.agent, it.title, it.doing, it.role, it.depth.toInt()) },
                 runs = page.runs.map { Run(it.run, it.line, it.url) },
             )
