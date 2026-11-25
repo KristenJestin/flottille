@@ -1360,17 +1360,15 @@ fn forwarded_by_a_child(user: &User) -> (String, String, String, u64) {
     let (answer, child) = launch(user, &second, "Reader", "Read the env.", "child");
     assert!(!answer.error, "{}", answer.text);
     let (child, _) = child.unwrap();
-    let mut number = 0;
+    let number = std::cell::Cell::new(0);
     eventually("the child's call held by its parent", || {
         let held = store(user).pending_requests(&session).unwrap();
-        match held.iter().find(|request| request.agent == child) {
-            Some(request) => {
-                number = request.number;
-                true
-            }
-            None => false,
-        }
+        held.iter()
+            .find(|request| request.agent == child)
+            .map(|request| number.set(request.number))
+            .is_some()
     });
+    let number = number.get();
     let forwarded = second.call(
         "approval_answer",
         json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
