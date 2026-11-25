@@ -1998,7 +1998,10 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
         .iter()
         .map(|check| {
             let mut entry = check.to_json();
-            entry["warnings"] = json!(check.warnings());
+            let mut warnings = check.warnings();
+            // A listing of its models the provider refused for no login.
+            warnings.extend(crate::models::refused(check));
+            entry["warnings"] = json!(warnings);
             let last = last_models(daemon, check);
             entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
             entry["models"] = json!(last.map(|(models, _)| models));
