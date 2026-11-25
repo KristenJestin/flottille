@@ -399,9 +399,11 @@ fn an_unset_forge_drops_the_pull_request_from_the_subject() {
     // The repository's forge unset: its pull requests are forgotten (`items.forgotten`).
     user.call(
         "project.set_settings",
-        json!({"name": "app", "repositories": [{"path": "api"}], "tracker": null}),
+        json!({"name": "app", "repositories": [{"path": "api", "forge": null}], "tracker": null}),
     )
     .unwrap();
+    // The scheduler's next tick forgets what no source declares any more.
+    user.call("test.advance", json!({"ms": 0})).unwrap();
 
     let subject = subject_once(&user, &id, |s| s["pull_request"].is_null());
     assert_eq!(subject["key"], "#5", "{subject}");
