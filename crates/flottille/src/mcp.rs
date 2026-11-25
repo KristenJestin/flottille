@@ -3686,6 +3686,8 @@ fn record(
     cut: Option<&crate::results::Cut>,
 ) {
     let duration = started.elapsed().as_millis() as u64;
+    // What the call took in hand, before `recorded` goes into the event.
+    let took = (tool, recorded.clone(), matches!(outcome, Outcome::Done(_)));
     let mut data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
         "arguments": recorded, "gate": verdict, "judgement": judgement, "outcome": outcome.word(),
         "duration_ms": duration, "request": request});
@@ -3733,6 +3735,7 @@ fn record(
     }) {
         eprintln!("flottille daemon: agent {}: {error}", grant.agent);
     }
+    crate::subject::served(daemon, &grant.agent, took.0, &took.1, took.2);
 }
 
 /// What the agent is shown of an outcome, and its limit: its text escaped (what a file, an
