@@ -1014,3 +1014,37 @@ fn a_pilot_s_waits_fade_out_as_its_summary_comes(cx: &mut TestAppContext) {
     );
     assert!(going.last() == Some(&false), "then leave: {going:?}");
 }
+
+#[gpui_kit::test]
+fn the_title_and_ticket_of_a_row_of_leads_fade_as_they_come(cx: &mut TestAppContext) {
+    let (view, cx) = leads_view(vec![line("login", None, &[])], cx);
+
+    // Its ticket is read: its title and its key take the row's first line, fading in.
+    let mut ticket = line("login", None, &[]);
+    ticket.title = "The login fails".into();
+    ticket.ticket = Some("#5".into());
+    set_lines(&view, vec![ticket], cx);
+    let mut widths = Vec::new();
+    let mut fading = vec![seen(ElementId::Name("session-lead-k1-title".into())).unwrap_or(0.0)];
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        fading.push(seen(ElementId::Name("session-lead-k1-title".into())).unwrap_or(0.0));
+        widths.push(cx.update(|window, _| {
+            window
+                .try_find(lead_ticket_id("k1"))
+                .map_or(0.0, |found| f32::from(found.bounds().size.width))
+        }));
+    }
+    assert!(faded(&fading), "the title fades: {fading:?}");
+    let whole = *widths.last().unwrap();
+    assert!(
+        whole > 0.0 && widths.iter().any(|&w| w > 0.0 && w < whole),
+        "the ticket's key unfolds: {widths:?}"
+    );
+    assert_eq!(
+        label(cx, lead_row_id("k1")).as_deref(),
+        Some("The login fails")
+    );
+}
