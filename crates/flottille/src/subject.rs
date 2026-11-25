@@ -34,9 +34,17 @@ const TAKES: &[&str] = &[
     "subscribe",
 ];
 
-/// The session's subject now, as `agent.list` and the tree carry it: `null` while it never held
-/// anything.
-pub fn shown(daemon: &Daemon, agent: &Agent) -> Value {
+/// The session's subject as last said, which `agent.list` and the tree carry: `null` while it
+/// never held anything. Kept by `refresh`, so that a list derives nothing.
+pub fn said(daemon: &Daemon, agent: &Agent) -> Value {
+    daemon
+        .read(|store| store.agent_subject(&agent.id))
+        .map(|(_, said)| said)
+        .unwrap_or(Value::Null)
+}
+
+/// The session's subject now, derived from what it holds and from the items.
+fn derived(daemon: &Daemon, agent: &Agent) -> Value {
     daemon
         .read(|store| {
             let (held, _) = store.agent_subject(&agent.id)?;
@@ -159,36 +167,60 @@ fn pull_json(pull: &Item) -> Value {
 
 /// A tool call was served: what it took in hand is kept, and a change of the subject told.
 pub fn served(daemon: &Daemon, agent: &str, tool: &str, args: &Value, done: bool) {
-    if !done || !matches!(tool, "tickets" | "forge") {
+    let action = args["action"].as_str().unwrap_or_default();
+    let takes = match tool {
+        "tickets" => TAKES.contains(&action) || action == "show",
+        "forge" => action == "create",
+        _ => false,
+    };
+    if !done || !takes {
         return;
     }
-    let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
-        return;
+    // Read, changed and kept in one write: two calls of the session served at once both count.
+    let found = daemon.write(|store| {
+        let Some(found) = store.agent(agent)? else {
+            return Ok((None, None::<flottille_core::protocol::Event>));
+        };
+        let held = took(store, &found, tool, action, args)?;
+        if let Some(held) = &held {
+            store.set_agent_held(agent, held)?;
+        }
+        Ok((held.map(|_| found), None))
+    });
+    match found {
+        Ok(Some(found)) => refresh(daemon, &found),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("flottille daemon: agent {agent}: its subject was not kept: {error}")
+        }
+    }
+}
+
+/// What the session holds once `action` of `tool` is counted; `None` when it takes nothing.
+fn took(
+    store: &flottille_core::store::Store,
+    found: &Agent,
+    tool: &str,
+    action: &str,
+    args: &Value,
+) -> flottille_core::Result<Option<Value>> {
+    let workspace = match args["workspace"].as_str().or(found.workspace.as_deref()) {
+        Some(name) => store.workspace(&found.project, name)?,
+        None => None,
     };
-    let action = args["action"].as_str().unwrap_or_default();
-    let workspace = || {
-        let name = args["workspace"]
-            .as_str()
-            .map(str::to_owned)
-            .or(found.workspace.clone())?;
-        daemon
-            .read(|store| store.workspace(&found.project, &name))
-            .ok()
-            .flatten()
-    };
-    let (mut held, _) = daemon
-        .read(|store| store.agent_subject(agent))
-        .unwrap_or((Value::Null, Value::Null));
+    let (mut held, _) = store.agent_subject(&found.id)?;
     if !held.is_object() {
         held = json!({});
     }
     match tool {
-        "tickets" if TAKES.contains(&action) || action == "show" => {
+        "tickets" => {
             let key = match args["ticket"].as_str() {
                 Some(text) => Key::parse(text).ok().map(|key| key.text()),
-                None => workspace().and_then(|workspace| workspace.ticket),
+                None => workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.ticket.clone()),
             };
-            let Some(key) = key else { return };
+            let Some(key) = key else { return Ok(None) };
             if action == "show" {
                 held["read"] = json!({"key": key});
             } else {
@@ -196,7 +228,7 @@ pub fn served(daemon: &Daemon, agent: &str, tool: &str, args: &Value, done: bool
                 let before = held["ticket"]["key"]
                     .as_str()
                     .map(str::to_owned)
-                    .or_else(|| workspace()?.ticket);
+                    .or_else(|| workspace.as_ref()?.ticket.clone());
                 if before.as_deref() != Some(key.as_str()) {
                     held["pull"] = Value::Null;
                 }
@@ -208,8 +240,10 @@ pub fn served(daemon: &Daemon, agent: &str, tool: &str, args: &Value, done: bool
                 held["ticket"] = json!({"key": key, "from": from});
             }
         }
-        "forge" if action == "create" => {
-            let Some(workspace) = workspace() else { return };
+        _ => {
+            let Some(workspace) = workspace else {
+                return Ok(None);
+            };
             let repositories: Vec<String> = match args["repository"].as_str() {
                 Some(repository) => vec![repository.to_owned()],
                 None => workspace
@@ -220,15 +254,8 @@ pub fn served(daemon: &Daemon, agent: &str, tool: &str, args: &Value, done: bool
             };
             held["pull"] = json!({"branch": workspace.branch, "repositories": repositories});
         }
-        _ => return,
     }
-    if let Err(error) = daemon.write(|store| {
-        store.set_agent_held(agent, &held)?;
-        Ok(((), None::<flottille_core::protocol::Event>))
-    }) {
-        eprintln!("flottille daemon: agent {agent}: its subject was not kept: {error}");
-    }
-    refresh(daemon, &found);
+    Ok(Some(held))
 }
 
 /// One refresh at a time: a call served and a round of the items can both see the same change,
@@ -240,7 +267,7 @@ pub fn refresh(daemon: &Daemon, agent: &Agent) {
     let _one = REFRESHING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let now = shown(daemon, agent);
+    let now = derived(daemon, agent);
     let Ok((_, said)) = daemon.read(|store| store.agent_subject(&agent.id)) else {
         return;
     };
@@ -255,12 +282,28 @@ pub fn refresh(daemon: &Daemon, agent: &Agent) {
     }
 }
 
+/// How long a burst of events (a round of the items) is gathered before its sessions are
+/// refreshed, each once.
+const BURST: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Follows the events that can change a subject without a call of its session (a round of the
-/// items, a ticket linked to a workspace, a session created), until the daemon stops.
+/// items, a ticket linked to a workspace, a session created), until the daemon stops. At its start
+/// every live session is refreshed once, so that what a list says is never older than the daemon.
 pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     let Some(mut live) = daemon.live() else {
         return;
     };
+    {
+        let daemon = daemon.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(agents) = daemon.read(|store| store.agents()) {
+                for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
+                    refresh(&daemon, agent);
+                }
+            }
+        })
+        .await;
+    }
     loop {
         let event = tokio::select! {
             received = live.recv() => match received {
@@ -270,37 +313,61 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
             },
             _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; } => return,
         };
-        let concerns = event.name.starts_with("item.")
-            || matches!(
-                event.name.as_str(),
-                "workspace.ticket" | "agent.created" | "agent.moved"
-            );
-        if !concerns {
+        if !concerns(&event) {
             continue;
         }
+        // The rest of the burst, gathered: its sessions are refreshed once for all of it.
+        tokio::time::sleep(BURST).await;
+        let mut burst = vec![event];
+        loop {
+            match live.try_recv() {
+                Ok(event) if concerns(&event) => burst.push(event),
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
         let daemon = daemon.clone();
-        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &[event])).await;
+        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &burst)).await;
     }
 }
 
-/// Refreshes the sessions `events` can concern; how many refreshes that took.
+/// Whether `event` can change a subject: a ticket or a pull request of the items, a ticket linked
+/// to a workspace, a session created or moved.
+fn concerns(event: &flottille_core::protocol::Event) -> bool {
+    match event.name.as_str() {
+        "workspace.ticket" | "agent.created" | "agent.moved" => true,
+        name if name.starts_with("item.") => {
+            matches!(event.data["kind"].as_str(), Some("ticket" | "pull"))
+        }
+        _ => false,
+    }
+}
+
+/// Refreshes, each once, the live sessions `events` can concern: those of the projects they
+/// are of, and the sessions they name; how many refreshes that took.
 fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event]) -> usize {
+    let mut projects = std::collections::BTreeSet::new();
+    let mut named = std::collections::BTreeSet::new();
+    for event in events.iter().filter(|event| concerns(event)) {
+        match event.data["agent"].as_str() {
+            Some(id) if event.name.starts_with("agent.") => named.insert(id.to_owned()),
+            _ => match event.data["project"].as_str() {
+                Some(project) => projects.insert(project.to_owned()),
+                None => false,
+            },
+        };
+    }
+    if projects.is_empty() && named.is_empty() {
+        return 0;
+    }
     let Ok(agents) = daemon.read(|store| store.agents()) else {
         return 0;
     };
     let mut refreshed = 0;
-    for event in events {
-        let name = &event.name;
-        let data = &event.data;
-        for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
-            let concerned = match data["agent"].as_str() {
-                Some(id) if name.starts_with("agent.") => agent.id == id,
-                _ => data["project"] == agent.project.as_str(),
-            };
-            if concerned {
-                refresh(daemon, agent);
-                refreshed += 1;
-            }
+    for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
+        if named.contains(&agent.id) || projects.contains(&agent.project) {
+            refresh(daemon, agent);
+            refreshed += 1;
         }
     }
     refreshed
