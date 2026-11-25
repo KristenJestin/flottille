@@ -92,8 +92,9 @@ fn a_machine_that_was_off_gets_it_at_its_connect() {
 fn an_override_wins_on_its_machine_only() {
     let (_hub, pc, server) = pc_and_server(User::new());
     share(&pc, "pc", json!({"name": SAM, "pronouns": "he/him"}));
-    until(&server, "the server has the value", |about| {
-        about["name"] == SAM
+    // Each value is a copy of its own, which may come apart.
+    until(&server, "the server has both values", |about| {
+        about["name"] == SAM && about["pronouns"] == "he/him"
     });
 
     let own = server
