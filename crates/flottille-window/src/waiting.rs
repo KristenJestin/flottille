@@ -16,7 +16,7 @@
 
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::f32::consts::PI;
 
@@ -24,7 +24,7 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{Motion, PANEL};
 use gpui_design_system::{
     Button, Icon, Item, Listing, Palette, Placement, Type, changed, fade, hoverable, icon, palette,
-    presence, space, turning,
+    presence, presence_of, space, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -226,10 +226,10 @@ pub struct Waiting {
     /// The pulsing dot of a request to judge.
     dot: Entity<StateIcon>,
     scroll: ScrollHandle,
-    /// The card whose error and buttons the section is to scroll to, and whether its error was
-    /// drawn: the section measures the card once it is, never before.
-    reveal: Option<(u64, bool)>,
-    /// The section's scroll on its way to a card's buttons, over `PANEL`.
+    /// The card the section is to scroll to, what of it, and when to measure it: once what makes
+    /// it taller (a failure's line) has unfolded, never before.
+    reveal: Option<(u64, Reveal, Instant)>,
+    /// The section's scroll on its way to a card, over `PANEL`.
     scrolling: Option<Motion>,
     _lit: Option<Task<()>>,
     renders: usize,
@@ -367,7 +367,7 @@ impl Waiting {
         }
         match refused {
             Some(why) => {
-                self.reveal = Some((number, false));
+                self.reveal_after_unfold(number, cx);
                 self.errors.insert(number, why.into())
             }
             None => self.errors.remove(&number),
@@ -379,9 +379,8 @@ impl Waiting {
     /// conversation.
     pub fn point_at(&mut self, number: u64, cx: &mut Context<Self>) {
         self.pointed = Some(number);
-        if let Some(at) = self.cards.iter().position(|c| c.number == number) {
-            self.scroll.scroll_to_item(at);
-        }
+        // The card is drawn already: the section measures it on the next frame and slides to it.
+        self.reveal = Some((number, Reveal::Card, cx.background_executor().now()));
         self._lit = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(POINTED).await;
             this.update(cx, |this, cx| {
@@ -413,7 +412,7 @@ impl Waiting {
         if let Some(why) = why {
             self.busy.remove(&number);
             self.errors.insert(number, why.into());
-            self.reveal = Some((number, false));
+            self.reveal_after_unfold(number, cx);
         }
         cx.notify();
     }
@@ -738,18 +737,25 @@ impl Waiting {
                     }),
             )
             .child(presence(id("approval-more-block"), open, details).space(space::XS))
-            .children(self.errors.get(&number).cloned().map(|error| {
-                spaced(
-                    space::XS,
-                    div()
-                        .id(id("approval-error"))
-                        .aria_label(error.clone())
-                        .text_size(px(12.))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support(),
+            // The error unfolds and fades in under the card's lines and folds away with its gap.
+            .child({
+                let line = id("approval-error");
+                presence_of(
+                    id("approval-error-block"),
+                    self.errors.get(&number).cloned(),
+                    move |error| {
+                        div()
+                            .id(line)
+                            .aria_label(error.clone())
+                            .text_size(px(12.))
+                            .text_color(p.fail)
+                            .child(error)
+                            .test_support()
+                            .into_any_element()
+                    },
                 )
-            }))
+                .space(space::XS)
+            })
             .child(spaced(
                 space::XS,
                 div()
@@ -965,17 +971,24 @@ impl Waiting {
         div().opacity(shown).child(button).into_any_element()
     }
 
-    /// A step failed: the section scrolls, once, to the card's error and buttons, over `PANEL`.
-    /// The error is drawn first and the card measured on the frame after, so the section moves to
-    /// where the buttons are; what the user scrolls afterwards is left alone.
-    fn reveal_failure(
+    /// A step failed: the section will scroll to the card's error and buttons once the error has
+    /// unfolded and the card is as tall as it will be.
+    fn reveal_after_unfold(&mut self, number: u64, cx: &mut Context<Self>) {
+        let measured = cx.background_executor().now() + UNFOLDED;
+        self.reveal = Some((number, Reveal::Buttons, measured));
+    }
+
+    /// The section scrolls, once, to a card (the buttons of a failed one, or the one the user was
+    /// sent to), over `PANEL`, the way a "leads" link moves a page; what the user scrolls
+    /// afterwards is left alone.
+    fn scroll_to_reveal(
         &mut self,
         listed: &[(String, Held, Placement)],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let now = cx.background_executor().now();
         if let Some(motion) = self.scrolling {
-            let now = cx.background_executor().now();
             let offset = self.scroll.offset();
             self.scroll
                 .set_offset(point(offset.x, px(motion.value(now))));
@@ -984,36 +997,41 @@ impl Waiting {
                 false => self.scrolling = None,
             }
         }
-        match self.reveal {
-            Some((number, false)) => {
-                self.reveal = Some((number, true));
-                window.request_animation_frame();
-            }
-            Some((number, true)) => {
-                self.reveal = None;
-                let key = number.to_string();
-                let card = listed
-                    .iter()
-                    .position(|(listed, _, _)| *listed == key)
-                    .and_then(|at| self.scroll.bounds_for_item(at));
-                let Some(card) = card else { return };
-                let frame = self.scroll.bounds();
-                let offset = self.scroll.offset();
-                let below = card.bottom() - frame.bottom();
-                if below <= px(0.) {
-                    return;
-                }
-                let target = (offset.y - below - space::SM)
-                    .min(px(0.))
-                    .max(-self.scroll.max_offset().y);
-                let now = cx.background_executor().now();
-                let mut motion = Motion::settled(f32::from(offset.y));
-                motion.animate(f32::from(target), PANEL, now, cx.reduce_motion());
-                self.scrolling = Some(motion);
-                window.request_animation_frame();
-            }
-            None => {}
+        let Some((number, what, measured)) = self.reveal else {
+            return;
+        };
+        if now < measured {
+            window.request_animation_frame();
+            return;
         }
+        self.reveal = None;
+        let key = number.to_string();
+        let card = listed
+            .iter()
+            .position(|(listed, _, _)| *listed == key)
+            .and_then(|at| self.scroll.bounds_for_item(at));
+        let Some(card) = card else { return };
+        let frame = self.scroll.bounds();
+        let offset = self.scroll.offset();
+        let move_by = match what {
+            // The buttons are at the card's bottom: it is brought up to the section's bottom.
+            Reveal::Buttons => match card.bottom() - frame.bottom() {
+                below if below > px(0.) => below + space::SM,
+                _ => return,
+            },
+            // A card in sight stays where it is; one out of it is brought to the section's top.
+            Reveal::Card => match card.top() < frame.top() || card.bottom() > frame.bottom() {
+                true => card.top() - frame.top(),
+                false => return,
+            },
+        };
+        let target = (offset.y - move_by)
+            .min(px(0.))
+            .max(-self.scroll.max_offset().y);
+        let mut motion = Motion::settled(f32::from(offset.y));
+        motion.animate(f32::from(target), PANEL, now, cx.reduce_motion());
+        self.scrolling = Some(motion);
+        window.request_animation_frame();
     }
 
     /// The card's mark: the pulsing dot of what waits for the user, or the still one of a base request.
@@ -1053,7 +1071,7 @@ impl Render for Waiting {
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
             .collect();
-        self.reveal_failure(&listed, window, cx);
+        self.scroll_to_reveal(&listed, window, cx);
         let cards: Vec<AnyElement> = listed
             .into_iter()
             .map(|(key, held, placement)| {
@@ -1230,6 +1248,18 @@ fn details_toggle(
 
 /// The most the cards take of the rail's height before they scroll.
 const WAITING_HEIGHT: f32 = 420.;
+
+/// What the section scrolls to on a card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reveal {
+    /// A failed card's error and buttons, at its bottom.
+    Buttons,
+    /// A card the user was sent to.
+    Card,
+}
+
+/// How long a failure's line takes to unfold, and a frame more: the card is measured after it.
+const UNFOLDED: Duration = Duration::from_millis(PANEL.as_millis() as u64 + 32);
 
 /// The tones of a request held for the user, on the rail's card and on the conversation's line.
 #[derive(Clone, Copy, Debug, PartialEq)]

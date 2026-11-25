@@ -336,6 +336,30 @@ pub struct MachineProject {
     pub remotes: Vec<String>,
 }
 
+/// What a machine's list says of one of its projects, for the match of a project across machines.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Identity {
+    /// The remotes of its repositories: the same project as any other with the same.
+    Remotes(Vec<String>),
+    /// A repository of it has no remote: it is the same as no other.
+    Alone,
+    /// Its machine does not say (a list from before projects were listed): the same name is the
+    /// same project.
+    Unknown,
+}
+
+/// Whether the project `a` of one machine and `b` of another are the same one (`docs/remote.md`,
+/// "One list of every machine"): their remotes are equal, whatever their names; by the name only
+/// when a machine does not say its projects' remotes. The sidebar's rows, the page of a shared
+/// project, the start choice and the settings switch all use it.
+pub fn same(a: (&Identity, &str), b: (&Identity, &str)) -> bool {
+    match (a.0, b.0) {
+        (Identity::Remotes(x), Identity::Remotes(y)) => x == y,
+        (Identity::Unknown, _) | (_, Identity::Unknown) => a.1 == b.1,
+        _ => false,
+    }
+}
+
 impl MachineProject {
     fn all(value: &Value) -> Vec<MachineProject> {
         value
@@ -1131,6 +1155,34 @@ impl Machines {
             }
         }
     }
+
+    /// The machine `machine` (`None`: this one) as `None` when it is this one.
+    fn other<'a>(&self, machine: Option<&'a str>) -> Option<&'a str> {
+        machine.filter(|name| Some(*name) != self.this.as_deref())
+    }
+
+    /// The projects `machine` (`None`: this one) listed, with their remotes: this machine's own
+    /// daemon says its own.
+    fn held(&self, machine: Option<&str>) -> &[MachineProject] {
+        match self.other(machine) {
+            None => &self.lists.this_projects,
+            Some(name) => self
+                .lists
+                .projects
+                .iter()
+                .find(|(listed, _)| listed == name)
+                .map_or(&[][..], |(_, held)| held.as_slice()),
+        }
+    }
+
+    /// What `machine` (`None`: this one) says of its project `name`.
+    pub fn identity(&self, machine: Option<&str>, name: &str) -> Identity {
+        match self.held(machine).iter().find(|held| held.name == name) {
+            Some(held) if held.remotes.is_empty() => Identity::Alone,
+            Some(held) => Identity::Remotes(held.remotes.clone()),
+            None => Identity::Unknown,
+        }
+    }
 }
 
 /// Machines named in a sentence: `server`, `server or laptop`, `server, laptop or pi`.
@@ -1142,13 +1194,22 @@ pub fn said_or(names: &[String]) -> String {
     }
 }
 
-/// The machines that have `project`, as the composer's picker lists them: this one first, each
-/// with its state. The machine in front (`front`, `None` for this one) is always one of them.
-pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
+/// The machines that have a project, as the composer's picker lists them: this one first, each
+/// with its state. They are the ones its row in the sidebar marks (`homes`, #1410), and the
+/// machine in front (`front`, `None` for this one) is always one of them.
+pub fn project_choices(
+    machines: &Machines,
+    homes: &[crate::model::Home],
+    front: Option<&str>,
+) -> Vec<Choice> {
     choices(machines)
         .into_iter()
         .filter(|choice| {
-            choice.name.as_deref() == front || machines.has_project(choice.name.as_deref(), project)
+            choice.name.as_deref() == front
+                || homes.iter().any(|home| match choice.name.as_deref() {
+                    None => home.here,
+                    Some(name) => home.machine == name,
+                })
         })
         .collect()
 }
@@ -1703,29 +1764,51 @@ mod tests {
         assert!(!read.has_project(Some("nobody"), "app"));
     }
 
+    /// A machine a project's row marks: this one, or another by its name.
+    fn home(machine: &str, here: bool) -> crate::model::Home {
+        crate::model::Home {
+            machine: machine.to_owned(),
+            here,
+            icon: String::new(),
+            colour: String::new(),
+            state: String::new(),
+            offline: false,
+            project: "app".to_owned(),
+        }
+    }
+
     #[test]
     fn the_composer_lists_this_machine_first_then_those_that_have_the_project() {
         let read = two(Some(vec!["app"]), "online");
-        let names = |project: &str| -> Vec<Option<String>> {
-            project_choices(&read, project, None)
+        let names = |homes: &[crate::model::Home]| -> Vec<Option<String>> {
+            project_choices(&read, homes, None)
                 .into_iter()
                 .map(|choice| choice.name)
                 .collect()
         };
-        assert_eq!(names("app"), [None, Some("server".to_owned())]);
-        assert_eq!(names("solo"), [None], "one machine: no picker");
+        let shared = [home("pc", true), home("server", false)];
+        assert_eq!(names(&shared), [None, Some("server".to_owned())]);
+        assert_eq!(names(&shared[..1]), [None], "one machine: no picker");
+        assert_eq!(
+            names(&shared[1..]),
+            [None, Some("server".to_owned())],
+            "the machine in front is always one"
+        );
     }
 
     #[test]
     fn a_machine_that_is_off_is_listed_as_off_and_the_one_in_front_always_is() {
         let read = two(None, "offline");
-        // Its list names `site`: it is listed, off, after this machine, which is in front.
-        let choices = project_choices(&read, "site", None);
+        // Its row marks it: it is listed, off, after this machine, which is in front.
+        let choices = project_choices(&read, &[home("server", false)], None);
         assert_eq!(choices.len(), 2);
         assert!(!choices[1].online);
         assert_eq!(choices[1].state, "offline");
         // In front, it is listed whatever its lists say.
-        assert_eq!(project_choices(&read, "app", Some("server")).len(), 2);
+        assert_eq!(
+            project_choices(&read, &[home("pc", true)], Some("server")).len(),
+            2
+        );
     }
 
     #[test]
