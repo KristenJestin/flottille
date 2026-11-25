@@ -248,14 +248,32 @@ pub fn said_at_offset(ms: u64, offset: i64) -> String {
 }
 
 /// What the banner of a session blocked by someone else says: `Waits for Maya: review of #123,
-/// since 14:02. It comes back by itself when they answer.`
+/// since 14:02. It comes back by itself when they answer.`, the day said too when it is not today.
 pub fn blocked_banner(blocked: &crate::model::Blocked) -> String {
     format!(
         "Waits for {}: {}, since {}. It comes back by itself when they answer.",
         blocked.who(),
         blocked.why,
-        clock(blocked.since)
+        since_at_offset(blocked.since, now_ms(), local_offset(blocked.since))
     )
+}
+
+/// When `ms` was, as a banner says it at `now`, `offset` seconds east of UTC: its time of day
+/// when it is the same day, else its date too (`31 Oct 2026, 14:05`).
+pub fn since_at_offset(ms: u64, now: u64, offset: i64) -> String {
+    let said = said_at_offset(ms, offset);
+    let today = said_at_offset(now, offset);
+    let day = |at: &str| at.rsplit_once(", ").map(|(day, _)| day.to_owned());
+    match day(&said) == day(&today) {
+        true => said.rsplit(", ").next().unwrap_or(&said).to_owned(),
+        false => said,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// How far east of UTC the machine's clock was at `ms`, in seconds.
