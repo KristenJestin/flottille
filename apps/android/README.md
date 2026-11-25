@@ -35,4 +35,5 @@ a UniFFI library) for everything that talks to a daemon.
   notification has Close. `FlottilleApplication.phone` can be replaced, which the instrumentation
   tests do to play the core (`PlayedPhone`) against a fake server.
 
-Needs you and the notifications come with the issues after #826.
+- Needs you (`NeedsYouScreen.kt`, #1443), where the app opens: what waits for the user on every
+  machine, on the session page's cards, answered in place. The notifications come after #826.

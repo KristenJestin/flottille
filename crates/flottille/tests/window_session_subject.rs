@@ -273,6 +273,28 @@ fn a_renamed_session_keeps_its_title_and_shows_the_key_beside_it(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn a_renamed_session_s_key_fades_to_the_new_one(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    user.call("agent.rename", json!({"agent": id, "title": "Login work"}))
+        .unwrap();
+    until(&shell, cx, "the row says the user's title", |cx| {
+        label(cx, session_id(&id)).as_deref() == Some("Login work")
+    });
+    settle(cx);
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#5"));
+    assert_eq!(pending_frames(cx), 0, "at rest before");
+
+    link(&user, "#6");
+    until(&shell, cx, "the new key beside", |cx| {
+        label(cx, session_key_beside_id(&id)).as_deref() == Some("#6")
+    });
+    assert!(pending_frames(cx) > 0, "the new key fades in, not a jump");
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "then nothing moves");
+}
+
+#[gpui_kit::test]
 fn a_free_session_says_it_holds_nothing(cx: &mut TestAppContext) {
     let user = user();
     let (id, shell, cx) = about_five(&user, cx);
@@ -295,6 +317,20 @@ fn a_free_session_says_it_holds_nothing(cx: &mut TestAppContext) {
         "no key is left"
     );
     assert_eq!(row_height(cx, &id), height, "the row keeps its height");
+    assert_eq!(
+        title_ink(cx, &id),
+        cx.update(|_, cx| gpui_design_system::palette(cx).faint),
+        "its words are faint: it has nothing to say"
+    );
+}
+
+/// The ink the session row's title was last drawn in.
+fn title_ink(cx: &mut VisualTestContext, session: &str) -> gpui_kit::Hsla {
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    gpui_design_system::seen::colour(gpui_kit::ElementId::Name(
+        format!("{}-title", session_id(session)).into(),
+    ))
+    .expect("the title notes its ink")
 }
 
 #[gpui_kit::test]
@@ -357,11 +393,13 @@ fn pull(branch: &str, status: &str, conclusion: &str) -> Value {
         "headRefOid": "0123456789abcdef0123456789abcdef01234567",
         "url": "https://github.com/acme/api/pull/12",
         "author": {"login": "someone"}, "assignees": [], "labels": [],
-        "updatedAt": format!("2999-02-01T00:00:{:02}Z", if status == "COMPLETED" { 2 } else { 1 }),
+        "updatedAt": format!("2999-02-01T00:00:{:02}Z", match status { "" => 0, "COMPLETED" => 2, _ => 1 }),
         "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED",
-        "statusCheckRollup": [{"__typename": "CheckRun", "name": "build", "status": status,
-            "conclusion": conclusion,
-            "detailsUrl": "https://github.com/acme/api/actions/runs/900/job/build"}],
+        "statusCheckRollup": if status.is_empty() { json!([]) } else {
+            json!([{"__typename": "CheckRun", "name": "build", "status": status,
+                "conclusion": conclusion,
+                "detailsUrl": "https://github.com/acme/api/actions/runs/900/job/build"}])
+        },
         "comments": [], "reviews": [], "body": ""
     })
 }
@@ -443,8 +481,8 @@ fn the_page_s_chips_unfold_fade_and_fold_away_as_its_subject_changes(cx: &mut Te
     ];
     let branch = branch(&user);
 
-    // Its branch's pull request comes, its checks running: its chip fades in beside the ticket's.
-    forge(&user, &open, &[pull(&branch, "IN_PROGRESS", "")]);
+    // Its branch's pull request comes, no checks yet: its chip fades in beside the ticket's.
+    forge(&user, &open, &[pull(&branch, "", "")]);
     until(&shell, cx, "the pull request's chip", |cx| {
         label(cx, "session-about-pull").as_deref() == Some("#12")
     });
@@ -454,6 +492,31 @@ fn the_page_s_chips_unfold_fade_and_fold_away_as_its_subject_changes(cx: &mut Te
     assert!(
         coming.iter().any(|&a| a > 0.0 && a < full),
         "it fades in: {coming:?}"
+    );
+
+    // Its checks start: the chip widens to its mark over frames, never at once.
+    settle(cx);
+    let width = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find("session-about-pull").bounds().size.width)
+    };
+    let before = width(cx);
+    forge(&user, &open, &[pull(&branch, "IN_PROGRESS", "")]);
+    until(&shell, cx, "the checks' first mark", |cx| {
+        label(cx, "session-about-pull-checks").as_deref() == Some("pending")
+    });
+    let widths: Vec<_> = (0..30)
+        .map(|_| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            width(cx)
+        })
+        .collect();
+    let after = *widths.last().unwrap();
+    assert!(after > before, "it ends wider: {before:?} {widths:?}");
+    assert!(
+        widths.iter().any(|&w| before < w && w < after),
+        "it widens over frames: {before:?} {widths:?}"
     );
 
     // Its checks pass: the mark fades to the new one.
@@ -487,8 +550,9 @@ fn the_page_s_chips_unfold_fade_and_fold_away_as_its_subject_changes(cx: &mut Te
         label(cx, "session-about-from-words").is_some_and(|words| words.contains("#5 done"))
     });
     let going = chip_frames(cx, "session-about-ticket");
+    let whole = chip_drawn(cx, "session-about-pull-key");
     assert!(
-        going.iter().any(|&a| a > 0.0),
+        going.iter().any(|&a| a > 0.0 && a < whole),
         "it does not leave at once: {going:?}"
     );
     assert_eq!(*going.last().unwrap(), 0.0, "it ends gone: {going:?}");

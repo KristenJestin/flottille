@@ -187,7 +187,10 @@ internal fun ViewState.toPhoneView(): PhoneView {
             )
         },
         requests = requests.map {
-            Request(it.machine, it.number.toLong(), it.agent, it.tool, it.kind, it.call, it.base, it.judgement, it.why, it.always, it.source, it.says)
+            Request(
+                it.machine, it.number.toLong(), it.agent, it.tool, it.kind, it.call, it.base, it.judgement, it.why, it.always, it.source, it.says,
+                at = it.at.toLong(), session = it.session, child = it.child,
+            )
         },
         tunnels = tunnels.map { it.toTunnel() },
         tunnelsEnded = tunnelsEnded.map { TunnelEnd(it.tunnel, it.machine, it.run, it.reason) },
@@ -198,6 +201,7 @@ internal fun ViewState.toPhoneView(): PhoneView {
                 ask.asked.toLong(),
                 ask.question,
                 ask.questions.map { q -> AskQuestion(q.question, q.options.map { AskOption(it.label, it.description) }, q.multiple) },
+                at = ask.at.toLong(),
             )
         },
     )

@@ -79,6 +79,7 @@ class TunnelOnThePhoneTest {
     private fun start() {
         val host = SystemTunnelHost(rule.activity, launch = { launched += it; true })
         rule.setContent { FlottilleApp(phone = phone, deviceName = "pixel", zone = ZoneOffset.UTC, tunnels = host) }
+        rule.onNodeWithTag("tab:sessions").performClick()
         rule.onNodeWithTag("session:server:a1").performClick()
         rule.waitForIdle()
     }

@@ -13,7 +13,7 @@ use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
     Button, Fold, Icon, Item, Listing, MachineMark, MarkSize, Menu, Modal, ReorderGroup,
     Reorderable, Tie, TreeRow, Type as _, changed, changing, fade, hoverable, meta, palette,
-    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
+    presence, presence_of, section_label, space, tipped, tipped_when_cut, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -1531,16 +1531,31 @@ impl ProjectNode {
     }
 }
 
-/// The side of a first-level row's chevron, whose place a row with nothing to fold keeps.
-const CHEVRON: f32 = 12.;
-
 /// What a row says of a project whose settings file is gone.
 const MISSING: &str = "settings file missing";
 
 /// A machine's mark (the kit's `MachineMark`): its icon in its colour, a badge whose shape says
 /// its state, and its name and state in words in its tooltip and label, for the eyes that do not
-/// see colours.
-fn machine_mark(id: ElementId, home: &Home, size: MarkSize) -> gpui_kit::AnyElement {
+/// see colours. On a row that fills (a heading, which `leading_with` hands its fill), the badge's
+/// cut-out takes that fill: on the tree's own colour it would show as a ring on a hovered row.
+fn machine_mark(
+    id: ElementId,
+    home: &Home,
+    size: MarkSize,
+    on: Option<gpui_kit::Hsla>,
+) -> gpui_kit::AnyElement {
+    let mark = MachineMark::new(
+        id,
+        glyphs::device(&home.icon),
+        shade(&home.colour),
+        home.presence(),
+        home.said(),
+    )
+    .size(size);
+    let mark = match on {
+        Some(fill) => mark.on(fill),
+        None => mark,
+    };
     // The badge hangs out of the icon by a quarter of its side at most (4 px at 16): the room
     // left for it beside the next element.
     div()
@@ -1548,16 +1563,7 @@ fn machine_mark(id: ElementId, home: &Home, size: MarkSize) -> gpui_kit::AnyElem
         .flex()
         .items_center()
         .pr(space::XS)
-        .child(
-            MachineMark::new(
-                id,
-                glyphs::device(&home.icon),
-                shade(&home.colour),
-                home.presence(),
-                home.said(),
-            )
-            .size(size),
-        )
+        .child(mark)
         .into_any_element()
 }
 
@@ -1597,6 +1603,7 @@ impl Render for ProjectNode {
                     project_mark_id(&self.name, &home.machine),
                     home,
                     MarkSize::Medium,
+                    None,
                 )
             })
             .collect();
@@ -1632,21 +1639,13 @@ impl Render for ProjectNode {
         // A project with no file has no page: its row folds and unfolds what it holds.
         let unconfigured = self.unconfigured;
         let toggled = cx.entity().downgrade();
-        // A project with nothing under it has no chevron, its place kept so that its title starts
-        // where the others' do; the row fades over the change as a chevron comes or goes.
+        // A project with nothing under it has nothing to fold: the kit fades its chevron out where
+        // it stands, so its title starts where the others' do, and back in when something comes.
         let holds = !self.sessions.read(cx).rows.is_empty();
-        let swapped = changed(
-            &ElementId::Name(format!("project-holds-{key}").into()),
-            &SharedString::from(if holds { "holds" } else { "empty" }),
-            window,
-            cx,
-        );
         let row = TreeLevel::Project
             .row(id, self.title.clone())
-            .when(holds, |row| row.expanded(self.open))
-            .when(!holds, |row| {
-                row.leading(div().flex_none().w(px(CHEVRON)).h(px(CHEVRON)))
-            })
+            .expanded(self.open)
+            .foldable(holds)
             .trailing(trailing)
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .when_some(self.menu.as_ref(), |row, (menu, _)| {
@@ -1718,7 +1717,7 @@ impl Render for ProjectNode {
                     .opacity(1.0 - GREYED * greyed)
                     .flex()
                     .flex_col()
-                    .child(div().opacity(swapped).child(row))
+                    .child(row)
                     .child(missing)
                     .child(offline),
             )
@@ -1843,11 +1842,11 @@ impl MachineNode {
 impl Render for MachineNode {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Its state is the mark's badge, said in its tooltip: the heading ends with no words.
-        let mark = machine_mark(machine_mark_id(&self.machine), &self.home, MarkSize::Large);
+        let (id, home) = (machine_mark_id(&self.machine), self.home.clone());
         let row = TreeLevel::Project
             .row(machine_id(&self.machine), self.machine.clone())
             .expanded(self.open)
-            .leading(mark)
+            .leading_with(move |fill| machine_mark(id, &home, MarkSize::Large, Some(fill)))
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
         // A machine that is off fades its ink, and takes it back when it is online.
@@ -2288,21 +2287,30 @@ impl SessionRow {
                     .into_any_element(),
                 px(ROW_GAP),
             ),
-            // The second line is 16 px high, a tag is taller: there the key is its mono word.
-            true => (
-                div()
-                    .id(session_key_beside_id(&self.id))
-                    .aria_label(self.key_shown.clone())
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .mono(11.)
-                    .child(self.key_shown.clone())
-                    .test_support()
-                    .into_any_element(),
-                space::SM,
-            ),
+            // The second line is 16 px high, a tag is taller: there the key is its mono word,
+            // which fades to a new one as a tag's does and says itself whole when cut.
+            true => {
+                let id = session_key_beside_id(&self.id);
+                let opacity = changed(&id, &self.key_shown, window, cx);
+                (
+                    tipped_when_cut(
+                        div()
+                            .id(id)
+                            .aria_label(self.key_shown.clone())
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .mono(11.)
+                            .opacity(opacity)
+                            .child(self.key_shown.clone()),
+                        self.key_shown.clone(),
+                        window,
+                        cx,
+                    ),
+                    space::SM,
+                )
+            }
         };
         Some(
             div()
@@ -2750,6 +2758,8 @@ impl Render for SessionRow {
         let elsewhere = self.elsewhere.clone();
         let mut row = TreeLevel::Session
             .row(session_id(&self.id), self.first_line())
+            // Nothing in hand: its words have nothing to say.
+            .faint(self.first_line() == crate::model::FREE)
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
@@ -3242,7 +3252,7 @@ impl SessionRow {
         let look = self.elsewhere.as_ref().and_then(|there| there.look.clone());
         let presence = ElementId::Name(format!("session-machine-presence-{}", self.id).into());
         let mark = match &self.home {
-            Some(home) => machine_mark(presence, home, MarkSize::Small),
+            Some(home) => machine_mark(presence, home, MarkSize::Small, None),
             None => {
                 let machine = self
                     .elsewhere
