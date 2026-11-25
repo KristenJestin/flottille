@@ -3648,4 +3648,103 @@ mod tests {
         assert_eq!(row.mark_said, "Needs you on server");
         assert_eq!(row.elsewhere.as_ref().unwrap().state, "needs you");
     }
+
+    /// `r1` of this machine leading `a1`, in the workspace `login`, `a1` asking for a permission
+    /// when `asks`, and following the run 900 as `follows` says, twice over when it says 2.
+    fn leading(asks: bool, follows: usize) -> Snapshot {
+        let mut led = agent("a1", None, "idle", Some("login"));
+        led["led_by"] = json!("r1");
+        let approvals = match asks {
+            true => json!({"requests": [{"agent": "a1", "number": 1, "tool": "run", "call": {}}]}),
+            false => json!({}),
+        };
+        let subscription = json!({"agent": "a1", "source": "run",
+            "target": {"forge": "github", "run": 900}});
+        let mut answers_subscriptions = Vec::new();
+        for _ in 0..follows {
+            answers_subscriptions.push(subscription.clone());
+        }
+        let subscriptions = json!({ "subscriptions": answers_subscriptions });
+        let agents = json!({"agents": [agent("r1", None, "idle", None), led]});
+        let needs: &[&str] = if asks { &["a1"] } else { &[] };
+        Snapshot::build(Answers {
+            projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
+            workspaces: &json!({"workspaces": [{"project": "app", "name": "login"}]}),
+            agents: &agents,
+            approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
+            needs_user: &needs.iter().map(|id| id.to_string()).collect(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::new(),
+            commands: &json!({"commands": []}),
+            subscriptions: &subscriptions,
+        })
+    }
+
+    #[test]
+    fn a_row_of_leads_says_what_the_session_needs_of_the_user() {
+        let snapshot = leading(true, 0);
+        let lines = crate::leads::led_lines("r1", &snapshot.sessions, &[], &[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].waits, "needs you: a permission");
+        assert_eq!(lines[0].place.as_deref(), Some("login"));
+        assert!(lines[0].known);
+    }
+
+    #[test]
+    fn a_row_of_leads_of_another_machine_says_only_what_its_list_says() {
+        let turn = Some("session-turn-ended");
+        let row = the_led_row(&led_on_server("started", turn, Some("needs you")));
+        let lines = crate::leads::led_lines("r1", [&row], &[], &[]);
+        assert_eq!(lines.len(), 1);
+        // Its list says neither its place nor its pull request nor its runs: nothing is made up.
+        assert_eq!(lines[0].place, None);
+        assert!(!lines[0].known);
+        assert_eq!(lines[0].pull, None);
+        assert!(lines[0].runs.is_empty());
+        // What it needs is its state's words, never its mark's tooltip cut.
+        assert_eq!(lines[0].waits, "needs you");
+    }
+
+    #[test]
+    fn a_child_launched_on_another_machine_is_no_session_its_pilot_leads() {
+        let mut machines = led_on_server("started", None, Some("running"));
+        machines.launches[0].kind = "child".into();
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_elsewhere(&machines);
+        assert_eq!(snapshot.elsewhere.len(), 1, "its row under its pilot");
+        assert!(crate::leads::led_lines("r1", &snapshot.elsewhere, &[], &[]).is_empty());
+        assert!(
+            !crate::leads::summaries(snapshot.sessions.iter().chain(&snapshot.elsewhere))
+                .contains_key("r1"),
+            "its pilot sums up nothing"
+        );
+    }
+
+    #[test]
+    fn a_run_followed_twice_is_listed_once() {
+        let snapshot = leading(false, 2);
+        assert_eq!(snapshot.session("a1").unwrap().followed, ["run 900"]);
+    }
+
+    #[test]
+    fn a_pilot_counts_a_red_check_from_the_tree_s_line() {
+        let mut snapshot = leading(false, 0);
+        let led = snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == "a1")
+            .unwrap();
+        led.subject = Subject::of(&json!({"kind": "ticket", "key": "#5",
+            "pull_request": {"key": "#12", "checks": "failing"}}));
+        let summaries = crate::leads::summaries(snapshot.sessions.iter());
+        assert_eq!(
+            flottille_core::leads::words(&summaries["r1"]),
+            "leads 1 · 1 red check"
+        );
+    }
 }

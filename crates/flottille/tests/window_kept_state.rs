@@ -866,6 +866,58 @@ fn a_folded_lead_and_the_ended_group_stay_as_they_were(
     assert!(shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()));
 }
 
+#[gpui_kit::test]
+fn a_lead_the_user_unfolded_opens_unfolded_in_the_next_window(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    let (lead, led) = lead_and_led(&user, "app");
+
+    let (shell, cx) = window(&user, first);
+    until_as_left(&shell, cx, "the lead's row, folded by default", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find(session_id(&led)).is_none()),
+        "folded by default"
+    );
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    settle(cx);
+    eventually("the daemon keeps the unfold", || {
+        sidebar(&user)["leads"][&lead] == true
+    });
+
+    let (shell, cx) = window(&user, second);
+    until_as_left(&shell, cx, "the led row", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&led)).is_some())
+    });
+    assert!(shell.read_with(cx, |s, cx| s.session(&lead).unwrap().read(cx).is_open()));
+}
+
+/// [`until`], leaving the leads as the window has them: nothing unfolds one for the user.
+fn until_as_left(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if check(cx) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// A connection to the daemon that holds back the window's read of its rows (`project.list`) while
 /// `closed` is set: the window knows what the daemon keeps of the sidebar, and has no rows yet.
 /// `asked` says the read was held.
@@ -1039,33 +1091,44 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
         })
     });
     cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
-    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
     cx.update(|window, cx| window.click(ended_id(), cx));
     settle(cx);
+    // The lead was unfolded by the user (`until` does it as they would): the choice that differs
+    // from the default, folded, and the one that could animate at opening.
     eventually("the daemon keeps the folds", || {
         let state = sidebar(&user);
         state["projects"]["other"] == false
-            && state["leads"][&lead] == false
+            && state["leads"][&lead] == true
             && state["ended"] == true
     });
 
     // Every frame of the new window, the clock moving, shows the folded project folded, the
-    // folded lead without its led row and the "Ended" group left open open: nothing is drawn on
-    // its way to what it was left as.
+    // unfolded lead with its led row whole and the "Ended" group left open open: nothing is drawn
+    // on its way to what it was left as. Nothing unfolds a lead for the user here.
     let (shell, cx) = window(&user, second);
     let deadline = Instant::now() + Duration::from_secs(25);
     let (mut seen, mut ended) = (0, 0);
+    let mut led_heights = Vec::new();
     while seen < 40 || ended < 40 {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
-        common::unfold_pilots(&shell, cx);
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
-        assert!(
-            cx.update(|window, _| window.try_find(session_id(&led)).is_none()),
-            "the led row is never drawn: its lead was left folded"
-        );
+        if cx.update(|window, _| window.try_find(session_id(&lead)).is_some()) {
+            let frame = shell.read_with(cx, |s, _| {
+                s.session(&led)
+                    .map(|row| format!("tree-row-{}", row.entity_id().as_u64()))
+            });
+            let height = frame.and_then(|frame| {
+                cx.update(|window, _| {
+                    window
+                        .try_find(frame)
+                        .map(|found| f32::from(found.bounds().size.height))
+                })
+            });
+            led_heights.push(height.unwrap_or(0.0));
+        }
         if let Some(fold) = cx.update(|window, _| window.try_find("fold-project-other")) {
             assert_eq!(fold.expanded(), Some(false), "folded from its first frame");
             assert_eq!(
@@ -1086,8 +1149,13 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
         assert!(Instant::now() < deadline, "the folds are never drawn");
         std::thread::sleep(Duration::from_millis(10));
     }
-    // The lead's row itself was drawn, folded: its chevron says so.
-    assert!(cx.update(|window, _| window.try_find(session_id(&lead)).is_some()));
+    // The led row is drawn with its lead, whole from the first frame: it never unfolds.
+    let whole = *led_heights.last().unwrap();
+    assert!(whole > 0.0, "the led row is drawn: {led_heights:?}");
+    assert!(
+        led_heights.iter().all(|&h| h == whole),
+        "never on its way to it: {led_heights:?}"
+    );
 
     // Restored without motion, the folds still move when the user folds them: a project
     // unfolded is seen part of the way, not all at once.

@@ -2685,7 +2685,7 @@ impl Render for SessionPage {
             .child(self.room.watch(crate::ask_dock::Part::Column))
             .child(self.section(0, header))
             .child(self.section(1, self.about_line(window, cx)))
-            .child(self.section(2, self.leads.section(self.shell.clone(), cx)))
+            .child(self.section(2, self.leads.section(self.shell.clone(), window, cx)))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(

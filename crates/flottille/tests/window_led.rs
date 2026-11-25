@@ -747,6 +747,166 @@ fn a_pilot_s_summary_stays_inside_its_row_at_one_line_high(cx: &mut TestAppConte
     );
 }
 
+/// The project `web` beside `atlas`, one repository with no remote.
+fn web(user: &User) {
+    let folder = user.path("work/web");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "web\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "web"}))
+        .unwrap();
+}
+
+/// A user whose lead in `atlas` leads the session `title` in `web`: its row has no summary, as
+/// what it leads is among another project's rows, and it says what it waits for.
+fn leading_in_web(title: &str) -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": title, "brief": "Write the docs", "kind": "led",
+                "project": "web"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user);
+    web(&user);
+    user
+}
+
+#[gpui_kit::test]
+fn a_long_wait_stays_inside_its_row_at_one_line_high(cx: &mut TestAppContext) {
+    let title = "Documentation of the authentication and authorisation subsystem internals";
+    let user = leading_in_web(title);
+    let (lead, led) = started_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot says what it waits for", |cx| {
+        label(cx, session_waits_id(&lead)).is_some()
+    });
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+
+    let bounds = |id: gpui_kit::ElementId, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let (row, waits) = (
+        bounds(session_id(&lead), cx),
+        bounds(session_waits_id(&lead), cx),
+    );
+    assert_eq!(
+        label(cx, session_waits_id(&lead)),
+        Some(format!("waits for {title}")),
+        "the whole words are there, the row cuts them"
+    );
+    assert_eq!(label(cx, session_summary_id(&lead)), None);
+    assert!(
+        waits.right() <= row.right() && waits.bottom() <= row.bottom(),
+        "inside the row: {waits:?} in {row:?}"
+    );
+    assert!(waits.size.height <= px(17.), "one line high: {waits:?}");
+    // The row is as high as one that waits for nothing: the led session's, on its own line.
+    assert_eq!(
+        row.size.height,
+        bounds(session_id(&led), cx).size.height,
+        "the second line keeps its height"
+    );
+}
+
+#[gpui_kit::test]
+fn a_pilot_s_row_follows_the_led_session_when_it_is_renamed_and_the_words_fade(
+    cx: &mut TestAppContext,
+) {
+    let user = leading_in_web("Docs");
+    let (lead, led) = started_led(&user);
+    let (shell, cx) = window(&user, cx);
+    let says = |cx: &mut VisualTestContext| label(cx, session_waits_id(&lead));
+    until(&shell, cx, "the pilot says what it waits for", |cx| {
+        says(cx).as_deref() == Some("waits for Docs")
+    });
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing asks for a frame while the words rest"
+    );
+
+    user.call("agent.rename", json!({"agent": led, "title": "Handbook"}))
+        .unwrap();
+    until(&shell, cx, "the row follows the new title", |cx| {
+        says(cx).as_deref() == Some("waits for Handbook")
+    });
+    // The words do not swap at once: they fade back in over a few frames, then rest.
+    let mut frames = 0;
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        frames += 1;
+    }
+    assert!(frames >= 4, "the words fade over HOVER, {frames} frames");
+}
+
+#[gpui_kit::test]
+fn a_long_summary_stays_inside_its_row_at_one_line_high(cx: &mut TestAppContext) {
+    // The pilot works in a workspace of a long name: its place and its summary share the line.
+    let name = "documentation-of-the-authentication-and-authorisation-subsystem";
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user);
+    user.call(
+        "workspace.create",
+        json!({"project": "atlas", "name": name, "offline": true}),
+    )
+    .unwrap();
+    let lead = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "workspace": name, "message": "begin the docs session"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the launch is held", || {
+        !user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    let number = user.call("approval.list", json!({})).unwrap()["requests"][0]["number"]
+        .as_u64()
+        .unwrap();
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot's summary", |cx| {
+        label(cx, session_summary_id(&lead)).as_deref() == Some("leads 1")
+    });
+    settle(cx);
+
+    let bounds = |id: gpui_kit::ElementId, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let (row, summary) = (
+        bounds(session_id(&lead), cx),
+        bounds(session_summary_id(&lead), cx),
+    );
+    assert!(
+        summary.right() <= row.right() && summary.bottom() <= row.bottom(),
+        "inside the row: {summary:?} in {row:?}"
+    );
+    assert!(summary.size.height <= px(17.), "one line high: {summary:?}");
+}
+
 const QUESTION: &str = "Cover the logout too?";
 
 /// A lead that starts a led session, which asks its lead a question and goes on.

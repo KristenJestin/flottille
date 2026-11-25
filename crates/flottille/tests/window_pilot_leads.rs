@@ -6,6 +6,7 @@
 //! opens on a screen.
 
 use crate::common;
+use crate::kit_common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,17 +14,24 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::leads::{
-    lead_item_id, lead_place_id, lead_pull_id, lead_row_id, lead_runs_id, lead_ticket_id,
-    lead_waits_id, leads_id,
+    Leads, LedLine, lead_item_id, lead_place_id, lead_pull_id, lead_row_id, lead_runs_id,
+    lead_ticket_id, lead_waits_id, leads_id,
 };
 use flottille_window::link::Connect;
+use flottille_window::session_link::PullRequest;
+use flottille_window::state::AgentState;
 use flottille_window::tree::{
-    session_id, session_place_id, session_summary_id, session_summary_part_id,
+    SessionRow, session_id, session_mark_id, session_place_id, session_summary_id,
+    session_summary_part_id, session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::seen::seen;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{
+    AppContext as _, Context, ElementId, Entity, IntoElement, ParentElement as _, Render,
+    Styled as _, TestAppContext, VisualTestContext, WeakEntity, Window, div, px, size,
+};
 use serde_json::{Value, json};
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -55,6 +63,21 @@ fn user(turns: Value) -> User {
         .with_env("FLOTTILLE_TEST_CLOCK", "1");
     user.fake_script(json!({ "turns": turns }));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// A user whose fake agent runs `turns` and offers two models, `fake-small` and `fake-large`.
+fn user_with_models(turns: Value) -> User {
+    let user = user(json!([]));
+    user.fake_script(json!({
+        "models": ["fake-small", "fake-large"],
+        "model_rows": {
+            "fake-small": {"name": "Fake Small 5.5"},
+            "fake-large": {"name": "Fake Large 5.5"}
+        },
+        "efforts": ["low", "medium", "high"],
+        "turns": turns
+    }));
     user
 }
 
@@ -250,16 +273,25 @@ fn a_pilot_s_row_sums_up_the_sessions_it_leads(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_pilot_s_led_rows_are_folded_by_default(cx: &mut TestAppContext) {
-    let user = user(json!([launch_docs(), {"when": "Write the docs", "do": [{"hang": true}]}]));
+    // The led session asks the user to allow a launch of its own: it needs them.
+    let user = user(json!([
+        launch_docs(),
+        {"when": "Write the docs", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Proofs", "brief": "Proofread the docs", "kind": "handed"}}}]}
+    ]));
     let (lead, led) = docs(&user);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the pilot's summary", |cx| {
-        label(cx, session_summary_id(&lead)).is_some()
+    until(&shell, cx, "the pilot's summary says it needs you", |cx| {
+        label(cx, session_summary_id(&lead)).as_deref() == Some("leads 1 · 1 needs you")
     });
     settle(cx);
-
     assert_eq!(listed(&shell, "atlas", cx), std::slice::from_ref(&lead));
     assert!(!present(cx, session_id(&led)), "the led row is folded");
+    // Folded, its mark is the most urgent of what it hides, as before.
+    assert_eq!(
+        label(cx, session_mark_id(&lead)).as_deref(),
+        Some("Needs you")
+    );
 
     // Unfolded by the user, its led row sits under it.
     cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
@@ -428,23 +460,45 @@ fn the_summary_changes_when_a_led_session_needs_the_user(cx: &mut TestAppContext
         label(cx, session_summary_part_id(&lead, "needs")).as_deref(),
         Some("1 needs you")
     );
-    // The words do not swap at once: they fade back in over a few frames, then rest.
-    let frames = frames_until_rest(cx);
-    assert!(frames >= 4, "the words fade over HOVER, {frames} frames");
+    // The words do not swap at once: they fade back in, partway, then rest whole.
+    let words = ElementId::Name(format!("session-summary-words-{lead}").into());
+    let fading = opacities(&words, cx);
+    assert!(
+        fading.iter().any(|&o| o > 0.0 && o < 1.0),
+        "the words fade back in: {fading:?}"
+    );
+    assert_eq!(fading.last().copied(), Some(1.0), "then rest: {fading:?}");
+}
+
+/// The opacities the kit notes for `id` as the next frames draw, one of 16 ms after another.
+fn opacities(id: &ElementId, cx: &mut VisualTestContext) -> Vec<f32> {
+    let mut seen_at = vec![seen(id.clone()).unwrap_or(0.0)];
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        seen_at.push(seen(id.clone()).unwrap_or(0.0));
+    }
+    seen_at
 }
 
 #[gpui_kit::test]
 fn the_pilot_s_page_lists_each_led_session_with_ticket_workspace_pull_request_checks_and_runs(
     cx: &mut TestAppContext,
 ) {
-    let user = user(json!([
-        {"when": "lead the login work", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Login", "brief": "Fix the login form", "kind": "led",
-                "workspace": "login"}}}]},
+    let user = user_with_models(json!([
+        {"when": "lead the login work", "do": [
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Login", "brief": "Fix the login form", "kind": "led",
+                    "workspace": "login", "model": "fake-large", "effort": "high"}}},
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Notes", "brief": "Write the release notes",
+                    "kind": "led"}}}]},
         {"when": "Fix the login form", "do": [
             {"mcp": {"tool": "forge", "arguments": {"action": "follow_run", "repository": "api",
                 "run": 900}}},
-            {"say": "Following the run."}]}
+            {"say": "Following the run."}]},
+        {"when": "Write the release notes", "do": [{"hang": true}]}
     ]));
     app(&user);
     forge(&user);
@@ -453,8 +507,35 @@ fn the_pilot_s_page_lists_each_led_session_with_ticket_workspace_pull_request_ch
         json!({"project": "app", "name": "login", "ticket": "#5"}),
     )
     .unwrap();
-    let (lead, number) = pilot(&user, "app", "lead the login work");
-    let led = allow(&user, &lead, number);
+    let lead = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "lead the login work"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Both launches are held: the user allows them in the order they were asked.
+    eventually("both launches are held", || requests(&user).len() == 2);
+    let mut numbers: Vec<u64> = requests(&user)
+        .iter()
+        .map(|r| r["number"].as_u64().unwrap())
+        .collect();
+    numbers.sort();
+    let led = allow(&user, &lead, numbers[0]);
+    user.call("approval.approve", json!({"number": numbers[1]}))
+        .unwrap();
+    eventually("the second led session exists", || {
+        agents(&user).iter().filter(|a| a["led_by"] == lead).count() == 2
+    });
+    let notes = agents(&user)
+        .into_iter()
+        .find(|a| a["led_by"] == lead && a["id"] != led)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the pilot's row", |cx| {
         present(cx, session_id(&lead))
@@ -470,20 +551,39 @@ fn the_pilot_s_page_lists_each_led_session_with_ticket_workspace_pull_request_ch
     until(&shell, cx, "its pull request", |cx| {
         label(cx, lead_pull_id(&led)).as_deref() == Some("#12, checks failing")
     });
-    assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 1"));
+    until(&shell, cx, "it waits for its run", |cx| {
+        label(cx, lead_waits_id(&led)).as_deref() == Some("waits for run 900")
+    });
+    assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 2"));
     // Its ticket, key and title; its workspace and what it runs on.
     assert_eq!(
         label(cx, lead_row_id(&led)).as_deref(),
         Some("The login fails")
     );
     assert_eq!(label(cx, lead_ticket_id(&led)).as_deref(), Some("#5"));
-    let place = label(cx, lead_place_id(&led)).unwrap_or_default();
-    assert!(place.starts_with("login"), "{place}");
-    let waits = label(cx, lead_waits_id(&led)).unwrap_or_default();
-    assert!(!waits.is_empty(), "it says what it waits for");
+    assert_eq!(
+        label(cx, lead_place_id(&led)).as_deref(),
+        Some("login · Fake Large 5.5 · high")
+    );
+    // The other, working in the project's folder, with no pull request yet.
+    until(&shell, cx, "the second led session works", |cx| {
+        label(cx, lead_waits_id(&notes)).as_deref() == Some("working")
+    });
+    assert_eq!(
+        label(cx, lead_pull_id(&notes)).as_deref(),
+        Some("no pull request yet")
+    );
+    // In launch order.
+    let (first, second) = cx.update(|window, _| {
+        (
+            window.find(lead_row_id(&led)).bounds(),
+            window.find(lead_row_id(&notes)).bounds(),
+        )
+    });
+    assert!(first.bottom() <= second.top(), "{first:?} {second:?}");
     // The pilot's row counts its red check.
     until(&shell, cx, "the pilot's summary", |cx| {
-        label(cx, session_summary_id(&lead)).as_deref() == Some("leads 1 · 1 red check")
+        label(cx, session_summary_id(&lead)).as_deref() == Some("leads 2 · 1 red check")
     });
     // Leads comes under the header, before the conversation.
     let (header, section) = cx.update(|window, _| {
@@ -580,4 +680,338 @@ fn a_held_launch_is_a_row_of_leads_until_it_starts(cx: &mut TestAppContext) {
         cx.update(|window, _| window.find(lead_item_id(&led)).bounds().size.height) > px(0.),
         "the session's row unfolded"
     );
+}
+
+#[gpui_kit::test]
+fn the_summary_counts_the_red_check_its_leads_row_shows(cx: &mut TestAppContext) {
+    let user = user(json!([
+        {"when": "lead the login work", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Login", "brief": "Fix the login form", "kind": "led",
+                "workspace": "login"}}}]},
+        {"when": "Fix the login form", "do": [{"hang": true}]}
+    ]));
+    app(&user);
+    // The forge has the red pull request, but no round of the items read it: the tree's lines
+    // say no pull request of the session yet.
+    let branch = branch(&user);
+    user.gh_script(json!({
+        "issues": {"acme/api": {}},
+        "pulls": {"acme/api": {branch.clone(): red_pull(&branch)}},
+        "runs": {"acme/api": []}
+    }));
+    let (lead, number) = pilot(&user, "app", "lead the login work");
+    let led = allow(&user, &lead, number);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot's summary", |cx| {
+        label(cx, session_summary_id(&lead)).is_some()
+    });
+    // The project's page reads the workspace's pull request from the forge itself.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open(
+            flottille_window::shell::Selection::Project("app".into()),
+            window,
+            cx,
+        )
+    });
+    for _ in 0..40 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        settle(cx);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    open(&shell, &lead, cx);
+    until(&shell, cx, "the led session's row of Leads", |cx| {
+        present(cx, lead_pull_id(&led))
+    });
+    settle(cx);
+    // What the pilot counts is what its Leads row says, as every client's summary.
+    assert_eq!(
+        label(cx, lead_pull_id(&led)).as_deref(),
+        Some("no pull request yet")
+    );
+    assert_eq!(
+        label(cx, session_summary_id(&lead)).as_deref(),
+        Some("leads 1")
+    );
+}
+
+#[gpui_kit::test]
+fn a_pilot_leading_many_sessions_keeps_its_conversation_in_view(cx: &mut TestAppContext) {
+    // Eight launches of led sessions, each held for the user: eight rows of Leads.
+    let launches: Vec<Value> = (1..=8)
+        .map(|n| {
+            json!({"mcp": {"tool": "agent_launch", "arguments": {"title": format!("Part {n}"),
+                "brief": format!("Write part {n}"), "kind": "led"}}})
+        })
+        .collect();
+    let user = user(json!([{"when": "begin the parts", "do": launches}]));
+    atlas(&user);
+    let lead = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "message": "begin the parts"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the eight launches are held", || requests(&user).len() == 8);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot's row", |cx| {
+        present(cx, session_id(&lead))
+    });
+    open(&shell, &lead, cx);
+    until(&shell, cx, "the eight rows of Leads", |cx| {
+        label(cx, leads_id()).as_deref() == Some("Leads 8")
+    });
+    settle(cx);
+
+    // The card scrolls past a few rows: the conversation keeps most of the page.
+    let (leads, conversation) = cx.update(|window, _| {
+        (
+            window.find(leads_id()).bounds(),
+            window
+                .find(ElementId::Name(format!("conversation-{lead}").into()))
+                .bounds(),
+        )
+    });
+    assert!(leads.size.height <= px(320.), "{leads:?}");
+    assert!(
+        conversation.size.height >= px(250.),
+        "the conversation stays in view: {conversation:?}"
+    );
+    assert!(conversation.bottom() <= px(800.), "{conversation:?}");
+}
+
+/// The Leads section of a page, alone, on a page as wide as a narrow window's.
+struct LeadsView(Leads);
+
+impl Render for LeadsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(640.))
+            .child(self.0.section(WeakEntity::new_invalid(), window, cx))
+    }
+}
+
+/// A row of Leads of the session `k1`, working in `place`.
+fn line(place: &str, pull: Option<u64>, runs: &[&str]) -> LedLine {
+    LedLine {
+        key: "k1".into(),
+        session: Some("k1".into()),
+        mark: Some(AgentState::Running),
+        ticket: None,
+        title: "Docs".into(),
+        place: Some(place.into()),
+        machine: None,
+        known: true,
+        pull: pull.map(|number| PullRequest {
+            repository: "api".into(),
+            number,
+            state: "open".into(),
+            mark: None,
+            url: String::new(),
+        }),
+        runs: runs.iter().map(|run| run.to_string()).collect(),
+        waits: "working".into(),
+    }
+}
+
+fn leads_view(
+    lines: Vec<LedLine>,
+    cx: &mut TestAppContext,
+) -> (Entity<LeadsView>, &mut VisualTestContext) {
+    kit_common::init(cx, kit_common::Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| LeadsView(Leads::default()));
+    set_lines(&view, lines, cx);
+    settle(cx);
+    (view, cx)
+}
+
+fn set_lines(view: &Entity<LeadsView>, lines: Vec<LedLine>, cx: &mut VisualTestContext) {
+    view.update(cx, |view, cx| {
+        view.0.set(lines, cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+}
+
+/// Whether the opacities of a fade went partway and ended whole.
+fn faded(fading: &[f32]) -> bool {
+    fading.iter().any(|&o| o > 0.0 && o < 1.0) && fading.last() == Some(&1.0)
+}
+
+#[gpui_kit::test]
+fn the_words_of_a_row_of_leads_fade_as_they_change(cx: &mut TestAppContext) {
+    let (view, cx) = leads_view(vec![line("login · Fake Small 5.5", None, &["run 900"])], cx);
+    let id = |name: &str| ElementId::Name(format!("session-lead-{name}-change-k1").into());
+
+    // What it runs on changes.
+    set_lines(
+        &view,
+        vec![line("login · Fake Large 5.5", None, &["run 900"])],
+        cx,
+    );
+    let fading = opacities(&id("place"), cx);
+    assert!(faded(&fading), "the place and model fade: {fading:?}");
+    assert_eq!(
+        label(cx, lead_place_id("k1")).as_deref(),
+        Some("login · Fake Large 5.5")
+    );
+
+    // Its pull request comes.
+    set_lines(
+        &view,
+        vec![line("login · Fake Large 5.5", Some(12), &["run 900"])],
+        cx,
+    );
+    let fading = opacities(&id("pull"), cx);
+    assert!(faded(&fading), "the pull request's words fade: {fading:?}");
+    assert_eq!(label(cx, lead_pull_id("k1")).as_deref(), Some("#12"));
+
+    // It follows another run.
+    set_lines(
+        &view,
+        vec![line(
+            "login · Fake Large 5.5",
+            Some(12),
+            &["run 900", "run 901"],
+        )],
+        cx,
+    );
+    let fading = opacities(&id("runs"), cx);
+    assert!(faded(&fading), "the runs fade: {fading:?}");
+    assert_eq!(
+        label(cx, lead_runs_id("k1")).as_deref(),
+        Some("run 900 · run 901")
+    );
+
+    // It stops following them: the runs fade out rather than leave at once.
+    set_lines(
+        &view,
+        vec![line("login · Fake Large 5.5", Some(12), &[])],
+        cx,
+    );
+    let going = drawn(lead_runs_id("k1"), cx);
+    assert!(going.first() == Some(&true), "the runs fade out: {going:?}");
+    assert!(going.last() == Some(&false), "then leave: {going:?}");
+}
+
+/// Whether the element `id` is drawn, frame after frame of 16 ms.
+fn drawn(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Vec<bool> {
+    let id = id.into();
+    let mut drawn = Vec::new();
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        drawn.push(present(cx, id.clone()));
+    }
+    drawn
+}
+
+#[gpui_kit::test]
+fn the_leads_title_keeps_its_count_while_it_folds_away(cx: &mut TestAppContext) {
+    let (view, cx) = leads_view(vec![line("login", None, &[])], cx);
+    assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 1"));
+
+    // A second row: the count's words fade to the new one.
+    let mut second = line("main", None, &[]);
+    second.key = "k2".into();
+    second.session = Some("k2".into());
+    set_lines(&view, vec![line("login", None, &[]), second], cx);
+    let fading = opacities(&ElementId::Name("session-leads-count".into()), cx);
+    assert!(faded(&fading), "the count fades: {fading:?}");
+    assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 2"));
+
+    // It leads nothing any more: the section folds away saying what it last said.
+    set_lines(&view, Vec::new(), cx);
+    let mut said = Vec::new();
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        said.extend(label(cx, leads_id()));
+    }
+    assert!(!said.is_empty(), "it folds away, not at once");
+    assert!(
+        said.iter().all(|said| said == "Leads 2"),
+        "never a count of nothing: {said:?}"
+    );
+    assert!(!present(cx, leads_id()), "then it is gone");
+}
+
+/// A row of the sidebar alone, as wide as the sidebar.
+struct RowView(Entity<SessionRow>);
+
+impl Render for RowView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(280.)).child(self.0.clone())
+    }
+}
+
+fn parts(needs: usize) -> Option<Vec<flottille_core::leads::Part>> {
+    let led: Vec<flottille_core::leads::Led> = (0..2)
+        .map(|at| flottille_core::leads::Led {
+            needs_you: at < needs,
+            red: false,
+            blocked_by: Vec::new(),
+        })
+        .collect();
+    flottille_core::leads::summary(&led, 0)
+}
+
+fn row_view(cx: &mut TestAppContext) -> (Entity<SessionRow>, &mut VisualTestContext) {
+    kit_common::init(cx, kit_common::Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        RowView(cx.new(|cx| {
+            let mut row = SessionRow::new("p1".into(), WeakEntity::new_invalid(), cx);
+            row.set("Pilot", None, 0, 0, cx);
+            row
+        }))
+    });
+    settle(cx);
+    let row = view.read_with(cx, |view, _| view.0.clone());
+    (row, cx)
+}
+
+#[gpui_kit::test]
+fn the_summary_s_words_fade_when_they_change(cx: &mut TestAppContext) {
+    let (row, cx) = row_view(cx);
+    row.update(cx, |row, cx| row.set_summary(parts(0), cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, session_summary_id("p1")).as_deref(),
+        Some("leads 2")
+    );
+
+    row.update(cx, |row, cx| row.set_summary(parts(1), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let fading = opacities(&ElementId::Name("session-summary-words-p1".into()), cx);
+    assert!(faded(&fading), "the words fade back in: {fading:?}");
+    assert_eq!(
+        label(cx, session_summary_id("p1")).as_deref(),
+        Some("leads 2 · 1 needs you")
+    );
+}
+
+#[gpui_kit::test]
+fn a_pilot_s_waits_fade_out_as_its_summary_comes(cx: &mut TestAppContext) {
+    let (row, cx) = row_view(cx);
+    row.update(cx, |row, cx| row.set_waits("waits for Docs", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, session_waits_id("p1")).as_deref(),
+        Some("waits for Docs")
+    );
+
+    // Its summary takes their place: the words fade out, never leave at once.
+    row.update(cx, |row, cx| row.set_summary(parts(0), cx));
+    let going = drawn(session_waits_id("p1"), cx);
+    assert!(
+        going.first() == Some(&true),
+        "the waits fade out: {going:?}"
+    );
+    assert!(going.last() == Some(&false), "then leave: {going:?}");
 }

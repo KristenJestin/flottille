@@ -16,7 +16,9 @@ use flottille_core::protocol::Event;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::device::Device;
-use flottille_window::leads::{lead_machine_id, lead_place_id};
+use flottille_window::leads::{
+    lead_machine_id, lead_place_id, lead_pull_id, lead_row_id, lead_waits_id, leads_id,
+};
 use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
@@ -1761,6 +1763,75 @@ fn a_led_session_of_another_machine_says_its_machine_in_leads(cx: &mut TestAppCo
     });
     let machine = label(cx, lead_machine_id(&row)).unwrap_or_default();
     assert!(machine.contains("server"), "{machine}");
+    // What server's list does not say is left unsaid: no place, no pull request made up.
     let place = label(cx, lead_place_id(&row)).unwrap_or_default();
-    assert!(place.starts_with("main"), "{place}");
+    assert!(place.is_empty(), "{place}");
+    assert!(!present(cx, lead_pull_id(&row)), "no pull request said");
+    let waits = label(cx, lead_waits_id(&row)).unwrap_or_default();
+    assert!(!waits.contains("on server"), "{waits}");
+}
+
+#[gpui_kit::test]
+fn a_pilot_of_another_machine_keeps_its_leads_as_the_window_polls(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    // A pilot the user started on server, which leads a session there.
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    let opened = server.user.received_requests("session/new").len();
+    let started = server
+        .user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let pilot = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(&server.user, opened);
+    eventually("the pilot's first turn", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": pilot}))
+            .unwrap()["agent"]["state"]
+            == "idle"
+    });
+    server
+        .user
+        .call("agent.mode", json!({"agent": pilot, "mode": "full"}))
+        .unwrap();
+    let mcp = Mcp::initialize(&url, &authorization);
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Finish the export",
+            "brief": "Finish the export of the report."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer
+        .text
+        .find("(agent ")
+        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
+    let led = answer.text[at + 7..at + 19].to_owned();
+
+    let (shell, cx) = window(&pc, cx);
+    let (pilot, led) = (elsewhere_id("server", &pilot), elsewhere_id("server", &led));
+    until(&shell, cx, "the pilot's row of server", |cx| {
+        present(cx, session_id(&pilot))
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&pilot), cx));
+    until(&shell, cx, "the led session's row of Leads", |cx| {
+        present(cx, lead_row_id(&led))
+    });
+
+    // Each poll reads server's list again: the page's Leads stays as it was.
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(500));
+        settle(&shell, cx);
+        assert!(
+            present(cx, lead_row_id(&led)),
+            "the led session's row of Leads stays"
+        );
+    }
+    assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 1"));
 }

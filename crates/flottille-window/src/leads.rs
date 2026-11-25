@@ -87,10 +87,13 @@ pub struct LedLine {
     /// Its ticket's title, else its own.
     pub title: String,
     /// Where it works and what it runs on: `login · Sonnet 5.5 · medium`, or for a held launch
-    /// `launch held on server · 2 files`.
-    pub place: String,
+    /// `launch held on server · 2 files`; `None` when its machine's list does not say it.
+    pub place: Option<String>,
     /// The machine it runs on, when it is another one.
     pub machine: Option<Home>,
+    /// What its machine says of its place, its pull request and its runs reaches here: a
+    /// session of another machine's list says none of them, and its row leaves them unsaid.
+    pub known: bool,
     pub pull: Option<PullRequest>,
     pub runs: Vec<String>,
     /// What it waits for: `needs you: a permission`, `waits for run 900`, `working`, `at rest`.
@@ -131,7 +134,8 @@ pub fn led_lines<'a>(
             mark: Some(AgentState::NeedsYou),
             ticket: None,
             title: launch.title.clone(),
-            place,
+            place: Some(place),
+            known: true,
             machine: launch
                 .machine
                 .as_ref()
@@ -172,10 +176,11 @@ pub fn led_lines<'a>(
                 .and_then(|s| s.title.clone())
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| session.title.clone()),
-            place: match session.runs.is_empty() {
+            place: Some(match session.runs.is_empty() {
                 true => place,
                 false => format!("{place} · {}", session.runs),
-            },
+            }),
+            known: true,
             machine: machine
                 .and_then(|machine| homes.iter().find(|home| home.machine == machine))
                 .cloned()
@@ -196,6 +201,13 @@ pub fn led_lines<'a>(
         }
     });
     held.chain(led).collect()
+}
+
+/// What each pilot says of the sessions it leads, by its row id.
+pub fn summaries<'a>(
+    _sessions: impl IntoIterator<Item = &'a Session>,
+) -> HashMap<String, Vec<flottille_core::leads::Part>> {
+    HashMap::new()
 }
 
 /// What the section holds and draws: its rows as they come, fold and slide, and the mark of
@@ -258,7 +270,12 @@ impl Leads {
 
     /// The section: its title with its count, then its card of rows. It unfolds when the pilot
     /// first leads something and folds away once it leads nothing.
-    pub fn section(&self, shell: WeakEntity<Shell>, cx: &mut App) -> AnyElement {
+    pub fn section(
+        &self,
+        shell: WeakEntity<Shell>,
+        _window: &mut gpui_kit::Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let p = palette(cx);
         let count = self.shown;
         let present = (count > 0).then(|| SharedString::from(format!("{LEADS} {count}")));
@@ -277,7 +294,7 @@ impl Leads {
                 .child(
                     div()
                         .id(lead_place_id(key))
-                        .aria_label(SharedString::from(line.place.clone()))
+                        .aria_label(SharedString::from(line.place.clone().unwrap_or_default()))
                         .flex()
                         .items_center()
                         .gap(space::XS)
@@ -306,7 +323,7 @@ impl Leads {
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .child(SharedString::from(line.place.clone())),
+                                .child(SharedString::from(line.place.clone().unwrap_or_default())),
                         )
                         .test_support(),
                 );
