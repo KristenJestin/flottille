@@ -343,7 +343,8 @@ mod tests {
 
     fn machine() -> (tempfile::TempDir, MachineKey) {
         let folder = tempfile::tempdir().unwrap();
-        let key = MachineKey::load_or_make(folder.path()).unwrap();
+        // The key's folder is made by it, the user's only, whatever the temporary folder's mode.
+        let key = MachineKey::load_or_make(&folder.path().join("remote")).unwrap();
         (folder, key)
     }
 
