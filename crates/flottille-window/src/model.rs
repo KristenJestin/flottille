@@ -135,6 +135,14 @@ impl Home {
         }
     }
 
+    /// The badge its mark carries: the shape of its state.
+    pub fn presence(&self) -> gpui_design_system::MachineState {
+        match self.here {
+            true => gpui_design_system::MachineState::Here,
+            false => presence(&self.state),
+        }
+    }
+
     fn of(machines: &crate::machines::Machines, name: &str, here: bool) -> Home {
         let (icon, colour) = machines
             .members
@@ -154,6 +162,18 @@ impl Home {
             offline: seen.is_some_and(|machine| !machine.online()),
             project: String::new(),
         }
+    }
+}
+
+/// The shape of a machine's state as its words say it (`online`, `offline since 14:02`, `needs an
+/// update`): any other word is a state this machine cannot vouch for.
+pub fn presence(state: &str) -> gpui_design_system::MachineState {
+    use gpui_design_system::MachineState;
+    match state {
+        "online" => MachineState::Online,
+        "needs an update" => MachineState::Update,
+        state if state.starts_with("offline") => MachineState::Offline,
+        _ => MachineState::Unknown,
     }
 }
 
@@ -1871,8 +1891,9 @@ impl Snapshot {
                 at.insert((machine.to_owned(), name.to_owned()), index);
             }
         }
+        // A device that runs nothing (a phone, a viewer) holds no project: it is no home.
         let homes: Vec<Home> = std::iter::once(this)
-            .chain(machines.machines.iter().map(|m| m.name.as_str()))
+            .chain(machines.runners().map(|m| m.name.as_str()))
             .map(|name| Home::of(machines, name, name == this))
             .collect();
         let mut records: HashMap<String, Project> = std::mem::take(&mut self.projects)

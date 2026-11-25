@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark ground of assets/brand/icon.svg (`#141414`). -->
+    <color name="ic_launcher_background">#141414</color>
+</resources>

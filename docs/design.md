@@ -989,7 +989,8 @@ waiting…"). A tool call never waits for a human or an agent. Who holds the req
 who asked:
 
 - **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
-  the event stream. The user allows it once or denies it: there is no lasting grant, but one.
+  the event stream. The user allows it once or denies it: there is no lasting grant, but two,
+  the leave below and an exception (§7.3).
   **The leave of a pair of sessions**: the first `session_send` of a session to another it did
   not start (nor was started by) is held for the user in every mode, Full included, and never
   reaches the judge; allowing it delivers the message and lets that session write to the other
@@ -1021,6 +1022,67 @@ hooks (`reference/hemera.md` §3), and with every push walled but the run that i
 
 **Commands** are named instructions of the project (`commands.md`), sent to a session as `/name`:
 a command grants nothing, each call the session makes goes through its mode like any other.
+
+### 7.3 Exceptions
+
+A rule can be right in general and wrong in one case: a check that refuses an old commit of a
+branch, which the squashed commit does not hold, keeps a pull request from being merged, and the
+base branch's protection keeps it from being merged past it. The agent stays blocked by default;
+when it is, it may ask the user for an **exception**: it makes the very call the rule holds again
+with `exception`, its reason, saying exactly what the rule refuses and why it is wrong here.
+
+- The ask is a request of the user's in every mode, Full included, never the judge's, answered at
+  once as any held call ("request #n is waiting"): no tool call waits for a human. Its card says
+  the refused action exactly as Flottille read it, never in the agent's words alone: the call
+  whole, the rule it lifts and what that lets the session do, the branch and the repository of a
+  forced push, and for a merge the pull request (its number, branch, base and repository) and what
+  blocks it, read on the forge when the card is made, with the protection bypassed. The agent's
+  reason comes below, one line, then what else the gate says of the call. A child's ask goes to
+  its parent first, as its other requests do. An ask on a call another machine answers is refused:
+  exceptions are each machine's own for now.
+- Allowed, the call is done and the rule no longer stops **that session** until it ends (even to
+  be resumed) or the user withdraws it, in the window (the session's rail, Exceptions) or with
+  `flottille exception withdraw`. Other sessions and the session's own sub-agents still ask for
+  themselves. Denied or left unanswered, nothing changes. The exception and the answer stay in the
+  session's history (`exception.granted`, `exception.withdrawn`). A session holds one exception
+  of a rule: a second ask for it says on its card which one it replaces (`it replaces the
+  exception for #12 of app/login`), and allowed, it does.
+- An exception is what the user allowed, exactly that, nothing wider. It covers the branch and
+  the repository it was asked for, and for a merge that pull request at the head commit and with
+  the blockers its card said: after a `git switch`, a forced push of another branch, or the merge
+  of another pull request, is held and refused as before, and a commit pushed or a blocker come
+  since (a review asking for changes, another check failing) refuses the merge until it is asked
+  again. `forge-state` has no scope, and its card says so. It lifts only its rule's reasons: what else the gate says of a call stays, and the
+  session's mode decides it as before; one rule's exception never lifts another.
+
+What can be asked for are the refusals that protect the project's own process, where the user
+could do the same by hand on the forge:
+
+- `force-push`: a forced push of the agent's own branch (`git push --force origin
+  HEAD:refs/heads/<its branch>`, `--force-with-lease`, a `+` refspec), base and held by the
+  project's never list; then judged as any push is. Only a plain line of `git push`, its forcing
+  options, a named remote and one refspec whose destination is the workspace's branch named in
+  full (`:refs/heads/<its branch>`, so that no `remote.<name>.push` setting sends it elsewhere),
+  never `main`, `master`, `dev`, `develop`,
+  `trunk`, `stable/*`, `next/*` or `release/*`, nor a base of the project's repositories, nor a
+  branch the workspace resumed (it was the user's before), never a deletion;
+- `merge-blocked`: a merge of the workspace's pull request whose required checks fail or whose
+  branch protection blocks it (`forge merge`): that pull request merged past Flottille's refusal,
+  with GitHub's protection bypassed (`gh pr merge --admin`, the rights of the user's own `gh`)
+  only while something blocks it, and only at the head commit the card said
+  (`--match-head-commit`); Bitbucket has no bypass, and its merge checks still answer. A merge
+  nothing blocks needs none, and the ask is refused; so is one whose head commit the forge did
+  not say, until it does;
+- `forge-state`: closing, reopening or relabelling an issue or a pull request (`forge` and
+  `tickets` `close`, `reopen`, `edit` of labels alone), then harmless. A close or a reopen with a
+  comment is not one: the comment's text is judged as before, whatever the session holds.
+
+What can never be asked for is refused with no ask, `exception` or not: a shell, or a command with
+shell syntax; the value of a secret or of a credential, from the vault or from a file; anything
+that leaves bare mode (a built-in tool of the agent, its own sub-agents, an MCP server other than
+Flottille's); writing outside the workspace; rewriting the published history of a protected
+branch; changing the gate's own settings or the agent's own permissions. So is an exception asked
+for a call the gate lets through as it is.
 
 ## 8. Instructions
 
@@ -1110,16 +1172,24 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
 - left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
-  machine of the user together (a session of another machine carries that machine's name on its
-  second line, `server`, greyed with `server offline since 22:14` while it is off,
-  `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
+  machine of the user together (a session of another machine carries that machine's mark alone on
+  its second line, never its name: its icon in its colour and the badge of its state, saying
+  `server · online` or `server · offline since 22:14` when hovered and in its label, the row
+  greyed while it is off, `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
   Add project choosing which, without anything else switching: the list stays this machine's, each
   machine has its own connections, kept open, and a page of another machine reads that machine
   only, `docs/remote.md`, "Built (#1271)"). **Each project row says where it lives**: with
   another machine paired, a mark after its name for every machine that has it (at the end of the row,
   before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
-  machine`. **A project several machines have is one row**: two projects are the same when the
+  machine`. **A machine's mark** is one component of the kit (`MachineMark`), drawn at three
+  sizes (a group's heading 16 px, a project's row 14 px, a session's second line 12 px): the
+  icon keeps the machine's colour, its identity, and a small badge on its corner says its state
+  by a **shape**, never by the machine's colour: a house for this machine, a filled green dot
+  online, a hollow ring offline (the icon greyed), an amber dot with an up arrow when it needs an
+  update, a dashed ring when this machine cannot say (#1249). A state that changes fades and
+  scales the badge over `PANEL`. The words are in the mark's tooltip and label only. A project
+  with nothing under it has no chevron, its title where the others' start. **A project several machines have is one row**: two projects are the same when the
   remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
   case of the host do not count; a project of several repositories matches when all of them
   match), whatever their names; a repository with no remote matches none. Two projects of one
@@ -1128,9 +1198,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
   "⋯" holds **Group by machine**, a switch (off, with "One machine" as its reason, until there is
   another machine; the menu is built once, so a machine that comes or goes never closes it): the list
-  becomes one foldable section per machine (its icon, its name and its state, `this machine` for
-  this one), each with the projects that machine has and its own sessions only, a project several
-  machines have under each of them; switched off, the one list comes back, and the rows move
+  becomes one foldable section per machine that runs agents (its mark and its name, the heading
+  ending with no words; a phone or a viewer, which holds no project, is no section), each with the
+  projects that machine has and its own sessions only, a project several machines have under each
+  of them, none repeating the mark of the section it is in; switched off, the one list comes back, and the rows move
   between the two over the sidebar's motion. The choice and each section's fold are kept by the
   daemon with the sidebar's folds (`window.get`, `sidebar`: `by_machine`, `machines`,
   `on_machines`), so every window of the machine shows the same arrangement. **The list is the

@@ -193,4 +193,14 @@ class TunnelOnThePhoneTest {
         assertFalse(phone.listening(tunnel))
         assertEquals(0, phone.holds)
     }
+
+    @Test
+    fun the_service_s_notification_wears_the_app_s_own_icon() {
+        start()
+        rule.onNodeWithTag("run-browser:r1").performClick()
+        until("the service's notification") { kept() != null }
+        val icon = kept()!!.smallIcon
+        assertEquals(context.packageName, icon.resPackage)
+        assertEquals("ic_notification", context.resources.getResourceEntryName(icon.resId))
+    }
 }

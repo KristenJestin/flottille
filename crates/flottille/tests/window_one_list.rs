@@ -265,13 +265,57 @@ fn a_session_of_another_machine_carries_its_name(cx: &mut TestAppContext) {
 
     assert_eq!(
         label(cx, session_machine_id(&row)).as_deref(),
-        Some("server")
+        Some("server · online")
     );
     assert!(present(cx, session_id(&here)));
     assert!(
         !present(cx, session_machine_id(&here)),
         "a session of this machine carries no tag"
     );
+}
+
+/// The mark of the machine on the second line of the session row `row`, or one of its parts.
+fn presence(row: &str, part: &str) -> gpui_kit::ElementId {
+    let id = format!("session-machine-presence-{row}");
+    match part {
+        "" => gpui_kit::ElementId::Name(id.into()),
+        part => gpui_kit::ElementId::Name(format!("{id}-{part}").into()),
+    }
+}
+
+#[gpui_kit::test]
+fn a_session_of_another_machine_shows_its_icon_not_its_name(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    session(&pc, "app", "Fix the pc part");
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = with_row(&pc, &row, cx);
+    settle(&shell, cx);
+    // Its mark, in the machine's colour, with the badge of its state; the name is in its words.
+    assert!(present(cx, presence(&row, "online")));
+    assert_eq!(
+        label(cx, presence(&row, "")).as_deref(),
+        Some("server · online")
+    );
+    assert_eq!(
+        label(cx, session_machine_id(&row)).as_deref(),
+        Some("server · online")
+    );
+    // The line holds the mark alone (12 px and the room of its badge), its name in its words.
+    let icon = gpui_kit::ElementId::Name(format!("session-machine-icon-{row}").into());
+    let width = cx.update(|window, _| f32::from(window.find(icon).bounds().size.width));
+    assert!(width < 20., "the mark is {width} px wide");
+
+    // Off: the icon greyed under a hollow ring, the tooltip saying since when.
+    off(&server);
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the hollow ring", |cx| {
+        present(cx, presence(&row, "offline"))
+    });
+    let said = label(cx, presence(&row, "")).unwrap_or_default();
+    assert!(said.starts_with("server · offline since "), "{said}");
+    on(&server);
 }
 
 #[gpui_kit::test]
@@ -334,7 +378,7 @@ fn a_session_of_a_machine_that_is_off_is_greyed_and_cannot_be_opened(cx: &mut Te
     // The window opened while it is off still lists it, from this machine's copy.
     let (shell, cx) = with_row(&pc, &row, cx);
     let said = label(cx, session_machine_id(&row)).unwrap_or_default();
-    assert!(said.starts_with("server offline since "), "{said}");
+    assert!(said.starts_with("server · offline since "), "{said}");
     let greyed = shell.read_with(cx, |s, cx| {
         s.session(&row).is_some_and(|row| row.read(cx).offline())
     });
@@ -352,7 +396,7 @@ fn a_session_of_a_machine_that_is_off_is_greyed_and_cannot_be_opened(cx: &mut Te
     on(&server);
     pc.wait_for("server", "online");
     until(&shell, cx, "the row is no longer greyed", |cx| {
-        label(cx, session_machine_id(&row)).as_deref() == Some("server")
+        label(cx, session_machine_id(&row)).as_deref() == Some("server · online")
     });
 }
 
