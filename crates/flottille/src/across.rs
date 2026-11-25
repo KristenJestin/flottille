@@ -1990,7 +1990,8 @@ pub(crate) async fn losses_there(
     until: tokio::time::Instant,
 ) -> Option<(String, Vec<String>)> {
     let name = machine_name(daemon, launch);
-    let (link, _) = crate::link::remote_of(daemon).ok()?.link_to(&name).ok()?;
+    let remote = crate::link::remote_of(daemon).ok()?;
+    let (link, _) = remote.link_to(&name).ok()?;
     let call = Call {
         id: format!(
             "call-{}",
@@ -2004,7 +2005,7 @@ pub(crate) async fn losses_there(
         ..Call::default()
     };
     let message = Message::Machine(MachineMessage::Call(Box::new(call)));
-    let answer = tokio::time::timeout_at(until, link.send(&message))
+    let answer = tokio::time::timeout_at(until, remote.send(&link, &message))
         .await
         .ok()?
         .ok()?;
@@ -2340,7 +2341,7 @@ pub(crate) async fn call(
     };
     let link = crate::link::remote_of(daemon)
         .map_err(|failure| failure.message)
-        .and_then(|remote| remote.link_to(&name).map(|(link, _)| link));
+        .and_then(|remote| remote.link_to(&name).map(|(link, _)| (remote, link)));
     match tool {
         "agent_send" | "session_send" => {
             let (field, fits) = match tool {
@@ -2413,7 +2414,7 @@ pub(crate) async fn call(
             {
                 return refused(format!("refused: {why}"));
             }
-            let link = match link {
+            let (remote, link) = match link {
                 Ok(link) => link,
                 Err(why) => {
                     return refused(format!(
@@ -2426,7 +2427,7 @@ pub(crate) async fn call(
                 "call-{}",
                 flottille_core::agent::new_id().unwrap_or_default()
             );
-            let sent = link.send(&Message::Machine(message(id))).await;
+            let sent = remote.send(&link, &Message::Machine(message(id))).await;
             if tool == "agent_stop"
                 && let Ok(answer) = &sent
                 && !answer["later"].is_string()
@@ -3205,8 +3206,11 @@ async fn forward_to(
     // Until what it awaits is recorded, or the call is given up: an answer that comes before is
     // sent again, one that comes after none is refused.
     let _sent = Calling::sent(&remote, aim.machine, &caller.id);
-    let sent = link
-        .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
+    let sent = remote
+        .send(
+            &link,
+            &Message::Machine(MachineMessage::Call(Box::new(call))),
+        )
         .await;
     if let Ok(answer) = &sent
         && !answer["later"].is_string()

@@ -585,9 +585,10 @@ const COMMANDS_EVERY: Duration = Duration::from_secs(1);
 /// breaks sooner (a request that keeps failing) waits longer each time.
 const HEALTHY: Duration = Duration::from_secs(10);
 
-/// Whether the event is a request of a session a following follows, asked or answered: it
-/// changes what the following says the session waits for (#1305). An ask answered names the
-/// sessions that joined it, which wait on it as the one that asked.
+/// Whether the event is a request of a session a following follows, or of an agent below it,
+/// asked or answered: it changes what the following says the session waits for (#1305, #1496).
+/// `followed` holds those sessions and every agent below them. An ask answered names the sessions
+/// that joined it, which wait on it as the one that asked.
 fn request_of_a_followed(name: &str, data: &Value, followed: &HashSet<String>) -> bool {
     let of = |agent: &Value| agent.as_str().is_some_and(|agent| followed.contains(agent));
     (name.starts_with("approval.")
@@ -858,6 +859,14 @@ impl Link {
             let ours = tree.contains(agent)
                 || (name == "agent.created"
                     && data["parent"].as_str().is_some_and(|p| tree.contains(p)));
+            // An agent that joins a followed session's tree: its requests are the following's to say.
+            if name == "agent.created"
+                && data["parent"]
+                    .as_str()
+                    .is_some_and(|p| followed.contains(p))
+            {
+                followed.insert(agent.to_owned());
+            }
             if !ours {
                 continue;
             }
@@ -982,20 +991,29 @@ impl Link {
         Ok(running)
     }
 
-    /// The subscriptions of the session's tree, sent; the sessions its followings follow.
+    /// The subscriptions of the session's tree, sent; the sessions its followings follow, and
+    /// every agent below them, whose requests the followings say too.
     fn read_subscriptions(&self, conn: &mut Conn) -> Result<HashSet<String>, String> {
         let answer = conn.request("subscription.list", json!({"tree": self.root}))?;
         let listed = answer["subscriptions"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let followed = listed
+        let sessions: HashSet<String> = listed
             .iter()
             .filter(|s| s["source"] == "session")
             .filter_map(|s| s["target"]["session"].as_str().map(str::to_owned))
             .collect();
         let rows = listed.iter().map(SubscriptionRow::of).collect();
         self.send(SessionUpdate::Subscriptions(rows));
+        // A session that ended since is its own tree; its following goes with it.
+        let mut followed = sessions.clone();
+        for session in &sessions {
+            if let Ok(tree) = conn.ask("agent.tree", json!({"agent": session}))? {
+                let below = tree["agents"].as_array().into_iter().flatten();
+                followed.extend(below.filter_map(|a| a["agent"]["id"].as_str().map(str::to_owned)));
+            }
+        }
         Ok(followed)
     }
 
@@ -1180,5 +1198,28 @@ mod tests {
         ));
         let own = json!({"agent": "led", "ask": 7});
         assert!(request_of_a_followed("vault.ask_answered", &own, &followed));
+    }
+
+    #[test]
+    fn a_request_of_an_agent_below_a_followed_session_touches_the_following_and_no_other() {
+        let followed = HashSet::from(["led".to_owned(), "child".to_owned()]);
+        let child = json!({"agent": "child", "number": 3, "held_by": "user"});
+        assert!(request_of_a_followed(
+            "approval.forwarded",
+            &child,
+            &followed
+        ));
+        assert!(request_of_a_followed("approval.decided", &child, &followed));
+        let unrelated = json!({"agent": "elsewhere", "number": 4, "held_by": "user"});
+        assert!(!request_of_a_followed(
+            "approval.forwarded",
+            &unrelated,
+            &followed
+        ));
+        assert!(!request_of_a_followed(
+            "agent.turn_ended",
+            &child,
+            &followed
+        ));
     }
 }

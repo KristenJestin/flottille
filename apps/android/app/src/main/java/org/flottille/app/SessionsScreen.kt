@@ -1,8 +1,10 @@
 package org.flottille.app
 
 import android.content.Context
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -15,6 +17,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -70,6 +73,7 @@ import org.flottille.app.ui.Label
 import org.flottille.app.ui.LocalPalette
 import org.flottille.app.ui.Motion
 import org.flottille.app.ui.Space
+import org.flottille.app.ui.Tag
 import org.flottille.app.ui.Type
 import org.flottille.core.Machine
 import org.flottille.core.MachineState
@@ -425,6 +429,12 @@ private fun SessionLine(
     val pilot = line.leads.isNotEmpty()
     // A folded pilot shows the most urgent of its own state and its led sessions'.
     val mark = if (pilot && !line.open) strongest(listOf(session.mark()) + line.leads.map { it.mark() }) else session.mark()
+    // The row says what the session is about, as the window's (#1450); a title the user gave
+    // keeps the first line.
+    val said = session.subject?.takeUnless { session.renamed }
+    val first = FirstLine(said?.line ?: session.title.ifEmpty { "Untitled session" }, said?.free == true)
+    val key = session.subject?.key.orEmpty()
+    val id = "${session.machine}:${session.agent}"
     val connector = palette.line2
     val indent: Dp = if (line.led) 40.dp else 0.dp
     Box(
@@ -459,27 +469,82 @@ private fun SessionLine(
             verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(Space.Sm), verticalAlignment = Alignment.CenterVertically) {
-                BasicText(
-                    session.title.ifEmpty { "Untitled session" },
-                    Modifier.weight(1f),
-                    style = Type.Body.copy(color = palette.text, fontWeight = FontWeight.Medium, fontSize = 14.sp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    KeyOnFirstLine(if (session.renamed) "" else key, tag = "key:$id")
+                    // The line that changes fades to the new one, its ink with it.
+                    Crossfade(first, Modifier.weight(1f), animationSpec = Motion.spec(Motion.HOVER), label = "row words") {
+                        BasicText(
+                            it.words,
+                            Modifier.testTag("about:$id"),
+                            style = Type.Body.copy(
+                                color = if (it.faint) palette.faint else palette.text,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp,
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
                 Crossfade(mark, animationSpec = Motion.spec(Motion.HOVER), label = "row mark") { shown ->
                     MarkView(shown, said = said(shown, view, session), tag = "mark:${session.machine}:${session.agent}", ago = ago(session.last, now))
                 }
                 if (pilot) FoldButton(session, line.open, onFold)
             }
-            when {
-                pilot -> BasicText(leadsLine(line.leads, palette.faint, palette.wait), style = Type.Small, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                line.project.isNotEmpty() -> Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    MachineIcon(line.member, line.offline)
-                    Label(line.project, style = Type.Small, color = palette.faint)
+            // The second line: a renamed session's key, then the pilot's count or the ended row's
+            // place. It unfolds when a first of them comes.
+            val beside = if (session.renamed) key else ""
+            AnimatedVisibility(
+                beside.isNotEmpty() || pilot || line.project.isNotEmpty(),
+                enter = fadeIn(Motion.spec(Motion.PANEL)) + expandVertically(Motion.spec(Motion.PANEL)),
+                exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    KeyOnSecondLine(beside, tag = "key:$id")
+                    when {
+                        pilot -> BasicText(leadsLine(line.leads, palette.faint, palette.wait), style = Type.Small, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        line.project.isNotEmpty() -> Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            MachineIcon(line.member, line.offline)
+                            Label(line.project, style = Type.Small, color = palette.faint)
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/** A row's first words, [faint] when they say that the session holds nothing. */
+private data class FirstLine(val words: String, val faint: Boolean)
+
+/** How a key comes, goes and gives way to another: it fades, and its room widens or closes. */
+@Composable
+private fun KeyMotion(key: String, content: @Composable (String) -> Unit) {
+    AnimatedContent(
+        key,
+        transitionSpec = {
+            (fadeIn(Motion.spec(Motion.HOVER)) togetherWith fadeOut(Motion.spec(Motion.HOVER)))
+                .using(SizeTransform { _, _ -> Motion.spec(Motion.PANEL) })
+        },
+        label = "row key",
+    ) { if (it.isNotEmpty()) content(it) }
+}
+
+/** The key as a chip before the words, the gap after it with it; no higher than they are. */
+@Composable
+private fun KeyOnFirstLine(key: String, tag: String) = KeyMotion(key) {
+    Tag(it, Modifier.padding(end = 6.dp).testTag(tag), vertical = 0.dp)
+}
+
+/** The key of a renamed session, a mono word before what else its second line says. */
+@Composable
+private fun KeyOnSecondLine(key: String, tag: String) = KeyMotion(key) {
+    Label(
+        it,
+        Modifier.padding(end = Space.Sm).testTag(tag),
+        style = Type.Small.copy(fontFamily = FontFamily.Monospace),
+        color = LocalPalette.current.faint,
+    )
 }
 
 /** What a pilot's row says of the sessions it leads: `leads 3 · 1 waiting`, the waiting ones in the colour of what needs the user. */

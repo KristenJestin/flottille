@@ -99,6 +99,23 @@ pub struct SessionView {
     /// The session of the agent that leads it, on the same machine (the root of that agent's
     /// tree); empty for a session no agent leads.
     pub pilot: String,
+    /// What it is about, as its machine derives it (`docs/design.md` §10, "What a session is
+    /// about"); none while it never held anything: its row then says its title.
+    pub subject: Option<SubjectView>,
+    /// Whether the user named it: their title keeps the row's first line, the key goes to the
+    /// second.
+    pub renamed: bool,
+}
+
+/// What a session is about, as its row says it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SubjectView {
+    /// `ticket`, `pull_request` or `free`.
+    pub kind: String,
+    /// `SHOP-60`, `#12`; empty when free.
+    pub key: String,
+    /// The words of the row's first line, the window's.
+    pub line: String,
 }
 
 /// The conversation of the session the app follows (`Core::follow`): its latest page of events,
@@ -302,6 +319,23 @@ struct Session {
     created: u64,
     /// The agent that leads it (`led_by`), of the same machine.
     led_by: Option<String>,
+    subject: Option<SubjectView>,
+    /// The user named it (`titled_by`).
+    renamed: bool,
+}
+
+/// A line's `subject` as the daemon gives it; none while it is `null`.
+fn subject_view(subject: &Value) -> Option<SubjectView> {
+    let kind = subject["kind"].as_str()?;
+    let key = subject["key"].as_str();
+    Some(SubjectView {
+        kind: kind.to_owned(),
+        key: key
+            .filter(|_| kind != "free")
+            .unwrap_or_default()
+            .to_owned(),
+        line: words::subject_line(kind, subject["title"].as_str(), key),
+    })
 }
 
 /// The tunnels that ended kept in `tunnels_ended`, the newest.
@@ -484,6 +518,8 @@ impl View {
                     last,
                     created: agent["created_at"].as_u64().unwrap_or(last),
                     led_by: agent["led_by"].as_str().map(str::to_owned),
+                    subject: subject_view(&agent["subject"]),
+                    renamed: agent["titled_by"] == "user",
                 },
             );
         }
@@ -644,8 +680,18 @@ impl View {
                         last: at,
                         created: at,
                         led_by: data["led_by"].as_str().map(str::to_owned),
+                        subject: None,
+                        renamed: false,
                     },
                 );
+            }
+            // Only an update that says the subject changes it: others say other things.
+            "agent.updated" => {
+                if let Some(subject) = data.get("subject")
+                    && let Some(session) = self.sessions.get_mut(&key)
+                {
+                    session.subject = subject_view(subject);
+                }
             }
             "agent.detached" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
@@ -655,6 +701,8 @@ impl View {
             "agent.titled" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
                     session.title = text(&data["title"]);
+                    // The store keeps a title of the user's over the agent's: none follows it.
+                    session.renamed = data["by"] == "user";
                 }
                 if let Some((_, title)) = self.children.get_mut(&key) {
                     *title = text(&data["title"]);
@@ -893,6 +941,8 @@ impl View {
                         .as_deref()
                         .map(|lead| self.root_of(machine, lead))
                         .unwrap_or_default(),
+                    subject: session.subject.clone(),
+                    renamed: session.renamed,
                 });
         }
         let projects = projects

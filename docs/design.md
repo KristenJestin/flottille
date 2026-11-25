@@ -1695,7 +1695,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   set by hand; a check, a run, a wake or a led session it follows is `waiting`, as before, and a
   person is a named human, never a CI, a bot or the user). Its mark is a person's silhouette in
   the `away` ink, its line 1 what it is about as every row's, its line 2 `waits for Maya ·
-  review of #123`. A blocked **root** leaves its
+  review of #123` (in the group too, where the project stays in the row's meta: the words alone
+  on the line, in the `away` ink, cut with an ellipsis inside the row and whole in a tooltip,
+  fading as they change; a row that leaves the group gets its usual line 2 back, the words
+  swapped by a fade). A blocked **root** leaves its
   project's list for one group "Blocked by others", pinned at the bottom of the sidebar above
   "Ended", folded by default, the pattern of Ended (its rows say their project and their machine's
   icon), its heading saying the count and who (`Blocked by others 2 · Maya, Noor`), absent while
@@ -1869,6 +1872,12 @@ included, built in today (§7.1, §5.8), later specs, review and a handbook) are
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
+
+- Two machines that dialled each other at once let the link they do not keep go rather than cut
+  it (#1491, `docs/remote.md`): it stays open a second at the least (GRACE), so that what the
+  other sent on it before it chose too is turned away or served, and ten at the most, while a
+  request and its answer are under way on it. A request turned away there waits ten seconds at
+  the most for the link kept before it fails.
 
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
