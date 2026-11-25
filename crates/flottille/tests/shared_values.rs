@@ -10,11 +10,20 @@ use crate::remote;
 
 use common::User;
 use flottille_link::DeviceKey;
-use remote::{Machine, TestHub, error_of, eventually, pair, pc_and_server, signed};
+use remote::{Machine, TestHub, error_of, eventually, pair, pc_and_server_on, signed};
 use serde_json::{Value, json};
 
 /// A vault entry's secret, which never leaves its machine.
 const SECRET: &str = "vau1t-s3cret-Qm7Z";
+
+/// A hub and two machines whose daemons cut tool results as they do for everyone: the harness's
+/// own `tool-results.toml` would be each machine's own limit.
+fn machines() -> (TestHub, Machine, Machine) {
+    pc_and_server_on(
+        Machine::of(User::new().with_cut_results()),
+        User::new().with_cut_results(),
+    )
+}
 
 /// One value of all machines: its name, what is shared, what a machine writes for itself, and how
 /// the tests read it, write it for the machine and drop it, as the user's clients do.
@@ -312,7 +321,7 @@ fn reads(machine: &Machine, case: &Case, what: &str, shared: &str) {
 
 #[test]
 fn every_setting_of_all_machines_reaches_every_machine() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     for case in cases() {
         share(&pc, "pc", case.name, case.all);
         reads(&server, &case, "reaches the server", case.all);
@@ -322,7 +331,7 @@ fn every_setting_of_all_machines_reaches_every_machine() {
 
 #[test]
 fn a_machine_that_was_off_gets_each_setting_at_its_connect() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
     for case in cases() {
@@ -336,7 +345,7 @@ fn a_machine_that_was_off_gets_each_setting_at_its_connect() {
 
 #[test]
 fn an_override_wins_on_its_machine_only() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     for case in cases() {
         share(&pc, "pc", case.name, case.all);
         reads(&server, &case, "has the value of all machines", case.all);
@@ -350,7 +359,7 @@ fn an_override_wins_on_its_machine_only() {
 
 #[test]
 fn use_all_machines_value_restores_the_hub_s() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     for case in cases() {
         share(&pc, "pc", case.name, case.all);
         reads(&server, &case, "has the value of all machines", case.all);
@@ -364,7 +373,7 @@ fn use_all_machines_value_restores_the_hub_s() {
 
 #[test]
 fn the_text_of_a_guidance_says_where_it_comes_from() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     for case in cases().into_iter().filter(|case| case.sourced) {
         let show = |machine: &Machine| match case.name {
             "rules" => machine.user.call("rules.show", json!({})).unwrap(),
@@ -400,7 +409,7 @@ fn the_text_of_a_guidance_says_where_it_comes_from() {
 
 #[test]
 fn the_latest_of_two_changes_wins() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (_hub, pc, server) = machines();
     let case = &cases()[0];
     share(&pc, "pc", case.name, "First rules.");
     reads(&server, case, "got the first", "First rules.");
@@ -412,7 +421,7 @@ fn the_latest_of_two_changes_wins() {
 
 #[test]
 fn the_hub_cannot_read_a_value_and_no_secret_is_in_it() {
-    let (hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = machines();
     pc.user
         .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
         .unwrap();
@@ -472,7 +481,7 @@ fn the_hub_cannot_read_a_value_and_no_secret_is_in_it() {
 
 #[test]
 fn a_machine_with_the_hub_out_of_reach_keeps_its_last_values() {
-    let (mut hub, pc, server) = pc_and_server(User::new());
+    let (mut hub, pc, server) = machines();
     for case in cases() {
         share(&pc, "pc", case.name, case.all);
         reads(&server, &case, "reaches the server", case.all);
@@ -489,7 +498,7 @@ fn a_machine_with_the_hub_out_of_reach_keeps_its_last_values() {
 
 #[test]
 fn a_setting_needs_the_device_s_signature() {
-    let (_hub, pc, _server) = pc_and_server(User::new());
+    let (_hub, pc, _server) = machines();
 
     let (_, unsigned) = pc
         .user
@@ -515,7 +524,7 @@ fn a_setting_needs_the_device_s_signature() {
 
 #[test]
 fn a_viewer_cannot_change_the_settings_of_all_machines() {
-    let (hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = machines();
     let phone = Machine::new();
     pair(&hub, &phone, "phone", "viewer");
     pc.wait_for_member("phone", true);
@@ -535,7 +544,7 @@ fn a_viewer_cannot_change_the_settings_of_all_machines() {
 
 #[test]
 fn a_value_that_would_be_refused_on_a_machine_is_refused_for_all() {
-    let (hub, pc, _server) = pc_and_server(User::new());
+    let (hub, pc, _server) = machines();
     let refused = |name: &str, value: &str| {
         let answer = pc.raw(&signed(
             &pc.device(),
@@ -562,7 +571,7 @@ fn a_value_that_would_be_refused_on_a_machine_is_refused_for_all() {
 
 #[test]
 fn the_rules_at_their_limit_of_four_byte_characters_fit_a_sealed_copy() {
-    let (hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = machines();
     let widest = "𝔸".repeat(8_000);
 
     share(&pc, "pc", "rules", &widest);
