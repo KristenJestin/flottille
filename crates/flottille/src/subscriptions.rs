@@ -1236,23 +1236,30 @@ mod turn_wakes {
     #[test]
     fn a_failed_turn_says_it_failed_not_that_it_said_nothing() {
         assert_eq!(
-            what_of("failed", false, false, false),
+            what_of("failed", false, false, false, false),
             "ended a turn: the turn failed."
         );
         assert_eq!(
-            what_of("failed", true, false, false),
+            what_of("failed", true, false, false, false),
             "ended a turn: the turn failed."
         );
     }
 
     #[test]
     fn a_turn_says_why_it_ended() {
-        assert_eq!(what_of("end_turn", false, false, false), "ended a turn.");
         assert_eq!(
-            what_of("end_turn", false, true, false),
+            what_of("end_turn", false, false, false, false),
+            "ended a turn."
+        );
+        assert_eq!(
+            what_of("end_turn", false, true, false, false),
             "ended a turn: it reported."
         );
-        assert!(what_of("end_turn", true, false, true).contains("asked the user"));
-        assert!(what_of("end_turn", true, false, false).contains("asked you"));
+        assert!(what_of("end_turn", true, false, true, false).contains("asked the user"));
+        assert!(what_of("end_turn", true, false, false, false).contains("asked you"));
+        assert_eq!(
+            what_of("end_turn", false, false, false, true),
+            "ended a turn: it waits for the user."
+        );
     }
 }
