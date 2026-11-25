@@ -521,7 +521,7 @@ fn follow(
         if about_providers(event) {
             providers.get_or_insert_with(Instant::now);
         }
-        if let Some(changed) = text_changed(event) {
+        if let Some(changed) = settings_changed(event) {
             let _ = updates.unbounded_send(changed);
         }
         if event.name == "update.changed" {
@@ -530,42 +530,8 @@ fn follow(
         if event.name == "whatsnew.changed" {
             let _ = updates.unbounded_send(Update::WhatsNewShown(event.data.clone()));
         }
-        if event.name == "about.changed" {
-            let _ = updates.unbounded_send(Update::AboutChanged);
-        }
-        if event.name == "developer.changed" {
-            let _ = updates.unbounded_send(Update::DeveloperChanged);
-        }
-        if event.name == "developer.reported" {
-            let _ = updates.unbounded_send(Update::FindingsChanged);
-        }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
-        }
-        if event.name == "workspaces_folder.changed" {
-            let _ = updates.unbounded_send(Update::WorkspacesFolderChanged {
-                project: event.data["project"].as_str().map(str::to_owned),
-            });
-        }
-        if event.name == "vault.changed" {
-            let _ = updates.unbounded_send(Update::VaultChanged);
-        }
-        if event.name == "signin.changed" {
-            let text = |key: &str| event.data[key].as_str().map(str::to_owned);
-            let _ = updates.unbounded_send(Update::ProgramSignIn {
-                program: text("program").unwrap_or_default(),
-                state: text("state").unwrap_or_default(),
-                why: text("why"),
-            });
-        }
-        if event.name == "sessions.changed" {
-            let _ = updates.unbounded_send(Update::SessionsChanged);
-        }
-        if event.name == "compaction.changed" {
-            let _ = updates.unbounded_send(Update::CompactionChanged);
-        }
-        if event.name == "tool_results.changed" {
-            let _ = updates.unbounded_send(Update::ToolResultsChanged);
         }
         if event.name.starts_with("service.") || event.name == "project.changed" {
             let _ = updates.unbounded_send(Update::ServicesChanged);
@@ -578,18 +544,6 @@ fn follow(
         }
         if extensions_of(event) {
             let _ = updates.unbounded_send(Update::Extensions);
-        }
-        if let Some(said) = event.name.strip_prefix("connection.")
-            && matches!(
-                said,
-                "signed_in" | "sign_in_failed" | "signed_out" | "tokens_unsaved"
-            )
-        {
-            let _ = updates.unbounded_send(Update::SignIn {
-                said: said.to_owned(),
-                name: event.data["name"].as_str().unwrap_or_default().to_owned(),
-                why: event.data["why"].as_str().map(str::to_owned),
-            });
         }
         if event.name == "agent.prompted"
             && let Some(agent) = event.data["agent"].as_str()
@@ -686,19 +640,50 @@ fn about_providers(event: &Event) -> bool {
         || event.name == "agent.options_taken"
 }
 
-/// What an event says of an edited text an editor shows (`Update::TextChanged`).
-fn text_changed(event: &Event) -> Option<Update> {
-    match event.name.as_str() {
-        "judge.changed" => Some(Update::TextChanged {
+/// What an event says changed of the machine's settings, which its Settings read again: from
+/// the shell's link, and from the bell link of another machine, which follows it while its
+/// Settings are shown (#1476).
+fn settings_changed(event: &Event) -> Option<Update> {
+    let text = |key: &str| event.data[key].as_str().map(str::to_owned);
+    let name = event.name.as_str();
+    if let Some(said) = name.strip_prefix("connection.")
+        && matches!(
+            said,
+            "signed_in" | "sign_in_failed" | "signed_out" | "tokens_unsaved"
+        )
+    {
+        return Some(Update::SignIn {
+            said: said.to_owned(),
+            name: text("name").unwrap_or_default(),
+            why: text("why"),
+        });
+    }
+    Some(match name {
+        "judge.changed" => Update::TextChanged {
             judge: true,
             project: None,
-        }),
-        "rules.changed" => Some(Update::TextChanged {
+        },
+        "rules.changed" => Update::TextChanged {
             judge: false,
-            project: event.data["project"].as_str().map(str::to_owned),
-        }),
-        _ => None,
-    }
+            project: text("project"),
+        },
+        "about.changed" => Update::AboutChanged,
+        "developer.changed" => Update::DeveloperChanged,
+        "developer.reported" => Update::FindingsChanged,
+        "workspaces_folder.changed" => Update::WorkspacesFolderChanged {
+            project: text("project"),
+        },
+        "vault.changed" => Update::VaultChanged,
+        "signin.changed" => Update::ProgramSignIn {
+            program: text("program").unwrap_or_default(),
+            state: text("state").unwrap_or_default(),
+            why: text("why"),
+        },
+        "sessions.changed" => Update::SessionsChanged,
+        "compaction.changed" => Update::CompactionChanged,
+        "tool_results.changed" => Update::ToolResultsChanged,
+        _ => return None,
+    })
 }
 
 /// The providers' reads, one at a time: they run on a thread and a connection of their own, with
@@ -819,6 +804,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.moved"
                 // A session's title, from its agent or the user.
                 | "agent.titled"
+                // What a session is about, which its row and its page say.
+                | "agent.updated"
                 // The session's state says "Compacting" from the first to the last of them.
                 | "agent.compacting"
                 | "agent.compacted"
@@ -996,6 +983,11 @@ fn follow_bell(stream: UnixStream, updates: &Updates, retry: &mut Duration) -> R
                 if about(&event) {
                     stale.get_or_insert_with(Instant::now);
                 }
+                if let Some(changed) = settings_changed(&event)
+                    && updates.unbounded_send(changed).is_err()
+                {
+                    return Ok(());
+                }
             }
             None if stale.is_none() => {
                 conn.request("daemon.status", json!({}))?;
@@ -1014,6 +1006,9 @@ fn follow_bell(stream: UnixStream, updates: &Updates, retry: &mut Duration) -> R
                 while let Some(event) = conn.queued() {
                     if about(&event) {
                         stale.get_or_insert_with(Instant::now);
+                    }
+                    if let Some(changed) = settings_changed(&event) {
+                        let _ = updates.unbounded_send(changed);
                     }
                 }
             }

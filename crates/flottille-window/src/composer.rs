@@ -545,6 +545,13 @@ impl Composer {
         self.providers.get(self.pick.provider.as_deref()?)
     }
 
+    /// What the daemon says may stop the provider picked, one line under the pickers: a models
+    /// listing it refused for no login says to sign in where its models would be.
+    fn provider_warning(&self) -> Option<String> {
+        let provider = self.provider().filter(|p| p.offered())?;
+        (!provider.warnings.is_empty()).then(|| provider.warnings.join(" · "))
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -1285,6 +1292,23 @@ impl Render for Composer {
         )
         .child(self.render_pickers(window, cx).into_any_element())
         .children(self.render_not_ready(cx))
+        .child(presence_of(
+            "composer-provider-warning-line",
+            self.provider_warning().map(SharedString::from),
+            move |warning| {
+                div()
+                    .id("composer-provider-warning")
+                    .aria_label(warning.clone())
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(warning)
+                    .test_support()
+                    .into_any_element()
+            },
+        ))
         .child(presence_of(
             "composer-machine-off-line",
             machine_off.map(SharedString::from),

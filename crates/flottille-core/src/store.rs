@@ -1048,6 +1048,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE session_exceptions ADD COLUMN head       TEXT;
     ALTER TABLE session_exceptions ADD COLUMN blocks     TEXT;
 ",
+    "
+    -- What a session took in hand, the ground of its subject (`docs/design.md` §10, \"What a
+    -- session is about\"): the ticket and the pull request it holds, the ticket it last read,
+    -- and the subject last said, which a change is told against.
+    CREATE TABLE agent_subjects (
+        agent TEXT PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
+        held  TEXT NOT NULL,
+        shown TEXT
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -4155,6 +4165,126 @@ impl Store {
         Ok(statement
             .query_row(params![project, kind, repository, key], item_row)
             .optional()?)
+    }
+
+    /// One item of the project by its kind and key, with its checks: the repository's when one is
+    /// named, else the most recently changed of that key.
+    pub fn item_by_key(
+        &self,
+        project: &str,
+        kind: &str,
+        repository: Option<&str>,
+        key: &str,
+    ) -> Result<Option<Item>> {
+        let item = self
+            .connection
+            .query_row(
+                "SELECT project, kind, source, repository, key, title, state, author, assignees, \
+                 labels, url, updated_at, seen_at, mine, details FROM items WHERE project = ?1 \
+                 AND kind = ?2 AND key = ?3 AND (?4 IS NULL OR repository = ?4) \
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![project, kind, key, repository],
+                item_row,
+            )
+            .optional()?;
+        self.with_checks(item)
+    }
+
+    /// The pull request of `branch` (its `details.head`), not from a fork, in `repositories` when
+    /// some are named: an open one first, else the most recently changed.
+    pub fn pull_of_branch(
+        &self,
+        project: &str,
+        branch: &str,
+        repositories: &[String],
+    ) -> Result<Option<Item>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT project, kind, source, repository, key, title, state, author, assignees, \
+             labels, url, updated_at, seen_at, mine, details FROM items WHERE project = ?1 \
+             AND kind = 'pull' AND json_extract(details, '$.head') = ?2 \
+             AND json_extract(details, '$.cross') IS NOT 1 \
+             ORDER BY state NOT IN ('open', 'draft'), updated_at DESC",
+        )?;
+        let found = statement
+            .query_map(params![project, branch], item_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .find(|item| repositories.is_empty() || repositories.contains(&item.repository));
+        self.with_checks(found)
+    }
+
+    fn with_checks(&self, item: Option<Item>) -> Result<Option<Item>> {
+        let Some(mut item) = item else {
+            return Ok(None);
+        };
+        let mut checks = self.connection.prepare_cached(
+            "SELECT name, state, started_at, ended_at, link, outcome FROM item_checks \
+             WHERE project = ?1 AND kind = ?2 AND repository = ?3 AND key = ?4 ORDER BY position",
+        )?;
+        item.checks = checks
+            .query_map(
+                params![item.project, item.kind, item.repository, item.key],
+                |row| {
+                    Ok(Check {
+                        name: row.get(0)?,
+                        state: row.get(1)?,
+                        started_at: row.get(2)?,
+                        ended_at: row.get(3)?,
+                        link: row.get(4)?,
+                        outcome: row.get(5)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(item))
+    }
+
+    /// What the session took in hand and the subject last said of it (`agent_subjects`).
+    pub fn agent_subject(&self, agent: &str) -> Result<(Value, Value)> {
+        let found: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT held, shown FROM agent_subjects WHERE agent = ?1",
+                params![agent],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let parse = |text: Option<String>| {
+            text.and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(Value::Null)
+        };
+        Ok(match found {
+            Some((held, shown)) => (parse(Some(held)), parse(shown)),
+            None => (Value::Null, Value::Null),
+        })
+    }
+
+    /// Keeps what the session holds now.
+    pub fn set_agent_held(&mut self, agent: &str, held: &Value) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO agent_subjects (agent, held) VALUES (?1, ?2) \
+             ON CONFLICT (agent) DO UPDATE SET held = excluded.held",
+            params![agent, held.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps the subject said now, with its `agent.updated` event, in one transaction.
+    pub fn set_agent_subject_shown(&mut self, agent: &str, shown: &Value) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO agent_subjects (agent, held, shown) VALUES (?1, 'null', ?2) \
+             ON CONFLICT (agent) DO UPDATE SET shown = excluded.shown",
+            params![agent, shown.to_string()],
+        )?;
+        let event = append_agent_event(
+            &transaction,
+            agent,
+            "agent.updated",
+            json!({"agent": agent, "subject": shown}),
+        )?;
+        transaction.commit()?;
+        Ok(event)
     }
 
     /// Stores what a round read, each item in place of the one it was, with its checks, and the

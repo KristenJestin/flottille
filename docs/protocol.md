@@ -2233,7 +2233,20 @@ agent writes to it (`docs/remote.md`, "A tree across machines"), `reported_at` w
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `auto` or `full`
-(`agent.mode`).
+(`agent.mode`). `subject` (in `agent.list` and the tree) is what the session is about, derived
+from what it took in hand (`docs/design.md` §10, "What a session is about") and kept as its last
+`agent.updated` said it, so that a list derives nothing: `null` while it
+never held anything, else `{"kind", "key", "title", "from", "last", "pull_request"}`, `kind`
+being `ticket`, `pull_request` or `free`; `key` the ticket's (`#5`, `ABC-12`) or the pull
+request's (`#12`), `null` when free; `title` as the items last read it, `null` when unknown or
+free; `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
+changed`, `a ticket it subscribed to`, `a ticket it read`, `a pull request it opened`, `what it
+last held`); `last`, only when free, what it last held (`#5 done · #12 merged`); `pull_request`
+the pull request it opened or its branch's, from the items the daemon keeps (`details.head`),
+`{"key", "repository", "title", "state", "url", "checks"}`, `checks` one mark (`passing`,
+`failing`, `pending`) or `null`, never read from the forge for this; `null` when there is none.
+A change of it is an `agent.updated` event (`docs/events.md`). An ended session keeps the subject
+it had when it ended.
 
 Each method answers `not-found` when the agent does not exist.
 
@@ -2818,7 +2831,11 @@ when they name none:
 
 `why` is `null` when the provider's agents can run, else a clause after its name that says why
 not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
-sure: a version other than the one Flottille was checked against, no sign-in it can see.
+sure: a version other than the one Flottille was checked against, no sign-in it can see, and the
+sign-in line of the provider (`Codex's login expired: sign in again (run codex login)`) when its
+agent refused to list its models for no login: it stays while its program, its API keys and its
+sign-in file are those the listing was refused in, and goes once a listing is read (`models`
+stays `null` until then).
 `images` says whether its agents take images in a prompt, as the last of them that started said
 (`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test

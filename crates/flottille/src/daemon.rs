@@ -786,6 +786,10 @@ async fn serve(
         daemon.clone(),
         daemon.stopping.subscribe(),
     ));
+    tokio::spawn(crate::subject::run(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
     tokio::spawn(crate::updates::watch(
         daemon.clone(),
         daemon.stopping.subscribe(),

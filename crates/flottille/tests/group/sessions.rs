@@ -49,6 +49,8 @@ mod session_leave;
 mod session_options;
 #[path = "../session_read.rs"]
 mod session_read;
+#[path = "../session_subject.rs"]
+mod session_subject;
 #[path = "../session_title.rs"]
 mod session_title;
 #[path = "../session_titles.rs"]

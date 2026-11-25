@@ -1079,3 +1079,21 @@ fn about_you_is_edited_in_settings(cx: &mut TestAppContext) {
     );
     assert!(!user.path("config/flottille/about.toml").exists());
 }
+
+#[gpui_kit::test]
+fn a_provider_whose_models_asked_for_a_sign_in_says_it_on_its_row(cx: &mut TestAppContext) {
+    // Its login file is there, and its account is gone: the row would say "signed in".
+    let user = User::with_fake_codex().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": serde_json::Value::Null}));
+    std::fs::create_dir_all(user.path("home/.codex")).unwrap();
+    std::fs::write(user.path("home/.codex/auth.json"), "{}").unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+
+    until(&shell, cx, "the sign-in line is said", |cx| {
+        label(cx, "provider-warning-codex")
+            .is_some_and(|said| said.contains("sign in again (run codex login)"))
+    });
+}
