@@ -267,6 +267,16 @@ fn frame_height(
     })
 }
 
+/// Where the top of a session's row is drawn in its project's level.
+fn row_top(id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+    cx.update(|window, _| {
+        window
+            .within(IN_PROJECT)
+            .try_find(session_id(id))
+            .map(|found| f32::from(found.bounds().origin.y))
+    })
+}
+
 /// How high the "Blocked by others" group's fold is drawn: none while it is folded.
 fn group_height(cx: &mut VisualTestContext) -> f32 {
     cx.update(|window, _| {
@@ -367,15 +377,17 @@ fn a_blocked_session_comes_back_on_top_of_its_project_by_itself(cx: &mut TestApp
         listed(&shell, cx).contains(&id)
     });
 
-    // On top: it had the last exchange, its turn the review woke.
+    // On top: it had the last exchange, its turn the review woke. A row of the tree arrives at its
+    // full size, rising into place as it fades in.
     assert_eq!(listed(&shell, cx), [id.clone(), other.clone()]);
     after(cx, Duration::from_millis(70));
-    let arriving = frame_height(&shell, &id, IN_PROJECT, cx).expect("drawn as it arrives");
-    assert!(
-        arriving > 0. && arriving < full,
-        "it unfolds on top of its project: {arriving} of {full}"
-    );
+    let rising = row_top(&id, cx).expect("drawn as it arrives");
     settle(cx);
+    let placed = row_top(&id, cx).expect("in place");
+    assert!(
+        rising > placed,
+        "it rises into place: {rising} then {placed}"
+    );
     assert_eq!(frame_height(&shell, &id, IN_PROJECT, cx), Some(full));
     assert!(blocked(&shell, cx).is_empty());
 }
