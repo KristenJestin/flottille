@@ -2270,6 +2270,7 @@ impl SessionRow {
                     .text_ellipsis()
                     .mono(11.)
                     .child(self.key_shown.clone())
+                    .test_support()
                     .into_any_element(),
                 space::SM,
             ),

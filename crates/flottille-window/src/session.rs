@@ -1078,8 +1078,9 @@ impl SessionPage {
         let has_pull = self.subject.as_ref().is_some_and(|s| s.pull.is_some());
         let key_t = fade("session-about-ticket-fade", has_key, PANEL, window, cx);
         let pull_t = fade("session-about-pull-fade", has_pull, PANEL, window, cx);
-        let key = self.about_key.clone().filter(|_| key_t > 0.0);
-        let pull = self.about_pull.clone().filter(|_| pull_t > 0.0);
+        // Drawn while it is there or still folding away; from 0 as it comes.
+        let key = self.about_key.clone().filter(|_| has_key || key_t > 0.0);
+        let pull = self.about_pull.clone().filter(|_| has_pull || pull_t > 0.0);
         // Built on every frame, a subject or none: the line unfolds when the first one comes.
         let shown = self.subject_shown.clone();
         presence_of("session-about-line", present, move |_| {
