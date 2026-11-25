@@ -1312,6 +1312,30 @@ pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
     Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
 }
 
+/// The requests for a vault entry of `agent` that wait for the user, oldest first: each one's
+/// number, when the agent asked it (its own ask, or its ask joined to another's), the entry's name
+/// and the agent's reason. Never a secret: an ask holds none.
+pub(crate) fn asked_by(
+    store: &Store,
+    agent: &str,
+) -> flottille_core::Result<Vec<(u64, u64, String, String)>> {
+    let open = asks(store)?.open;
+    let mut asked: Vec<(u64, u64, String, String)> = Vec::new();
+    for event in store.events_named(&["vault.asked", "vault.ask_joined"], 0)? {
+        let data = &event.data;
+        let number = match event.name.as_str() {
+            "vault.asked" => event.seq,
+            _ => data["ask"].as_u64().unwrap_or_default(),
+        };
+        // Only the asks still open: an ask answered, and a join to it, wait for no one.
+        if data["agent"] == agent && open.iter().any(|ask| ask.number == number) {
+            let text = |key: &str| data[key].as_str().unwrap_or_default().to_owned();
+            asked.push((number, event.at, text("name"), text("why")));
+        }
+    }
+    Ok(asked)
+}
+
 fn asks(store: &Store) -> flottille_core::Result<Asks> {
     let events = store.events_named(
         &["vault.asked", "vault.ask_joined", "vault.ask_answered"],
@@ -1384,8 +1408,10 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, answer: Answer) {
         Answer::Accepted(entry) => ("accepted", Some(entry)),
         Answer::Dismissed => ("dismissed", None),
     };
+    // The sessions that joined the ask are named, for a window that follows one of them.
     let data = json!({"agent": request.agent, "ask": request.number, "project": request.project,
-        "name": request.name, "outcome": outcome});
+        "name": request.name, "outcome": outcome,
+        "joined": request.joined.iter().map(|(agent, _)| agent).collect::<Vec<_>>()});
     let written = daemon.write(|store| {
         let event = store.append_agent_event(&request.agent, "vault.ask_answered", data, false)?;
         Ok(((), event))
@@ -1425,7 +1451,21 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, answer: Answer) {
             .map(|(agent, project)| (agent, project)),
     );
     for (agent, project) in asked {
-        if set.is_some_and(|entry| !entry.seen_by(project)) {
+        // An entry the agent's project does not see is not said to it, nor to its lead: the lead
+        // is told only that the request is answered.
+        let seen = set.is_none_or(|entry| entry.seen_by(project));
+        crate::subscriptions::request_answered(
+            daemon,
+            agent,
+            "vault",
+            request.number,
+            &format!("a vault entry asked: {name}"),
+            &match seen {
+                true => format!("{outcome} it"),
+                false => "answered it".to_owned(),
+            },
+        );
+        if !seen {
             continue;
         }
         deliveries::deliver(
