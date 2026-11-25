@@ -1677,7 +1677,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   rest, never during a turn: what the user waits on someone else for is out of the way of what
   needs them, and it comes back by itself, on top of its project, when its subscription fires
   (the agent takes a turn) or the person answers. A **led** session that is blocked stays under
-  its pilot, which speaks for it. The page of a blocked session has a banner above its composer:
+  its pilot, which speaks for it, and a blocked root that leads a live session stays in its
+  project with the sessions it leads, its mark saying it is blocked. The page of a blocked session has a banner above its composer:
   who, what, since when, and that it comes back by itself. The phone follows in its own issue.
   An ended session's page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session

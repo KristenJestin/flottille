@@ -5498,7 +5498,7 @@ impl Shell {
             }
             // Ended or blocked apart, it sits among other projects' sessions: its row says whose
             // it is, and the machine of one of another machine (#1280).
-            let scope = (session.ended || session.blocked_apart()).then(|| {
+            let scope = (session.ended || self.snapshot.blocked_apart(session)).then(|| {
                 match session.elsewhere.as_ref().filter(|there| !there.here) {
                     Some(there) => format!("{} on {}", session.project, there.machine),
                     None => session.project.clone(),

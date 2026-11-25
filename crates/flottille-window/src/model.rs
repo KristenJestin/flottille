@@ -520,14 +520,6 @@ impl Blocked {
     }
 }
 
-impl Session {
-    /// It leaves its project's list for the "Blocked by others" group: a root no agent leads,
-    /// blocked by someone else. A led one stays under its pilot, which speaks for it.
-    pub fn blocked_apart(&self) -> bool {
-        self.blocked.is_some() && self.pilot.is_none()
-    }
-}
-
 /// A session on another machine, as its row under its pilot shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Elsewhere {
@@ -1441,8 +1433,21 @@ impl Snapshot {
         self.live_sessions_of(project)
             .into_iter()
             .filter(|session| !twin || self.is_here(session) == gone)
-            .filter(|session| !session.blocked_apart())
+            .filter(|session| !self.blocked_apart(session))
             .collect()
+    }
+
+    /// Whether `session` leaves its project's list for the "Blocked by others" group: a root no
+    /// agent leads, blocked by someone else, that leads no live session. A led one stays under its
+    /// pilot, which speaks for it; a pilot stays with the sessions it leads.
+    pub fn blocked_apart(&self, session: &Session) -> bool {
+        session.blocked.is_some()
+            && session.pilot.is_none()
+            && !self
+                .sessions
+                .iter()
+                .chain(&self.elsewhere)
+                .any(|led| !led.ended && led.pilot.as_deref() == Some(session.id.as_str()))
     }
 
     /// The roots blocked by someone else, whatever their project and their machine, the most
@@ -1452,7 +1457,7 @@ impl Snapshot {
             .sessions
             .iter()
             .chain(&self.elsewhere)
-            .filter(|s| !s.ended && s.blocked_apart())
+            .filter(|s| !s.ended && self.blocked_apart(s))
             .collect();
         let since = |s: &Session| s.blocked.as_ref().map_or(0, |b| b.since);
         blocked.sort_by(|a, b| since(b).cmp(&since(a)).then(a.id.cmp(&b.id)));
