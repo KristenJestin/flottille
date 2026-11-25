@@ -192,8 +192,7 @@ fn stored(user: &User, kind: &str, key: &str) -> Value {
 fn last_blocked(events: &[Value], id: &str) -> Value {
     events
         .iter()
-        .filter(|e| e["name"] == "agent.blocked" && e["data"]["agent"] == id)
-        .next_back()
+        .rfind(|e| e["name"] == "agent.blocked" && e["data"]["agent"] == id)
         .unwrap_or_else(|| panic!("no agent.blocked of {id}: {events:?}"))["data"]["blocked"]
         .clone()
 }
