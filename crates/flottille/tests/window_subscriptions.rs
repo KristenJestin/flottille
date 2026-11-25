@@ -1127,21 +1127,21 @@ fn the_rail_shows_a_child_s_request_as_it_reaches_the_user(cx: &mut TestAppConte
     until(&shell, cx, "the rail says what the child waits for", |cx| {
         present(cx, &format!("subscription-waits-{id}"))
     });
-    // It unfolds, it does not appear: partway it is between nothing and its width.
-    let mut widths = Vec::new();
+    // It unfolds, it does not appear: the section grows over frames, partway between its
+    // height without the line and with it.
+    let mut heights = Vec::new();
     for _ in 0..30 {
         step(&shell, Duration::from_millis(16), cx);
-        widths.push(
-            size_of(cx, &format!("subscription-waits-{id}"))
-                .unwrap()
-                .width,
-        );
+        heights.push(size_of(cx, "rail-subscriptions").unwrap().height);
     }
-    let last = *widths.last().unwrap();
-    assert!(last > px(0.), "it ends drawn: {widths:?}");
+    let last = *heights.last().unwrap();
     assert!(
-        widths.iter().any(|&w| w < last),
-        "partway it is not at its width yet: {widths:?}"
+        heights.iter().any(|&h| h < last),
+        "partway it is not at its height yet: {heights:?}"
+    );
+    assert!(
+        heights.windows(2).all(|pair| pair[0] <= pair[1]),
+        "it only unfolds: {heights:?}"
     );
     let said = label(cx, &format!("subscription-waits-{id}")).unwrap();
     assert!(
