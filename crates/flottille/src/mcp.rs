@@ -2696,7 +2696,8 @@ async fn played_whole(
         Outcome::Refused(why)
     } else if let Err(why) = &asking {
         Outcome::Refused(why.clone())
-    } else if away.is_some() && matches!(asking, Ok(Some(_))) {
+    } else if shaped && matches!(asking, Ok(Some(_))) {
+        // Every call another machine answers, a read or a removal of a launch's included.
         Outcome::Refused(crate::exceptions::ELSEWHERE.into())
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
