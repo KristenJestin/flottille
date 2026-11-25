@@ -113,6 +113,9 @@ fn sample(cx: &mut VisualTestContext) -> Frame {
     frame
 }
 
+/// What the window must do before each frame besides its clock.
+type Before = Box<dyn Fn(&mut VisualTestContext)>;
+
 /// Plays a scenario frame by frame and keeps every frame.
 pub struct Recorder {
     scenario: &'static str,
@@ -120,7 +123,7 @@ pub struct Recorder {
     /// The time spent reading the elements, all frames together.
     sampling: Duration,
     /// What the window must do before each frame besides its clock (a shell polls its link).
-    before: Option<Box<dyn Fn(&mut VisualTestContext)>>,
+    before: Option<Before>,
 }
 
 impl Recorder {
