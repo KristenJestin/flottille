@@ -64,6 +64,9 @@ struct Relay {
     slow_by: Arc<AtomicU64>,
     /// The links to the server that follow its events and are not a window's copy: its bell link.
     bells: Arc<Mutex<Vec<UnixStream>>>,
+    /// The methods the server is asked that are held `held_for` ms before they are sent on.
+    held: Arc<Mutex<Vec<&'static str>>>,
+    held_for: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -138,6 +141,9 @@ impl Relay {
                     && let Ok(held) = window.try_clone()
                 {
                     self.bells.lock().unwrap().push(held);
+                }
+                if self.held.lock().unwrap().contains(&method.as_str()) {
+                    std::thread::sleep(Duration::from_millis(self.held_for.load(Ordering::SeqCst)));
                 }
                 let cut = self.cut.lock().unwrap().contains(&method.as_str());
                 self.asked.lock().unwrap().push((method, params));
@@ -2740,4 +2746,68 @@ fn a_change_made_while_the_link_to_another_machine_was_down_is_shown_once_it_is_
         .filter(|m| m != "events.watch" && m != "notifications.list")
         .collect();
     assert!(asked.is_empty(), "the server was read again: {asked:?}");
+}
+
+#[gpui_kit::test]
+fn another_machine_s_notices_reach_the_bell_while_its_providers_are_being_read(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    settle(&shell, cx);
+    let order =
+        |cx: &mut VisualTestContext| shell.read_with(cx, |s, cx| s.bell_list().read(cx).order());
+    let before = order(cx);
+
+    // The server is slow to list its providers, and one of them changes there.
+    relay.held.lock().unwrap().push("provider.list");
+    relay.held_for.store(20_000, Ordering::SeqCst);
+    server
+        .user
+        .call("provider.enable", json!({"name": "opencode"}))
+        .unwrap();
+    server
+        .user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap();
+    // Its bell link has asked by now.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !the_server_was_asked(&relay, "provider.list") {
+        assert!(Instant::now() < deadline, "the providers were never read");
+        step(&shell, cx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // A session of the server reports meanwhile: its notice comes into the bell at once, not
+    // once the providers are read.
+    server.user.fake_script(json!({"turns": [
+        {"when": "REPORT", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The notes are filed."}}},
+            {"say": REPLY}]},
+        {"when": "", "do": [{"say": REPLY}]}
+    ]}));
+    server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "message": "REPORT the notes"}),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        step(&shell, cx);
+        if order(cx)
+            .iter()
+            .any(|key| key.ends_with("@server") && !before.contains(key))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the bell waited for the server's providers"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
