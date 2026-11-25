@@ -272,7 +272,10 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
         };
         let name = event.name.clone();
         let concerns = name.starts_with("item.")
-            || matches!(name.as_str(), "workspace.ticket" | "agent.created" | "agent.moved");
+            || matches!(
+                name.as_str(),
+                "workspace.ticket" | "agent.created" | "agent.moved"
+            );
         if !concerns {
             continue;
         }
