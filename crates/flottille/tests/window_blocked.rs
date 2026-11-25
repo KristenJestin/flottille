@@ -14,7 +14,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::state::AgentState;
-use flottille_window::tree::{blocked_id, blocked_who_id, session_id};
+use flottille_window::tree::{blocked_id, blocked_who_id, session_id, session_key_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -596,6 +596,64 @@ fn a_blocked_session_s_page_says_who_and_since_when(cx: &mut TestAppContext) {
             "Waits for Maya: review of #12, since {at}. It comes back by itself when they answer."
         )
     );
+}
+
+#[gpui_kit::test]
+fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // The project's issues are its tracker: #5 is what the session takes in hand.
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/atlas"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+    let mut script = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(user.path("gh/script.json")).unwrap(),
+    )
+    .unwrap();
+    script["issues"] = json!({"acme/atlas": {"5": {
+        "number": 5, "title": "The docs are missing", "state": "OPEN", "body": "What it is.",
+        "url": "https://github.com/acme/atlas/issues/5", "createdAt": "2026-10-01T10:00:00Z",
+        "updatedAt": "2999-01-01T00:00:00Z", "comments": []
+    }}});
+    user.gh_script(script);
+    a_round(&user);
+    let (id, mcp) = start(&user, "open the docs pull request");
+    // In Full, a comment is served at once rather than held for the user.
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#5", "body": "Taking it"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    eventually("its subject", || line(&user, &id)["subject"]["key"] == "#5");
+    wait_for_maya(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the group", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
+    cx.update(|window, cx| window.click(blocked_id(), cx));
+    settle(cx);
+
+    // The group changes where the row sits, not what it says: the subject on its first line, the
+    // key as its chip, its project in its meta as the group's rows say it.
+    let (first, scope) = shell.read_with(cx, |s, cx| {
+        let row = s.session(&id).unwrap().read(cx);
+        (row.first_line(), row.scope().map(str::to_owned))
+    });
+    assert_eq!(first.as_ref(), "The docs are missing");
+    assert_eq!(scope.as_deref(), Some("atlas"));
+    let key = cx.update(|window, _| {
+        window
+            .within(IN_GROUP)
+            .try_find(session_key_id(&id))
+            .and_then(|found| found.label().map(str::to_owned))
+    });
+    assert_eq!(key.as_deref(), Some("#5"));
 }
 
 /// One step of the window as the platform runs it; how many animation frames were asked.
