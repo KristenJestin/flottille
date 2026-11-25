@@ -2712,7 +2712,12 @@ impl Render for SettingsPage {
         let tab = self.tab.min(SECTIONS.len() - 1);
         // All machines is shown on this machine's page: it is what this machine's daemon keeps.
         let all = self.of.is_none() && of_all(cx) && self.has_hub(cx);
-        let tab = if all { SECTIONS.len() - 1 } else { tab };
+        // All machines shares General's sections only: its tab, whichever was shown.
+        let general = SECTIONS
+            .iter()
+            .position(|(key, _)| *key == "general")
+            .expect("Settings has a General tab");
+        let tab = if all { general } else { tab };
         let header = PageHeader::new("settings-header", "Settings");
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
@@ -2936,16 +2941,18 @@ impl SettingsPage {
         let all = crate::machines::AllMachines {
             chosen: of_all(cx),
             on_choose: Box::new(move |window, cx| {
-                cx.set_global(SettingsOfAll(true));
                 all_page
                     .update(cx, |page, cx| {
                         page.machine_menu = false;
                         cx.notify();
                     })
                     .ok();
+                // This machine is brought at once (`Shell::reach_then`), which chooses no All
+                // machines: chosen after it.
                 all_shell
                     .update(cx, |shell, cx| shell.choose_machine(None, window, cx))
                     .ok();
+                cx.set_global(SettingsOfAll(true));
             }),
         };
         let picker = (!choices.is_empty()).then(|| {
