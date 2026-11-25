@@ -120,6 +120,17 @@ is **never shown again**: no method, no client, no tool returns it, no event or 
 and an error about a call that carried it never repeats it. The window's field is masked, and empty
 again as soon as the secret is sent.
 
+**One form, one rule.** The window has a single form for an entry, and every place that opens it
+follows the rule above: a row of Settings, a row of a project's Vault tab, a connection review's
+"Edit entry", an agent's proposed edit, and a "New entry" (a project's Tracker or Vault tab, an
+agent's request, a connection request's "New entry…") whose name the vault already holds, because
+the entry was made since the place was drawn. Each opens as `Edit <name>`, its Secret field empty
+with "Leave empty to keep the current secret"; Save with it empty is `vault.set` without a
+`secret`, a typed one replaces it. "An entry needs a name and a secret" is said only of a name
+the vault does not hold, and only after a Save attempt. A name typed by hand in a new form that
+the vault holds is still a new entry: it asks its secret, and typing it replaces the old one, as
+before.
+
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
 message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
