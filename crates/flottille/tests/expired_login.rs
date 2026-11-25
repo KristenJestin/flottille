@@ -193,7 +193,8 @@ fn a_failed_root_whose_session_is_known_can_be_resumed() {
 #[test]
 fn a_session_that_cannot_start_at_all_still_ends() {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"open_error": EXPIRED}));
+    // Not a login: a login refused at the first open waits for the user (#1465).
+    user.fake_script(json!({"open_error": "something nobody knows broke"}));
     project(&user);
     let (id, after) = run(&user, "hello");
 
