@@ -1115,16 +1115,24 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
 - left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
-  machine of the user together (a session of another machine carries that machine's name on its
-  second line, `server`, greyed with `server offline since 22:14` while it is off,
-  `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
+  machine of the user together (a session of another machine carries that machine's mark alone on
+  its second line, never its name: its icon in its colour and the badge of its state, saying
+  `server · online` or `server · offline since 22:14` when hovered and in its label, the row
+  greyed while it is off, `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
   Add project choosing which, without anything else switching: the list stays this machine's, each
   machine has its own connections, kept open, and a page of another machine reads that machine
   only, `docs/remote.md`, "Built (#1271)"). **Each project row says where it lives**: with
   another machine paired, a mark after its name for every machine that has it (at the end of the row,
   before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
-  machine`. **A project several machines have is one row**: two projects are the same when the
+  machine`. **A machine's mark** is one component of the kit (`MachineMark`), drawn at three
+  sizes (a group's heading 16 px, a project's row 14 px, a session's second line 12 px): the
+  icon keeps the machine's colour, its identity, and a small badge on its corner says its state
+  by a **shape**, never by the machine's colour: a house for this machine, a filled green dot
+  online, a hollow ring offline (the icon greyed), an amber dot with an up arrow when it needs an
+  update, a dashed ring when this machine cannot say (#1249). A state that changes fades and
+  scales the badge over `PANEL`. The words are in the mark's tooltip and label only. A project
+  with nothing under it has no chevron, its title where the others' start. **A project several machines have is one row**: two projects are the same when the
   remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
   case of the host do not count; a project of several repositories matches when all of them
   match), whatever their names; a repository with no remote matches none. Two projects of one
@@ -1133,9 +1141,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
   "⋯" holds **Group by machine**, a switch (off, with "One machine" as its reason, until there is
   another machine; the menu is built once, so a machine that comes or goes never closes it): the list
-  becomes one foldable section per machine (its icon, its name and its state, `this machine` for
-  this one), each with the projects that machine has and its own sessions only, a project several
-  machines have under each of them; switched off, the one list comes back, and the rows move
+  becomes one foldable section per machine that runs agents (its mark and its name, the heading
+  ending with no words; a phone or a viewer, which holds no project, is no section), each with the
+  projects that machine has and its own sessions only, a project several machines have under each
+  of them, none repeating the mark of the section it is in; switched off, the one list comes back, and the rows move
   between the two over the sidebar's motion. The choice and each section's fold are kept by the
   daemon with the sidebar's folds (`window.get`, `sidebar`: `by_machine`, `machines`,
   `on_machines`), so every window of the machine shows the same arrangement. **The list is the
