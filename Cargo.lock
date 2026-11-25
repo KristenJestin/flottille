@@ -3097,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-76-away-ink.17#ed44bce9544c14fc1bda96be905655760a5349e6"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.17#6ffaf354a47c4efdff276c5c958d52b6501bc037"
 dependencies = [
  "gpui-kit",
  "qrcodegen",
