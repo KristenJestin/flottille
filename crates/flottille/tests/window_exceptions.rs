@@ -79,7 +79,7 @@ fn root(user: &User) -> (String, Mcp) {
 fn ask(mcp: &Mcp) -> u64 {
     let held = mcp.call(
         "run",
-        json!({"line": "git push --force origin app/w",
+        json!({"line": "git push --force origin HEAD:refs/heads/app/w",
             "exception": "a check refuses an old commit the squash drops"}),
     );
     held.text
@@ -197,6 +197,11 @@ fn the_exception_is_listed_on_its_session_and_can_be_withdrawn(cx: &mut TestAppC
         label(cx, &format!("exception-why-{agent}-force-push")).unwrap(),
         "a check refuses an old commit the squash drops"
     );
+    // What it covers: the branch the user allowed, no other.
+    assert_eq!(
+        label(cx, &format!("exception-covers-{agent}-force-push")).unwrap(),
+        "for the branch app/w"
+    );
     assert!(
         label(cx, &format!("exception-since-{agent}-force-push"))
             .unwrap()
@@ -302,7 +307,7 @@ fn the_exception_of_a_sub_agent_is_listed_on_the_session_with_its_holder(cx: &mu
     // The sub-agent asks; its parent forwards to the user, who allows it.
     let held = child_mcp.call(
         "run",
-        json!({"line": "git push --force origin app/w",
+        json!({"line": "git push --force origin HEAD:refs/heads/app/w",
             "exception": "a check refuses an old commit the squash drops"}),
     );
     let number: u64 = held

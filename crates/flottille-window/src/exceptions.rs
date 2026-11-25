@@ -257,4 +257,37 @@ mod tests {
             "rule": "force-push", "why": "w", "granted_at": 0}));
         assert_eq!(titled.holder(), "held by worker");
     }
+
+    #[test]
+    fn an_exception_says_which_branch_or_pull_request_it_covers() {
+        let row = |rule: &str, scope: serde_json::Value| {
+            ExceptionRow::of(&json!({"session": "a1", "rule": rule, "why": "w",
+                "granted_at": 0, "scope": scope}))
+        };
+        assert_eq!(
+            row("force-push", json!({"repository": ".", "branch": "app/w"})).covers(),
+            "for the branch app/w"
+        );
+        assert_eq!(
+            row(
+                "force-push",
+                json!({"repository": "api", "branch": "app/w"})
+            )
+            .covers(),
+            "for the branch app/w of api"
+        );
+        assert_eq!(
+            row(
+                "merge-blocked",
+                json!({"repository": ".", "branch": "app/login", "pull": 12,
+                    "head": "1111111111111111111111111111111111111111"})
+            )
+            .covers(),
+            "for pull request #12 of app/login at 1111111"
+        );
+        assert_eq!(
+            row("forge-state", json!({})).covers(),
+            "for any issue or pull request: no scope"
+        );
+    }
 }

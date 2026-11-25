@@ -154,14 +154,14 @@ fn exceptions(user: &User, agent: &str) -> Vec<String> {
 fn force_push(mcp: &Mcp, branch: &str) -> Answer {
     mcp.call(
         "run",
-        json!({"line": format!("git push --force origin {branch}")}),
+        json!({"line": format!("git push --force origin HEAD:refs/heads/{branch}")}),
     )
 }
 
 fn ask_force_push(mcp: &Mcp, branch: &str) -> Answer {
     mcp.call(
         "run",
-        json!({"line": format!("git push --force origin {branch}"), "exception": WHY}),
+        json!({"line": format!("git push --force origin HEAD:refs/heads/{branch}"), "exception": WHY}),
     )
 }
 
@@ -183,7 +183,10 @@ fn a_refused_action_asked_for_and_accepted_no_longer_stops_that_session() {
         .find(|request| request["number"] == asked)
         .unwrap();
     assert_eq!(request["class"], "base", "{request}");
-    assert_eq!(request["call"]["line"], "git push --force origin app/w");
+    assert_eq!(
+        request["call"]["line"],
+        "git push --force origin HEAD:refs/heads/app/w"
+    );
     let reasons: Vec<&str> = request["reasons"]
         .as_array()
         .unwrap()
@@ -658,7 +661,7 @@ fn the_reason_of_an_ask_is_one_line_of_a_bounded_length() {
     app(&user);
     workspace(&user, "w");
     let (_, mcp) = root(&user, "w");
-    let line = "git push --force origin app/w";
+    let line = "git push --force origin HEAD:refs/heads/app/w";
     for why in ["first line\nsecond line".to_owned(), "x".repeat(8_001)] {
         let answer = mcp.call("run", json!({"line": line, "exception": why}));
         refused_with_no_ask(&user, &answer);
@@ -750,4 +753,169 @@ fn one_rule_s_exception_never_lifts_another() {
     assert!(merged.error, "{}", merged.text);
     assert!(merged.text.contains("its checks fail"), "{}", merged.text);
     assert!(merges(&user).is_empty());
+}
+
+/// GitHub's pull request #12 of `app/login` into `main` at the head commit `head`, with these
+/// checks and this review decision.
+fn pull_at(head: &str, checks: Value, review: &str) -> Value {
+    json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login", "state": "OPEN",
+        "isDraft": false, "baseRefName": "main", "isCrossRepository": false,
+        "headRefName": "app/login", "headRefOid": head,
+        "url": "https://github.com/acme/app/pull/12", "reviewDecision": review,
+        "statusCheckRollup": checks}}}})
+}
+
+fn failing(name: &str) -> Value {
+    json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": "FAILURE"})
+}
+
+const READ_HEAD: &str = "1111111111111111111111111111111111111111";
+const NEW_HEAD: &str = "2222222222222222222222222222222222222222";
+
+/// The session's merge exception granted for #12 at `READ_HEAD`, its check `secrets` failing,
+/// and the merge it allowed done.
+fn merge_granted(user: &User, mcp: &Mcp) {
+    user.gh_script(pull_at(READ_HEAD, json!([failing("secrets")]), "APPROVED"));
+    let asked = held(&mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": WHY}),
+    ));
+    let card = reasons_of(user, asked)[0].clone();
+    assert!(
+        card.contains("1111111"),
+        "the head is not on the card: {card}"
+    );
+    answer(user, asked, "approval.approve");
+    assert_eq!(merges(user).len(), 1, "{:?}", merges(user));
+}
+
+#[test]
+fn a_merge_exception_never_covers_a_commit_pushed_after_it_was_allowed() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    let (_, mcp) = root(&user, "login");
+    merge_granted(&user, &mcp);
+
+    // A new commit is pushed: what the user allowed is not what would be merged.
+    user.gh_script(pull_at(NEW_HEAD, json!([failing("secrets")]), "APPROVED"));
+    let merged = mcp.call("forge", json!({"action": "merge", "repository": "."}));
+
+    assert!(merged.error, "{}", merged.text);
+    assert!(merged.text.contains("changed since"), "{}", merged.text);
+    assert_eq!(merges(&user).len(), 1, "{:?}", merges(&user));
+}
+
+#[test]
+fn a_merge_exception_never_covers_a_blocker_that_came_after_it_was_allowed() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    let (_, mcp) = root(&user, "login");
+    merge_granted(&user, &mcp);
+
+    // Same head, but a review now asks for changes: the user never read that.
+    user.gh_script(pull_at(
+        READ_HEAD,
+        json!([failing("secrets")]),
+        "CHANGES_REQUESTED",
+    ));
+    let merged = mcp.call("forge", json!({"action": "merge", "repository": "."}));
+
+    assert!(merged.error, "{}", merged.text);
+    assert!(merged.text.contains("changed since"), "{}", merged.text);
+    assert_eq!(merges(&user).len(), 1, "{:?}", merges(&user));
+    // Asked again, the new card says what blocks it now, and replaces the one held.
+    let asked = held(&mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": WHY}),
+    ));
+    let card = reasons_of(&user, asked)[0].clone();
+    assert!(card.contains("a review asks for changes"), "{card}");
+}
+
+#[test]
+fn a_second_ask_for_the_same_rule_replaces_the_held_exception_once_allowed() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(two_failing_pulls());
+    let (agent, mcp) = root(&user, "login");
+    let ask = json!({"action": "merge", "repository": ".", "exception": WHY});
+    let first = held(&mcp.call("forge", ask.clone()));
+    answer(&user, first, "approval.approve");
+
+    // The workspace switches to another branch, whose pull request is #13, and asks for it.
+    let folder = user.path("data/flottille/workspaces/app/login");
+    user.git(&folder, &["switch", "--quiet", "-c", "app/other"]);
+    user.git(
+        &folder,
+        &["update-ref", "refs/remotes/origin/app/other", "HEAD"],
+    );
+    let second = held(&mcp.call("forge", ask));
+    let card = reasons_of(&user, second)[0].clone();
+    assert!(card.contains("#13"), "{card}");
+    assert!(card.contains("replaces the exception for #12"), "{card}");
+
+    // Its Allow is never lost: #13 is merged past its checks, and the exception is #13's now.
+    let done = answer(&user, second, "approval.approve");
+    assert!(done.contains("was merged"), "{done}");
+    assert_eq!(
+        merges(&user)[1],
+        "pr merge 13 -R github.com/acme/app --squash --admin"
+    );
+    let listed = user
+        .call("exception.list", json!({"session": agent}))
+        .unwrap()["exceptions"]
+        .clone();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["scope"]["pull"], 13, "{listed}");
+}
+
+#[test]
+fn a_forge_state_exception_never_lets_a_comment_through_unjudged() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(failing_pull());
+    let (agent, mcp) = root(&user, "login");
+    set_mode(&user, &agent, "ask");
+
+    // A close with a comment is no change of state alone: no exception is asked for it.
+    let commented = mcp.call(
+        "forge",
+        json!({"action": "close", "repository": ".", "number": 12,
+            "comment": "Closed for good.", "exception": WHY}),
+    );
+    refused_with_no_ask(&user, &commented);
+
+    // Asked without a comment: the card says the exception has no scope.
+    let asked = held(&mcp.call(
+        "forge",
+        json!({"action": "close", "repository": ".", "number": 12, "exception": WHY}),
+    ));
+    let card = reasons_of(&user, asked)[0].clone();
+    assert!(card.contains("no scope"), "{card}");
+    answer(&user, asked, "approval.approve");
+    assert_eq!(exceptions(&user, &agent), ["forge-state"]);
+
+    // Held, a reopen with a comment is judged as before: in Ask, the user's.
+    held(&mcp.call(
+        "forge",
+        json!({"action": "reopen", "repository": ".", "number": 12,
+            "comment": "Reopened for the fix."}),
+    ));
+}
+
+#[test]
+fn a_forced_push_left_to_the_remote_s_push_setting_is_never_asked_as_an_exception() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    workspace(&user, "w");
+    let (_, mcp) = root(&user, "w");
+
+    // `remote.origin.push` could send a refspec with no destination anywhere.
+    let answer = mcp.call(
+        "run",
+        json!({"line": "git push --force origin app/w", "exception": WHY}),
+    );
+
+    refused_with_no_ask(&user, &answer);
+    assert!(answer.text.contains("refs/heads/"), "{}", answer.text);
 }

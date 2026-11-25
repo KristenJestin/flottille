@@ -627,12 +627,12 @@ mod tests {
     fn a_forced_push_of_the_agent_s_own_branch_is_the_only_push_an_exception_covers() {
         let own = place(Some("login"), "app/login");
         for line in [
-            "git push --force origin app/login",
-            "git push -f origin app/login",
-            "git push --force-with-lease origin app/login",
-            "git push --force-with-lease=app/login origin HEAD:app/login",
+            "git push --force origin app/login:refs/heads/app/login",
+            "git push -f origin HEAD:refs/heads/app/login",
+            "git push --force-with-lease origin app/login:refs/heads/app/login",
+            "git push --force-with-lease=app/login origin HEAD:refs/heads/app/login",
             "git push origin +HEAD:refs/heads/app/login",
-            "git push --quiet --force origin main:app/login",
+            "git push --quiet --force origin main:refs/heads/app/login",
         ] {
             assert_eq!(
                 rule_of(&own, &[], "run", &run(line)),
@@ -661,7 +661,11 @@ mod tests {
             // A remote that is a path or an address.
             "git push --force /tmp/elsewhere app/login",
             "git push --force git@host:x/y.git app/login",
-            "git push --force --receive-pack=x origin app/login",
+            "git push --force --receive-pack=x origin app/login:refs/heads/app/login",
+            // A destination left to the remote's push setting, which may send it elsewhere.
+            "git push --force origin app/login",
+            "git push -f origin HEAD:app/login",
+            "git push --force origin +app/login",
         ] {
             assert_eq!(rule_of(&own, &[], "run", &run(line)), None, "{line}");
         }
@@ -671,7 +675,7 @@ mod tests {
                 &own,
                 &[],
                 "run",
-                &json!({"line": "git push --force origin app/login", "notify": "ready"})
+                &json!({"line": "git push --force origin HEAD:refs/heads/app/login", "notify": "ready"})
             ),
             None
         );
@@ -680,13 +684,13 @@ mod tests {
             None
         );
         // The project folder, or a workspace on a protected branch, has no own branch to force.
-        let line = run("git push --force origin main");
+        let line = run("git push --force origin HEAD:refs/heads/main");
         assert_eq!(rule_of(&place(None, ""), &[], "run", &line), None);
         assert_eq!(
             rule_of(&place(Some("main"), "main"), &[], "run", &line),
             None
         );
-        let line = run("git push --force origin next/2.0");
+        let line = run("git push --force origin HEAD:refs/heads/next/2.0");
         assert_eq!(
             rule_of(&place(Some("x"), "next/2.0"), &[], "run", &line),
             None
@@ -697,10 +701,7 @@ mod tests {
     fn closing_reopening_or_relabelling_and_nothing_else_is_a_change_of_state() {
         let own = place(Some("login"), "app/login");
         for (tool, args) in [
-            (
-                "forge",
-                json!({"action": "close", "repository": ".", "comment": "Done."}),
-            ),
+            ("forge", json!({"action": "close", "repository": "."})),
             ("forge", json!({"action": "reopen", "number": 3})),
             (
                 "forge",
@@ -729,6 +730,15 @@ mod tests {
             ),
             ("forge", json!({"action": "edit", "number": 3})),
             ("forge", json!({"action": "comment", "comment": "x"})),
+            // A comment's text is judged, whatever exception the session holds.
+            (
+                "forge",
+                json!({"action": "close", "number": 3, "comment": "Done."}),
+            ),
+            (
+                "tickets",
+                json!({"action": "reopen", "ticket": "#4", "comment": "Again."}),
+            ),
             (
                 "tickets",
                 json!({"action": "edit", "ticket": "#4", "assignees": ["a"]}),
@@ -829,7 +839,7 @@ mod tests {
     #[test]
     fn a_base_or_resumed_branch_of_the_place_is_never_forced_by_an_exception() {
         let own = place(Some("login"), "app/login");
-        let line = run("git push --force origin app/login");
+        let line = run("git push --force origin HEAD:refs/heads/app/login");
         assert_eq!(rule_of(&own, &[], "run", &line), Some(Rule::ForcePush));
         let guarded = ["integration".to_owned(), "app/login".to_owned()];
         assert_eq!(rule_of(&own, &guarded, "run", &line), None);
@@ -847,7 +857,7 @@ mod tests {
             branch: "app/login".into(),
             pull: None,
         };
-        let line = "git push -f origin app/login";
+        let line = "git push -f origin HEAD:refs/heads/app/login";
         assert_eq!(
             push_scope(&own, &[], &json!({"line": line, "repository": "api"})),
             Some(scope("api"))
@@ -859,8 +869,12 @@ mod tests {
         // Switched to another branch, the place's own is that one: a push of it is no other's.
         let switched = place(Some("login"), "app/x");
         assert_eq!(
-            push_scope(&switched, &[], &json!({"line": "git push -f origin app/x"}))
-                .map(|s| s.branch),
+            push_scope(
+                &switched,
+                &[],
+                &json!({"line": "git push -f origin HEAD:refs/heads/app/x"})
+            )
+            .map(|s| s.branch),
             Some("app/x".into())
         );
         assert_eq!(push_scope(&switched, &[], &json!({"line": line})), None);
