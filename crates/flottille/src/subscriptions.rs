@@ -349,10 +349,19 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     let (prompted, prompted_at) = last_of("agent.prompted");
     let asked = seq_of("agent.asked") > prompted;
     let reported = !asked && seq_of("agent.reported") > prompted;
-    // What the turn asked of the user: each request is said once, in the turn that made it.
+    // What the turn asked of the user: each request is said once, in the turn that made it; one
+    // its tree forwarded to the user, in the first turn that ended since.
+    let since = daemon
+        .read(|store| store.last_agent_events(&session.id, "agent.turn_ended", 2))
+        .ok()
+        .and_then(|ends| ends.get(1).map(|end| end.at))
+        .unwrap_or(0);
     let requests: Vec<UserRequest> = waiting_for_the_user(daemon, &session.id)
         .into_iter()
-        .filter(|request| request.at >= prompted_at)
+        .filter(|request| match request.by {
+            None => request.at >= prompted_at,
+            Some(_) => request.at > since,
+        })
         .collect();
     let plain = !asked && !reported && requests.is_empty();
     let user_spoke = followed_the_user(daemon, &session.id);
@@ -485,10 +494,13 @@ pub(crate) struct UserRequest {
     kind: &'static str,
     /// The request's number: a held call's, or the ask's for a vault entry.
     number: u64,
-    /// When the session asked it, in milliseconds.
+    /// When the session asked it, in milliseconds; one of its tree's, when it reached the user.
     at: u64,
-    /// What is asked and why, masked and cut: never a secret, an entry is only named.
+    /// What is asked and why, masked and cut: never a secret, an entry is only named. One of its
+    /// tree's names the agent that asked it.
     what: String,
+    /// The agent of its tree that asked it, when not the session itself.
+    by: Option<String>,
 }
 
 impl UserRequest {
@@ -524,38 +536,79 @@ pub(crate) fn request_said(request: &approval::Request) -> String {
 }
 
 /// The requests of `session` that wait for the user, oldest first: its calls held for them (a
-/// connection's write asked among them), and the vault entries it asked for.
+/// connection's write asked among them), and the vault entries it asked for; and those the agents
+/// below it forwarded to the user or asked them for, each naming who asked.
 pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRequest> {
+    let mut requests = requests_of(daemon, session, None);
+    for agent in crate::tree::descendants(daemon, session) {
+        let asker = asked_by(&agent, session);
+        requests.extend(requests_of(daemon, &agent.id, Some((&agent.id, &asker))));
+    }
+    requests.sort_by_key(|request| request.at);
+    requests
+}
+
+/// How a request of `agent`, below `session`, says who asked it.
+fn asked_by(agent: &Agent, session: &str) -> String {
+    match agent.parent.as_deref() == Some(session) {
+        true => format!("asked by its child {}", crate::tree::named(agent)),
+        false => format!("asked by {}, below its child", crate::tree::named(agent)),
+    }
+}
+
+/// The requests `agent` made that wait for the user; `by`, the agent and how it is said, when it
+/// is not the followed session itself.
+fn requests_of(daemon: &Daemon, agent: &str, by: Option<(&str, &str)>) -> Vec<UserRequest> {
     let env = std::env::vars_os().collect();
     let said = |what: String| {
+        let what = match by {
+            Some((_, asker)) => format!("{asker}: {what}"),
+            None => what,
+        };
         let what = secrets::mask(&what, &env);
         match what.chars().count() > REQUEST_CHARS {
             true => format!("{}…", what.chars().take(REQUEST_CHARS).collect::<String>()),
             false => what,
         }
     };
+    // A request forwarded up reached the user when its last forward gave it to them.
+    let forwarded = || {
+        daemon
+            .read(|store| store.last_agent_events(agent, "approval.forwarded", 64))
+            .unwrap_or_default()
+    };
     let mut requests: Vec<UserRequest> = daemon
-        .read(|store| store.pending_requests_of(session))
+        .read(|store| store.pending_requests_of(agent))
         .unwrap_or_default()
         .into_iter()
         .filter(|request| request.held_by == approval::USER)
         .map(|request| UserRequest {
             kind: kind_of(&request.tool),
             number: request.number,
-            at: request.created_at,
+            at: match request.forwards.is_empty() {
+                true => request.created_at,
+                false => forwarded()
+                    .iter()
+                    .find(|event| {
+                        event.data["number"] == request.number
+                            && event.data["held_by"] == approval::USER
+                    })
+                    .map_or(request.created_at, |event| event.at),
+            },
             what: said(request_said(&request)),
+            by: by.map(|(id, _)| id.to_owned()),
         })
         .collect();
     let asks = daemon
-        .read(|store| crate::vault::asked_by(store, session))
+        .read(|store| crate::vault::asked_by(store, agent))
         .unwrap_or_default();
     requests.extend(asks.into_iter().map(|(number, at, name, why)| UserRequest {
         kind: "vault",
         number,
         at,
         what: said(format!("a vault entry asked: {name}: {why}")),
+        by: by.map(|(id, _)| id.to_owned()),
     }));
-    requests.sort_by_key(|request| request.at);
     requests
 }
 
@@ -572,28 +625,44 @@ fn answered_id(following: &str, kind: &str, number: u64) -> String {
 }
 
 /// The user answered the request `number`, of `kind` (`call`, `connection` or `vault`), of the
-/// agent `session`, which asked `what`: each agent that leads it is told `the user <how>`, with
-/// what wakes it next; nothing rings it for this.
+/// agent `asker`, which asked `what`: each agent that leads it, or the session of its tree it is
+/// below, here or on another machine, is told `the user <how>`, once, with what wakes it next;
+/// nothing rings it for this.
 pub fn request_answered(
-    daemon: &Daemon,
-    session: &str,
+    daemon: &Arc<Daemon>,
+    asker: &str,
     kind: &str,
     number: u64,
     what: &str,
     how: &str,
 ) {
-    let followers = followers(daemon, session);
-    if followers.is_empty() {
+    let root = crate::tree::root_of(daemon, asker);
+    let Ok(Some(session)) = daemon.read(|store| store.agent(&root)) else {
+        return;
+    };
+    let followers = followers(daemon, &root);
+    let remote =
+        crate::across::remote_led(daemon, &session) && crate::across::followed(daemon, &session);
+    if followers.is_empty() && !remote {
         return;
     }
-    let Ok(Some(agent)) = daemon.read(|store| store.agent(session)) else {
-        return;
+    let whose = match root == asker {
+        true => format!("its {kind} request #{number}"),
+        false => {
+            let Ok(Some(agent)) = daemon.read(|store| store.agent(asker)) else {
+                return;
+            };
+            format!(
+                "the {kind} request #{number} {}",
+                asked_by(&agent, &root).replacen("asked by", "of", 1)
+            )
+        }
     };
     let env = std::env::vars_os().collect();
     let body = secrets::mask(
         &format!(
-            "Session {}: its {kind} request #{number}, {what}, is answered: the user {how}.",
-            crate::tree::named(&agent)
+            "Session {}: {whose}, {what}, is answered: the user {how}.",
+            crate::tree::named(&session)
         ),
         &env,
     );
@@ -605,6 +674,11 @@ pub fn request_answered(
             Some(answered_id(&follower.id, kind, number)),
             &body,
         );
+    }
+    if remote {
+        // Its pilot there has no following here: the id is the request's, told once.
+        let id = format!("{REQUEST_ANSWERED}-{kind}-{number}");
+        crate::across::tell_once(daemon, &root, REQUEST_ANSWERED, &id, &body);
     }
 }
 
@@ -1147,7 +1221,14 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
                         let session = s.target["session"].as_str().unwrap_or_default();
                         listed["waits"] = waiting_for_the_user(daemon, session)
                             .iter()
-                            .map(|r| json!({"kind": r.kind, "number": r.number, "what": r.what}))
+                            .map(|r| {
+                                let mut wait =
+                                    json!({"kind": r.kind, "number": r.number, "what": r.what});
+                                if let Some(by) = &r.by {
+                                    wait["by"] = json!(by);
+                                }
+                                wait
+                            })
                             .collect();
                     }
                     listed

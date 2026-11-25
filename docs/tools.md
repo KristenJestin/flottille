@@ -1939,16 +1939,21 @@ made it (#1305): a call held for their approval (`request #31, a call held for a
 <its reasons>`), a connection's write asked (`request #32, a connection asked: Add the connection
 notes …`) and a vault entry asked for (`request #345, a vault entry asked: staging-login: <the
 agent's reason>`, the entry named, never a secret), masked and cut at 300 characters each, under `It
-waits for the user, who answers it where they are`. A turn that made one says so (`ended a turn: it
+waits for the user, who answers it where they are`. A request an agent below the session (its
+child, or one further down) forwarded to the user or asked them for is said the same way, naming
+who asked (`request #33, asked by its child "Reader" (agent …): a call held for approval: …`),
+once, in the first wake of the session after it reached the user (#1470). A turn that made one says so (`ended a turn: it
 waits for the user.` when it neither asked nor reported) and wakes the pilot even when it wrote to
 it with `session_send`. **The pilot is told, it does not answer**: the request stays the user's, in
 their inbox and on the session's card, and no tool lets the pilot allow, deny or fill it. When the
 user answers it (allowed, denied, an entry set or dismissed, a connection written with values of
-their own), each pilot of the session is told with what wakes it next: a delivery
+their own), each pilot of the session, on this machine or another (through the link, as the wake),
+is told with what wakes it next: a delivery
 `session-request-answered` (`Session "Login" (agent …): its vault request #345, a vault entry
 asked: staging-login, is answered: the user dismissed it.`), queued, which rings nobody: one per
 request, its kind (`call`, `connection`, `vault`) in its id and its words, since two kinds count
-their numbers apart. An entry the session's project cannot see is never said: the pilot is told
+their numbers apart. A request of an agent below the session names it (`the call request #33 of
+its child "Reader" (agent …), …`). An entry the session's project cannot see is never said: the pilot is told
 the request is `answered`. A session nobody
 leads is not changed by any of it. A turn cancelled because a delivery was not taken in time wakes nobody: the turn that
 takes that delivery does, once.

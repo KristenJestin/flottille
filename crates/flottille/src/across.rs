@@ -42,7 +42,7 @@ const CALLED: [&str; 6] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 12] = [
+const KINDS: [&str; 13] = [
     "child-report",
     "child-question",
     "child-asks",
@@ -55,6 +55,7 @@ const KINDS: [&str; 12] = [
     "session-turn-ended",
     DETACHED,
     crate::tree::LED_INTEGRATED,
+    crate::subscriptions::REQUEST_ANSWERED,
 ];
 
 /// The kind of the delivery that tells a pilot of another machine the user detached the session
@@ -521,6 +522,23 @@ pub(crate) fn tell(
     };
     tell_with(daemon, &launch, None, kind, body, urgency, back, ended);
     true
+}
+
+/// `tell`, under `id`: the same id told twice is kept, and stored there, once.
+pub(crate) fn tell_once(daemon: &Arc<Daemon>, agent: &str, kind: &str, id: &str, body: &str) {
+    if let Some(launch) = launch_here(daemon, agent) {
+        let id = Some(id.to_owned());
+        tell_with(
+            daemon,
+            &launch,
+            id,
+            kind,
+            body,
+            approval::BETWEEN_TURNS,
+            false,
+            false,
+        );
+    }
 }
 
 /// Tells the agent of another machine that leads `agent` that a turn of it ended with nothing to
@@ -1180,14 +1198,18 @@ fn delivered(
         )
     })?;
     let body = delivered_body(daemon, &agent, &deliver.body);
-    deliveries::deliver(
-        daemon,
-        &deliver.agent,
-        &deliver.kind,
-        Some(id),
-        &body,
-        &deliver.urgency,
-    )
+    // The user's answer there rings no one, as here: it is read with what wakes the lead next.
+    match deliver.kind == crate::subscriptions::REQUEST_ANSWERED {
+        true => deliveries::queue(daemon, &deliver.agent, &deliver.kind, Some(id), &body),
+        false => deliveries::deliver(
+            daemon,
+            &deliver.agent,
+            &deliver.kind,
+            Some(id),
+            &body,
+            &deliver.urgency,
+        ),
+    }
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
     if decided {
         let state = match deliver.ended {

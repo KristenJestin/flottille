@@ -2709,7 +2709,8 @@ source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
 end of its own, and, for a following alone, `waits`: what that session waits for the user, oldest
-first, each `{"kind", "number", "what"}`, `kind` being `call` (a call held for approval),
+first, each `{"kind", "number", "what"}`, with `by`, the agent's id, for one an agent below the
+session asked (its `what` naming it), `kind` being `call` (a call held for approval),
 `connection` (a connection's write asked) or `vault` (a vault entry asked for, `number` the ask's),
 `what` what it asks in a few words, masked and cut (`a vault entry asked: staging-login: to sign in
 to staging`, the entry named, never a secret), `[]` when nothing of the user's waits), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
