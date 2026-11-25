@@ -353,3 +353,50 @@ fn a_value_of_a_device_made_a_viewer_is_dropped_and_the_hub_goes_quiet() {
             .unwrap();
     });
 }
+
+#[test]
+fn the_answer_says_where_the_change_went() {
+    let (mut hub, pc, _server) = pc_and_server(User::new());
+
+    assert_eq!(share(&pc, "pc", json!({"name": SAM}))["hub"], "given");
+
+    hub.stop();
+    pc.wait_until("the hub is out of reach", |remote| {
+        remote["hub"]["state"] == "unreachable"
+    });
+    let later = share(&pc, "pc", json!({"name": "Later"}));
+    assert_eq!(later["hub"], "later", "{later}");
+    assert_eq!(later["all"]["name"], "Later", "{later}");
+}
+
+#[test]
+fn a_value_too_large_to_seal_is_refused_on_its_machine() {
+    let (hub, pc, _server) = pc_and_server(User::new());
+    // Within the notes' 8,000 characters, but each escaped in the signed request, then again in
+    // what is sealed: past what the hub keeps.
+    let notes = "\u{1}".repeat(8_000);
+
+    let answer = pc.raw(&signed(
+        &pc.device(),
+        "large",
+        "pc",
+        "about.share",
+        json!({"notes": notes}),
+    ));
+
+    assert!(error_of(&answer).contains("too large"), "{answer}");
+    assert_eq!(about(&pc)["all"]["notes"], "", "nothing is kept");
+    assert!(!hub_copy(&hub).contains("about.notes"));
+}
+
+#[test]
+fn a_name_shared_is_kept_trimmed_on_every_machine() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+
+    let shown = share(&pc, "pc", json!({"name": "  Sam  "}));
+
+    assert_eq!(shown["all"]["name"], SAM, "{shown}");
+    until(&server, "the server has the name, trimmed", |about| {
+        about["all"]["name"] == SAM
+    });
+}
