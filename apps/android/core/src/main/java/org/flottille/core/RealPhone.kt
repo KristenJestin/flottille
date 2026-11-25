@@ -156,7 +156,16 @@ internal fun ViewState.toPhoneView(): PhoneView {
             Project(
                 project.name,
                 project.sessions.map {
-                    SessionRow(it.machine, it.agent, it.title, it.state, it.last.toLong(), (it.machine to it.agent) in waiting)
+                    SessionRow(
+                        it.machine,
+                        it.agent,
+                        it.title,
+                        it.state,
+                        it.last.toLong(),
+                        (it.machine to it.agent) in waiting,
+                        created = it.created.toLong(),
+                        pilot = it.pilot,
+                    )
                 },
             )
         },

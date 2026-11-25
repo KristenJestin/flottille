@@ -25,7 +25,7 @@ class PhoneViewTest {
         )
 
     private fun session(machine: String, agent: String) =
-        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL)
+        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL, created = 3uL, pilot = "")
 
     private fun state(
         machines: List<MachineView> = emptyList(),

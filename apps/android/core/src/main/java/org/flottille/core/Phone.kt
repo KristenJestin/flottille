@@ -8,7 +8,11 @@ enum class MachineState { Online, Offline, NeedsUpdate }
 /** A runner of the user's. [since] is when it came to be in [state] (milliseconds since the epoch). */
 data class Machine(val name: String, val state: MachineState, val since: Long, val why: String = "")
 
-/** A session of a machine, tagged with it; [waiting] when it needs the user (a request or a question is open). */
+/**
+ * A session of a machine, tagged with it; [waiting] when it needs the user (a request or a question
+ * is open). [created] orders the list, never [last]; [pilot] is the session of the agent that leads
+ * it on the same machine, empty when no agent does.
+ */
 data class SessionRow(
     val machine: String,
     val agent: String,
@@ -16,6 +20,8 @@ data class SessionRow(
     val state: String,
     val last: Long,
     val waiting: Boolean = false,
+    val created: Long = 0,
+    val pilot: String = "",
 )
 
 /**

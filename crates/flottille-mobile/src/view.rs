@@ -29,7 +29,8 @@ pub struct ViewState {
     /// The members of the user's list, in the order they were added: this device among them.
     pub members: Vec<MemberView>,
     /// The sessions of every machine, by project: a project of the same name on two machines is
-    /// one group. Projects by name, so that groups never move; sessions by last exchange.
+    /// one group. Projects by name, so that groups never move; sessions newest first, as the
+    /// window's sidebar lists them, so that a row never moves when its session reports.
     pub projects: Vec<ProjectView>,
     pub conversation: Option<ConversationView>,
     pub requests: Vec<RequestView>,
@@ -93,6 +94,11 @@ pub struct SessionView {
     pub state: String,
     /// When it last exchanged, in milliseconds since the Unix epoch.
     pub last: u64,
+    /// When it was made, in milliseconds since the Unix epoch: what orders the list.
+    pub created: u64,
+    /// The session of the agent that leads it, on the same machine (the root of that agent's
+    /// tree); empty for a session no agent leads.
+    pub pilot: String,
 }
 
 /// The conversation of the session the app follows (`Core::follow`): its latest page of events,
@@ -232,6 +238,9 @@ pub(crate) struct View {
     members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
+    /// The parent of each agent that has one, by machine and agent: what names a pilot's session
+    /// when a child of its tree leads.
+    parents: HashMap<(String, String), String>,
     requests: BTreeMap<(String, u64), Held>,
     asks: BTreeMap<(String, u64), AskView>,
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
@@ -275,6 +284,9 @@ struct Session {
     title: String,
     state: String,
     last: u64,
+    created: u64,
+    /// The agent that leads it (`led_by`), of the same machine.
+    led_by: Option<String>,
 }
 
 /// The tunnels that ended kept in `tunnels_ended`, the newest.
@@ -363,6 +375,7 @@ impl View {
     pub(crate) fn forget(&mut self, machine: &str) {
         self.machines.retain(|view| view.name != machine);
         self.sessions.retain(|(of, _), _| of != machine);
+        self.parents.retain(|(of, _), _| of != machine);
         self.requests.retain(|(of, _), _| of != machine);
         self.asks.retain(|(of, _), _| of != machine);
         if self.followed.as_ref().is_some_and(|f| f.machine == machine) {
@@ -431,12 +444,16 @@ impl View {
     /// for the user (`approval.list`).
     pub(crate) fn load(&mut self, machine: &str, agents: &Value, requests: &Value) {
         for agent in agents["agents"].as_array().into_iter().flatten() {
-            if !is_session(agent) {
-                continue;
-            }
             let Some(id) = agent["id"].as_str() else {
                 continue;
             };
+            if let Some(parent) = agent["parent"].as_str() {
+                self.parents
+                    .insert((machine.to_owned(), id.to_owned()), parent.to_owned());
+            }
+            if !is_session(agent) {
+                continue;
+            }
             let last = ["exchanged_at", "active_at", "created_at"]
                 .iter()
                 .find_map(|field| agent[*field].as_u64())
@@ -448,6 +465,8 @@ impl View {
                     title: text(&agent["title"]),
                     state: text(&agent["state"]),
                     last,
+                    created: agent["created_at"].as_u64().unwrap_or(last),
+                    led_by: agent["led_by"].as_str().map(str::to_owned),
                 },
             );
         }
@@ -567,6 +586,11 @@ impl View {
             self.keep_followed(machine, &agent, event);
         }
         let key = (machine.to_owned(), agent.clone());
+        if name == "agent.created"
+            && let Some(parent) = data["parent"].as_str()
+        {
+            self.parents.insert(key.clone(), parent.to_owned());
+        }
         match name {
             "agent.created" if is_session(data) => {
                 self.sessions.insert(
@@ -576,8 +600,15 @@ impl View {
                         title: text(&data["title"]),
                         state: "starting".to_owned(),
                         last: at,
+                        created: at,
+                        led_by: data["led_by"].as_str().map(str::to_owned),
                     },
                 );
+            }
+            "agent.detached" => {
+                if let Some(session) = self.sessions.get_mut(&key) {
+                    session.led_by = None;
+                }
             }
             "agent.titled" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
@@ -741,6 +772,19 @@ impl View {
         }
     }
 
+    /// The root of `agent`'s tree on `machine`: the session it belongs to.
+    fn root_of(&self, machine: &str, agent: &str) -> String {
+        let mut id = agent.to_owned();
+        // A tree is a few levels deep; the bound only guards against a loop in bad data.
+        for _ in 0..64 {
+            match self.parents.get(&(machine.to_owned(), id.clone())) {
+                Some(parent) => id = parent.clone(),
+                None => break,
+            }
+        }
+        id
+    }
+
     /// The state the app draws.
     pub(crate) fn state(&self) -> ViewState {
         let mut projects: BTreeMap<&str, Vec<SessionView>> = BTreeMap::new();
@@ -754,12 +798,18 @@ impl View {
                     title: session.title.clone(),
                     state: session.state.clone(),
                     last: session.last,
+                    created: session.created,
+                    pilot: session
+                        .led_by
+                        .as_deref()
+                        .map(|lead| self.root_of(machine, lead))
+                        .unwrap_or_default(),
                 });
         }
         let projects = projects
             .into_iter()
             .map(|(name, mut sessions)| {
-                sessions.sort_by(|a, b| b.last.cmp(&a.last).then(a.agent.cmp(&b.agent)));
+                sessions.sort_by(|a, b| b.created.cmp(&a.created).then(a.agent.cmp(&b.agent)));
                 ProjectView {
                     name: name.to_owned(),
                     sessions,
@@ -1230,6 +1280,99 @@ mod tests {
             ),
             ("delivery", "brief", "Fix the timer")
         );
+    }
+
+    /// The ids of the sessions of the first project, from the top of the list down.
+    fn order(view: &View) -> Vec<String> {
+        view.state().projects[0]
+            .sessions
+            .iter()
+            .map(|session| session.agent.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_that_reports_keeps_its_place() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "a1", "parent": null, "depth": 0, "title": "Old", "project": "app",
+                "created_at": 100, "exchanged_at": 100},
+            {"id": "a2", "parent": null, "depth": 0, "title": "New", "project": "app",
+                "created_at": 200, "exchanged_at": 200},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // The older one reports: its state and its last exchange change, its place does not.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.prompted", "at": 900, "data": {"agent": "a1"}}),
+        );
+        let state = view.state();
+        let a1 = &state.projects[0].sessions[1];
+        assert_eq!(
+            (a1.state.as_str(), a1.last, a1.created),
+            ("working", 900, 100)
+        );
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // A new one is the newest: it comes first.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1000, "data": {"agent": "a3",
+                "parent": null, "depth": 0, "title": "Newest", "project": "app"}}),
+        );
+        assert_eq!(order(&view), ["a3", "a2", "a1"]);
+    }
+
+    #[test]
+    fn a_led_session_names_the_session_of_its_pilot() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "p1", "parent": null, "depth": 0, "title": "Ship", "project": "app",
+                "created_at": 1},
+            {"id": "c1", "parent": "p1", "depth": 1, "title": "Plan", "project": "app"},
+            // Led by a child of the pilot's tree: its row sits under that tree's root.
+            {"id": "l1", "parent": null, "depth": 0, "title": "Export", "project": "app",
+                "created_at": 2, "led_by": "c1"},
+            {"id": "l2", "parent": null, "depth": 0, "title": "Invoice", "project": "app",
+                "created_at": 3, "led_by": "p1"},
+            {"id": "u1", "parent": null, "depth": 0, "title": "Mine", "project": "app",
+                "created_at": 4, "led_by": null},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 5, "data": {"agent": "l3",
+                "parent": null, "depth": 0, "title": "Refunds", "project": "app",
+                "led_by": "p1"}}),
+        );
+        let pilots = |view: &View| -> Vec<(String, String)> {
+            view.state().projects[0]
+                .sessions
+                .iter()
+                .map(|session| (session.agent.clone(), session.pilot.clone()))
+                .collect()
+        };
+        let pair = |a: &str, p: &str| (a.to_owned(), p.to_owned());
+        assert_eq!(
+            pilots(&view),
+            [
+                pair("l3", "p1"),
+                pair("u1", ""),
+                pair("l2", "p1"),
+                pair("l1", "p1"),
+                pair("p1", ""),
+            ]
+        );
+
+        // Detached, it is the user's alone: under no pilot.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.detached", "at": 6,
+                "data": {"agent": "l2", "from": "p1"}}),
+        );
+        assert_eq!(pilots(&view)[2], pair("l2", ""));
     }
 
     #[test]
