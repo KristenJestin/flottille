@@ -141,6 +141,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `about.show` | read |
 | `about.set` | drive |
 | `about.reset` | drive |
+| `about.share` | drive |
 | `rules.show` | read |
 | `rules.set` | drive |
 | `rules.reset` | drive |
