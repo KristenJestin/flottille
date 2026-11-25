@@ -1351,8 +1351,9 @@ pictures decoded and written off the runtime's threads.
   "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
-  "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). Beside
+  "leads": {<agent>: <unfolded>}, "ended": <unfolded>, "blocked": <unfolded>}`, each node as the
+  user left it; one that is not in it keeps its default (a project and a lead unfolded, the "Ended"
+  and "Blocked by others" groups folded). Beside
   them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
   start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
   arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
@@ -2552,7 +2553,7 @@ the session has not taken yet, `null` when nothing waits; `resumable`: whether `
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
-a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9); `doing` a sentence of what it does
+a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9; `blocked`: `null`, or while the agent is at rest (between turns, asking nothing) and one of its open subscriptions waits on a person, `{"by", "why", "since"}`: `by` the names of the people (a pull request's reviewers asked and not given yet, other than the user; a ticket's assignees other than the user), as the forge or the tracker names them, never an account id or an e-mail, `why` what for (`review of #12`, `ticket ABC-1`), `since` when it came to rest with that subscription, in milliseconds; a subscription to checks, a run, a wake or a session waits on no one, `docs/design.md` §10, "Blocked by others", and `agent.blocked` says each change); `doing` a sentence of what it does
 (`working`, `idle`, `compacting the conversation`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then

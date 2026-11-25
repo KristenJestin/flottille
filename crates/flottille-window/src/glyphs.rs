@@ -19,6 +19,8 @@ pub const PICTURE: Icon = Icon::Lucide("image");
 /// A large pasted text of a message, attached as a file: its chip in the text.
 pub const TEXT_FILE: Icon = Icon::Lucide("file-text");
 pub const MILESTONE: Icon = Icon::Lucide("milestone");
+/// Someone else: what a session blocked by a person waits on.
+pub const PERSON: Icon = Icon::Lucide("user-round");
 /// Changing how a device is drawn.
 pub const LOOK: Icon = Icon::Lucide("palette");
 /// A device's icon, by its word in the member list (`desktop`, `laptop`, `server`, `phone`,
@@ -61,7 +63,8 @@ gpui_kit::assets::icon_assets!(
         Smartphone,
         Tablet,
         Palette,
-        ShieldCheck
+        ShieldCheck,
+        UserRound
     ]
 );
 
@@ -118,6 +121,7 @@ mod tests {
             device("phone"),
             device("tablet"),
             LOOK,
+            PERSON,
         ] {
             assert!(
                 Assets.load(&icon.path()).unwrap().is_some(),

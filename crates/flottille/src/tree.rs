@@ -3147,6 +3147,9 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "exchanged_at": agent.exchanged_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        // At rest, it waits on a person through a subscription (`blocked`): who, what for,
+        // since when; `null` otherwise.
+        "blocked": crate::blocked::of(daemon, agent),
         "gate_mode": crate::judge::mode(daemon, &agent.id),
         "resumable": agent.state.is_final() && resume_refusal(daemon, agent).is_none(),
         "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
