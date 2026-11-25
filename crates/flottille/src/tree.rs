@@ -3160,6 +3160,9 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "compacting": crate::compaction::running(daemon, &agent.id),
         // It waits for its quota's reset (`docs/design.md` §5.9): when, and whether it resumes.
         "quota": crate::quota::shown(daemon, agent),
+        // What it is about, derived from what it took in hand and kept as last said
+        // (`subject::said`): `null` while it held nothing.
+        "subject": crate::subject::said(daemon, agent),
     })
 }
 

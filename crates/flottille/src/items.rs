@@ -1042,6 +1042,9 @@ async fn read_round(
     if !flush(daemon, &project.name, &mut items, &mut events)? {
         return Ok(None);
     }
+    if first {
+        crate::subject::project_read(daemon, &project.name);
+    }
     if sweep || first {
         daemon
             .items

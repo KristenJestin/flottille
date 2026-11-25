@@ -1276,7 +1276,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   follows the session, the card folds away and the question comes again as the user's own, "<session>
   asks you", with its answer box. Each session takes
   **two lines**:
-  the first is its title and, at the right, **one mark**, chosen in this order: its state
+  the first is **what it is about** (below), else its title, and, at the right, **one mark**,
+  chosen in this order: its state
   (running, needs the user, waiting) when it has one, else a small dot when something new was
   written in it since it was last opened (an agent's message, a report, a delivery that woke it, a
   ticket or a pull request an agent changed), else how long ago it was active; and no text badge.
@@ -1291,9 +1292,30 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   tooltip): cut with an ellipsis inside the row, the whole in the line's tooltip, unfolding and
   fading in when the wait begins, fading from the old words to the new when they change, and
   folding away when it ends, with the row's height unchanged. The pull request is the one the
-  project page last read for that workspace (`workspace.forge`): the sidebar asks the forge for
-  none, so a workspace whose project page was never opened in this window shows its name alone,
-  and the pull request fades in when it becomes known. The mark says its words under the pointer
+  daemon gives with what the session is about (below), found among the items it keeps by its
+  branch, so a workspace whose project page was never opened shows it too; else the one the
+  project page last read for that workspace (`workspace.forge`). The sidebar asks the forge for
+  none, and the pull request fades in when it becomes known.
+  **What a session is about** is derived by the daemon, never asked of the forge nor of the
+  agent: titles drift (given in the first turn, they no longer say what a session works on once
+  it moved to the next ticket), what it took in hand does not. The latest ticket it took in hand
+  wins: its workspace's linked ticket, then one it changed (`tickets` `comment`, `edit`, `close`,
+  `reopen`, `status`, `log_time`) or subscribed to; a pull request it opened (`forge create`) is
+  the subject when it holds no ticket, and beside the ticket when it does; a ticket it only read
+  (`tickets show`) counts only while nothing it holds is open, and a search never moves it. Once
+  all it held is closed or merged it is free: `Free · nothing in hand`, in faint ink, its page
+  saying what it last held (`#5 done · #12 merged`). An ended session keeps the subject it had
+  when it ended. A session that never held anything has no subject and shows
+  its title. The row's first line says the ticket's key as a chip, then its title (else `#12` and
+  the pull request's title, else `Free · nothing in hand`); the session's own title stays in the
+  line's tooltip and the page's header. A title the user gave (Rename…) wins: it keeps the first
+  line and the key goes to the second, before the place. The session's page says, under its
+  header, the chips of its ticket and of its pull request with its checks' mark, then one faint
+  line, `What it is about, from <where it comes from>.` (`the workspace's linked ticket`, `a ticket
+  it changed`, `a pull request it opened`…), so that a wrong guess can be understood; its
+  workspace stays in the header and its runs in the rail. A subject that changes fades in over
+  the old one, the key's chip unfolds and fades in, folds away and fades out, or goes from the
+  first line to the second with a fade, and the row's height never changes. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
   A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for
