@@ -4688,16 +4688,13 @@ mod tests {
             one family tool with actions (as forge and tickets), guidance read on demand (as \
             skill_read), or tool search for rarely used families. A tool cannot be withheld by \
             context.";
-        // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
-        // definition's size (2,915 characters, measured on that branch), before it is listed
-        // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 58,155 characters of the 60,000,
-        // a margin of 1,845 (measured on this branch, round 3, 2026-11-24; child 46,993, leaf
-        // 40,643). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
-        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back, and the
-        // `propose` action of `vault` (listed short too) took 118. The limits are not raised, and
-        // no tool is trimmed.
-        const ROUTINE: usize = 2_915;
+        // The roots list is measured with the tool `vault` (an entry exists) and `routine`, which
+        // is in the list: 58,399 characters of the 60,000 with `routine` whole (measured on this
+        // branch, round 6, 2026-11-25). Round 5 failed with 61,314 because `routine` was counted
+        // twice, by the list and by an allowance made before it joined the list. Round 2 left
+        // 130, and `workspace` took 190 with its `machine` argument (#1371), which made 60,060;
+        // `agent_launch` is listed short, which gave 2,023 back, and the `propose` action of
+        // `vault` (listed short too) took 118. The limits are not raised, and no tool is trimmed.
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
             ("a root", true, false),
@@ -4706,11 +4703,10 @@ mod tests {
         ] {
             let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, true);
             let names = served(&claude::PROVIDER, &list);
-            let coming = if root { 1 } else { 0 };
             assert!(
-                names.len() + coming <= TOOLS,
+                names.len() <= TOOLS,
                 "{} tools for {role}, at most {TOOLS}. {advice}",
-                names.len() + coming
+                names.len()
             );
             let chars: usize = names
                 .into_iter()
@@ -4718,8 +4714,7 @@ mod tests {
                     let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
                     tool.unwrap().len()
                 })
-                .sum::<usize>()
-                + coming * ROUTINE;
+                .sum::<usize>();
             biggest = biggest.max(chars);
         }
         assert!(
