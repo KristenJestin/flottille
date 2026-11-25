@@ -84,6 +84,7 @@ fun FlottilleApp(
     onSharedPlaced: () -> Unit = {},
     open: SessionKey? = null,
     tunnels: TunnelHost = TunnelHost.None,
+    background: Background = Background.None,
 ) {
     FlottilleTheme {
         val palette = LocalPalette.current
@@ -188,6 +189,7 @@ fun FlottilleApp(
                     BackHandler { settings = false }
                     SettingsScreen(
                         view = view,
+                        background = background,
                         onBack = { settings = false },
                         onRemove = {
                             scope.launch {

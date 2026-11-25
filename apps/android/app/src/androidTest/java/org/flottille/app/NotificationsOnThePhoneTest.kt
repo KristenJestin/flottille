@@ -56,6 +56,7 @@ class NotificationsOnThePhoneTest {
         manager.cancelAll()
         phone = PlayedPhone(server, joined("controller"))
         application.phone = phone
+        application.notices = Notices(context)
     }
 
     @After
