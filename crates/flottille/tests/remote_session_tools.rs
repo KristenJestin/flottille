@@ -1266,6 +1266,28 @@ fn a_session_id_two_machines_list_is_refused_naming_both() {
 }
 
 #[test]
+fn an_exception_asked_on_a_call_that_another_machine_answers_is_refused_with_why() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (_root, mcp) = caller(&pc, &server, "ask");
+
+    // Exceptions are each machine's own: the agent is told so, and nothing reaches the server.
+    let answer = mcp.call(
+        "agent_stop",
+        json!({"agent_id": NIGHT, "exception": "it is stuck on a check"}),
+    );
+
+    assert!(answer.error, "not refused: {}", answer.text);
+    assert!(
+        answer.text.contains("exception") && answer.text.contains("machine"),
+        "{}",
+        answer.text
+    );
+    a_while();
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert_eq!(server.agent(&night)["state"], "idle");
+}
+
+#[test]
 fn a_stand_in_is_not_a_session_this_machine_s_agents_can_reach() {
     let (_hub, pc, server, night) = night_lead("runner");
     let (root, mcp) = caller(&pc, &server, "full");

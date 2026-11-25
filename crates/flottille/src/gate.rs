@@ -70,8 +70,11 @@ pub enum Class {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
-    /// Why, one sentence each.
+    /// Why, one sentence each: the base ones first.
     pub reasons: Vec<String>,
+    /// How many of `reasons`, from the first, are base: what an exception lifts is told apart from
+    /// what stays (`exceptions.rs`).
+    pub base: usize,
     pub class: Class,
     /// What the card shows: a call, or an action said in words.
     pub kind: Kind,
@@ -257,10 +260,12 @@ impl Found {
     /// The verdict: base wins over to judge, and nothing found is harmless.
     fn verdict(self, kind: Kind) -> Verdict {
         if !self.base.is_empty() {
+            let base = self.base.len();
             let mut reasons = self.base;
             reasons.extend(self.judge);
             return Verdict::Ask(Ask {
                 reasons,
+                base,
                 class: Class::Base,
                 kind,
             });
@@ -268,6 +273,7 @@ impl Found {
         if !self.judge.is_empty() {
             return Verdict::Ask(Ask {
                 reasons: self.judge,
+                base: 0,
                 class: Class::Judge,
                 kind,
             });
@@ -901,9 +907,7 @@ fn forge(call: &Call) -> Verdict {
                     .into(),
             );
         };
-        found.base(format!(
-            "it merges a pull request whose checks or review block it, waived: {why}"
-        ));
+        found.base(format!("{WAIVED}: {why}"));
     }
     found.verdict(Kind::Call)
 }
@@ -1259,10 +1263,7 @@ fn run(call: &Call) -> Verdict {
                 (entry.len() == 1 && names.contains(&entry[0].as_str()))
                     || layers.iter().any(|layer| starts_anywhere(layer, entry))
             }) {
-                found.base(format!(
-                    "the project's never list holds {}",
-                    entry.join(" ")
-                ));
+                found.base(format!("{NEVER_HOLDS} {}", entry.join(" ")));
             }
         }
         None => found.base(
@@ -3397,13 +3398,22 @@ fn push(rest: &[String]) -> Line {
         };
         if forced {
             return Line::Base(format!(
-                "git push {word} forces the push or deletes on the remote: it can rewrite or \
-                 remove what others have"
+                "git push {word} {FORCES}: it can rewrite or remove what others have"
             ));
         }
     }
-    Line::Judge("git push sends commits to a remote".into())
+    Line::Judge(PUSH.into())
 }
+
+/// Why a push is held: a push any session may be judged for.
+pub const PUSH: &str = "git push sends commits to a remote";
+/// What a forced push, or a deletion on the remote, is held for: the rule an exception lifts for
+/// the agent's own branch (`exceptions.rs`).
+pub const FORCES: &str = "forces the push or deletes on the remote";
+/// How the reason of a line the project's never list holds starts.
+pub const NEVER_HOLDS: &str = "the project's never list holds";
+/// How the reason of a merge the user waives starts.
+pub const WAIVED: &str = "it merges a pull request whose checks or review block it, waived";
 
 /// Whether a `git commit` rewrites the last commit: `--amend`, or a fixup that amends or
 /// rewords. Git takes any unambiguous start of a long option.

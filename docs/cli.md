@@ -1617,7 +1617,8 @@ Answer with `flottille approve <n>` or `flottille deny <n>`.
 ### `flottille approve <number> [--discard]`
 
 Allows the request: its call is checked again, performed, and its result handed to the agent. It
-allows that call once; nothing is remembered for the next one. `--discard`, for an agent's removal
+allows that call once; nothing is remembered for the next one, but for a request that asks an
+exception, whose rule no longer stops that session (`flottille exception list`). `--discard`, for an agent's removal
 of a workspace only, removes it even with the work its card says would be lost.
 
 ```
@@ -1632,6 +1633,30 @@ Denies the request: the agent is told nothing was done.
 ```
 $ flottille deny 2
 Request #2 is denied; agent ce034b165403 is told nothing was done.
+```
+
+### `flottille exception list <session> [--json]`
+
+The exceptions the session holds (`docs/design.md` §7.3): each rule of the gate you lifted for it
+when you allowed a request its agent asked with `exception`, what it lets the session do, the
+request, and the agent's reason. `--json` prints `exception.list`. The window shows them in the
+session's rail, under Exceptions, with those of its sub-agents, each with who holds it.
+
+```
+$ flottille exception list ce034b165403
+force-push: force a push of its own branch (request #4)
+    a check refuses an old commit that holds sample data; the squashed commit does not
+Take one back with `flottille exception withdraw <session> <rule>`.
+```
+
+### `flottille exception withdraw <session> <rule>`
+
+Takes the exception back: the rule stops the session again from its next call
+(`exception.withdraw`). Its Withdraw in the session's rail does the same.
+
+```
+$ flottille exception withdraw ce034b165403 force-push
+The exception force-push is withdrawn: the rule stops agent ce034b165403 again.
 ```
 
 ## The window

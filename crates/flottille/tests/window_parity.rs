@@ -200,6 +200,9 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("approvals", Window(&["approval.list"])),
     ("approve", Window(&["approval.approve"])),
     ("deny", Window(&["approval.deny"])),
+    // The session's rail, under Exceptions: each with its Withdraw.
+    ("exception list", Window(&["exception.list"])),
+    ("exception withdraw", Window(&["exception.withdraw"])),
     // ── The window and the doors ─────────────────────────────────────────────────────────────
     ("window", Script("opens the window")),
     (

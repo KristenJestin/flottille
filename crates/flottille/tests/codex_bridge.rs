@@ -537,6 +537,35 @@ fn a_workspace_plan_s_sign_in_or_none_is_refused_before_any_thread() {
     }
 }
 
+/// What `codex app-server` 0.166.0 really answers `account/read` with when no login is there
+/// (seen on a real run, #875): `account: null, requiresOpenaiAuth: true`. The daemon reads the
+/// code, never the text, so the refusal carries `unauthorized` as a turn's 401 does; a plan
+/// Flottille refuses is no login gone, and carries none.
+#[test]
+fn a_codex_with_no_login_at_open_is_tagged_unauthorized() {
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"account": Value::Null}));
+    let mut bridge = Bridge::start(&user);
+
+    let (refused, _) = bridge.request("session/new", new_session(&user, &[]));
+
+    let refused = refused.unwrap_err();
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("Codex is not signed in"),
+        "{refused}"
+    );
+    assert_eq!(refused["data"]["code"], "unauthorized", "{refused}");
+    assert!(sent(&user, "thread/start").is_empty());
+
+    user.codex_script(json!({"account":
+        {"type": "chatgpt", "email": "a@example.com", "planType": "enterprise"}}));
+    let (plan, _) = bridge.request("session/new", new_session(&user, &[]));
+    assert!(plan.unwrap_err()["data"].is_null());
+}
+
 #[test]
 fn a_resumed_session_resumes_its_thread_with_a_fresh_server_and_an_unknown_one_fails() {
     let user = User::with_fake_codex();

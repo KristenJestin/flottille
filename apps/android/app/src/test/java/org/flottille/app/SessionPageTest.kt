@@ -104,6 +104,8 @@ class SessionPageTest {
                 shared = shared,
             )
         }
+        // The app opens on Needs you; the sessions are a tab away.
+        rule.onNodeWithTag("tab:sessions").performClick()
     }
 
     private fun open(agent: String = "a1") {

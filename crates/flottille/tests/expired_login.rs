@@ -269,3 +269,52 @@ fn messages_queued_behind_a_failed_turn_wait_for_the_next_message() {
         assert!(text.contains(words), "{words} goes with it: {text}");
     }
 }
+
+/// What the session's state line says when Codex's login is gone.
+const CODEX_LOGIN_LINE: &str = "Codex's login expired: sign in again (run codex login)";
+
+/// Codex, signed in when its first process opens the session, signed out when the next one
+/// resumes it: a login refused at open, as `codex app-server` answers it with no login
+/// (`account: null, requiresOpenaiAuth: true`, seen on a real run, #875).
+#[test]
+fn a_resume_refused_for_no_login_at_open_says_sign_in() {
+    let user = User::with_fake_codex();
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    project(&user);
+    user.codex_script(json!({"turns": [{"when": "boom", "do": [{"die": 3}]}]}));
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, &["agent.turn_ended"]);
+    let before = show(&user, &id);
+    // Its process dies; the next one is signed out when it opens the thread again.
+    user.codex_script(json!({"account": Value::Null}));
+    user.call("agent.send", json!({"agent": id, "message": "boom"}))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while show(&user, &id)["state_reason"]
+        .as_str()
+        .is_none_or(|reason| !reason.contains("sign in again"))
+        && show(&user, &id)["state"] != "failed"
+    {
+        assert!(std::time::Instant::now() < deadline, "{}", show(&user, &id));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let agent = show(&user, &id);
+    assert_eq!(agent["state"], "idle", "the session stays: {agent}");
+    assert_eq!(agent["state_reason"], CODEX_LOGIN_LINE);
+    assert_eq!(agent["native_id"], before["native_id"]);
+    assert_eq!(agent["ended_at"], Value::Null);
+    let listed = in_short(&user, &id);
+    assert_eq!(listed["state"], "idle", "it stays in the sidebar");
+    assert_eq!(listed["state_reason"], CODEX_LOGIN_LINE);
+    // Nothing starts it again in a loop before the user writes.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let opens = user
+        .codex_received()
+        .into_iter()
+        .filter(|e| e["received"]["method"] == "account/read")
+        .count();
+    assert_eq!(opens, 2, "one open, one refused resume");
+    assert_eq!(show(&user, &id)["state"], "idle");
+}
