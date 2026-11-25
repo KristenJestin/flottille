@@ -765,8 +765,8 @@ Each reader says the three levels in its own answer: `rules.show` (no `project`)
 `review.show` and `compaction.show`'s `guidance` add `own` (the machine has its file) and `all` (all
 machines' text, `""` while they say none, `null` without a hub), and their `source` is `all` while
 the machine has none of its own and all machines say one. `tool_results.show` and `appearance.show`
-add `own` (their keys the machine holds itself) and `all` (the values of all machines, the keys
-they say, `null` without a hub); `tool_results.set` and `appearance.set` change only the keys they
+add, while the machine has a hub, `own` (their keys the machine holds itself) and `all` (the values
+of all machines, the keys they say); `tool_results.set` and `appearance.set` change only the keys they
 are given, and `reset` (a list of keys) drops the machine's own, which then follows all machines.
 `extension.list`'s settings add `shared`, `all` (the value of all machines, `null` when there is
 none), and their `value` is the machine's own, else all machines', else the default.

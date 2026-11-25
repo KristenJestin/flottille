@@ -280,14 +280,18 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
 }
 
 /// The settings as the protocol says them: the limit is a number of characters, or `"off"`.
-/// Nothing is null but `all`: a client leaves null fields out of what it sends. `own` lists the
-/// keys this machine holds itself, `all` the values of all machines (`null` without a hub; a key
-/// they say nothing of is left out).
+/// Nothing is null: a client leaves null fields out of what it sends. With a hub, `own` lists the
+/// keys this machine holds itself and `all` the values of all machines (the keys they say); with
+/// none, the answer is what it was before them.
 fn said(paths: &Paths, settings: &Settings) -> Value {
     let limit = match settings.limit {
         Some(limit) => json!(limit),
         None => json!("off"),
     };
+    let mut said = json!({"limit": limit, "unchanged": settings.unchanged});
+    if crate::shared::at(paths).is_none() {
+        return said;
+    }
     let own = own(paths).unwrap_or_default();
     let own: Vec<&str> = [
         ("limit", own.limit.is_some()),
@@ -297,22 +301,21 @@ fn said(paths: &Paths, settings: &Settings) -> Value {
     .filter(|(_, held)| *held)
     .map(|(key, _)| key)
     .collect();
-    let all = crate::shared::at(paths).map(|_| {
-        let mut all = serde_json::Map::new();
-        if let Some(limit) = crate::settings_share::said_of(paths, LIMIT_NAME)
-            && let Ok(limit) = parsed_limit(&limit)
-        {
-            all.insert(
-                "limit".into(),
-                json!(limit.map_or(json!("off"), |limit| json!(limit))),
-            );
-        }
-        if let Some(unchanged) = crate::settings_share::said_of(paths, UNCHANGED_NAME) {
-            all.insert("unchanged".into(), json!(unchanged == "true"));
-        }
-        Value::Object(all)
-    });
-    json!({"limit": limit, "unchanged": settings.unchanged, "own": own, "all": all})
+    let mut all = serde_json::Map::new();
+    if let Some(limit) = crate::settings_share::said_of(paths, LIMIT_NAME)
+        && let Ok(limit) = parsed_limit(&limit)
+    {
+        all.insert(
+            "limit".into(),
+            limit.map_or(json!("off"), |limit| json!(limit)),
+        );
+    }
+    if let Some(unchanged) = crate::settings_share::said_of(paths, UNCHANGED_NAME) {
+        all.insert("unchanged".into(), json!(unchanged == "true"));
+    }
+    said["own"] = json!(own);
+    said["all"] = Value::Object(all);
+    said
 }
 
 /// A result that was cut: what its call is recorded with.

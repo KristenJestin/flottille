@@ -389,4 +389,22 @@ mod tests {
         assert_eq!(later.open(&pc), None);
         assert!(!later.is_signed());
     }
+
+    #[test]
+    fn the_most_values_at_their_largest_fit_the_line_the_hub_sends_them_in() {
+        let (_a, pc) = machine();
+        // A value as large as a copy may be, for the one machine that holds it.
+        let widest = vec![b'x'; SEALED_LIMIT - 1024];
+        let sealed = Sealed::seal("rules", 1, &widest, &[pc.public()], &pc).unwrap();
+        assert!(sealed.size() <= SEALED_LIMIT, "{}", sealed.size());
+
+        let line = serde_json::to_vec(&crate::ToDevice::Shared(vec![sealed; MOST_VALUES])).unwrap();
+
+        assert!(
+            line.len() < crate::LINE_LIMIT,
+            "{} bytes of values, a line holds {}",
+            line.len(),
+            crate::LINE_LIMIT
+        );
+    }
 }

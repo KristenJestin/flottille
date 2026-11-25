@@ -94,9 +94,13 @@ fn read(paths: &Paths) -> Result<Appearance, String> {
     })
 }
 
-/// What the window is told: the theme and the shade it shows, the keys this machine holds itself
-/// (`own`), and the values of all machines (`all`, `null` while it has no hub).
+/// What the window is told: the theme and the shade it shows and, with a hub, the keys this
+/// machine holds itself (`own`) and the values of all machines (`all`).
 fn said(paths: &Paths, appearance: Appearance) -> Value {
+    let mut said = json!({"theme": appearance.theme, "shade": appearance.shade});
+    if crate::shared::at(paths).is_none() {
+        return said;
+    }
     let own = own(paths).unwrap_or_default();
     let held: Vec<&str> = [
         ("theme", own.theme.is_some()),
@@ -106,11 +110,12 @@ fn said(paths: &Paths, appearance: Appearance) -> Value {
     .filter(|(_, held)| *held)
     .map(|(key, _)| key)
     .collect();
-    let all = crate::shared::at(paths).map(|_| match all(paths) {
+    said["own"] = json!(held);
+    said["all"] = match all(paths) {
         Some(shade) => json!({"shade": shade}),
         None => json!({}),
-    });
-    json!({"theme": appearance.theme, "shade": appearance.shade, "own": held, "all": all})
+    };
+    said
 }
 
 #[derive(Deserialize)]

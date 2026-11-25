@@ -86,6 +86,20 @@ fn every_method_the_sources_name_is_catalogued() {
         "about.name",
         "about.pronouns",
         "about.notes",
+        "judge.guidance",
+        "compaction.guidance",
+        "review.guidance",
+        "tool_results.limit",
+        "tool_results.unchanged",
+        "appearance.shade",
+        "specs.language",
+        "specs.mode",
+        "autosubscriptions.created_pull",
+        "autosubscriptions.branch_pull",
+        "autosubscriptions.ticket",
+        "review.passes",
+        // An event, said in `docs/protocol.md` ("The settings methods").
+        "settings.changed",
         // A git setting a push the gate let through keeps of the repository's (`push_folder`).
         "remote.pushdefault",
     ];
