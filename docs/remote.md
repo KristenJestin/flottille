@@ -1443,9 +1443,11 @@ As built (#818):
   question`), its questions said whole, and the requests of the session and of its children that
   wait for the user there. When that user answers one, the pilot is told, once, as a pilot of the
   same machine is (`session-request-answered`, queued there, ringing nobody: `docs/tools.md`,
-  "Following a session", #1470): one message of the launch waits for its machine at a time, the
-  latest listing every answer not sent yet, as a plain turn's end is kept. Only a `led` launch
-  takes one.
+  "Following a session", #1470): each is a message of its own while that machine is linked;
+  while it is off, one message of the launch waits for it at a time, the latest listing every
+  answer not sent yet (the newest that fit, when they do not all fit), replacing the one waiting
+  in the same write, so that it is kept even when as many messages wait as may. Only a `led`
+  launch takes one.
 - When the pilot's machine links again, each led session it leads here sends it one
   `session-meanwhile` delivery: each question it asked the user while that machine was off, with
   the user's answer or `not answered yet`; kept, ordered and sent once as every delivery

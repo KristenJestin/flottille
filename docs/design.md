@@ -365,9 +365,10 @@ the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole, and the requests that wait for the user and no wake said yet (a call
 held, a connection asked, a vault entry asked for), its own and those its children forwarded to
-the user or asked them for, each with its number, what it asks and who asked: the pilot is told, the user answers, and how
-they answered is queued for the pilot's next wake, here or on another machine
-(`session-request-answered`, `docs/tools.md`, "Following a session"). It is a following, a subscription that has no end of its own (§5.6,
+the user or asked them for, each with its number, what it asks and who asked: the pilot is
+told, the user answers, and how they answered is queued for the pilot's next wake, here or on
+another machine (`session-request-answered`, `docs/tools.md`, "Following a session"). It is a
+following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
 without the user pause it. A session led by a pilot is part of its job: **it ends with
 its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
