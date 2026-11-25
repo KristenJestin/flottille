@@ -3642,4 +3642,218 @@ mod tests {
         assert_eq!(said, "the link to laptop was lost: closed");
         assert_eq!(on_kept.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    /// One side of two machines that dialled each other at once, each its own `Remote`: its end
+    /// of the link it dialled, and of the one it accepted, neither linked yet.
+    struct Side {
+        remote: Arc<Remote>,
+        _endpoint: Endpoint,
+        dialled: Link,
+        accepted: Link,
+    }
+
+    impl Side {
+        /// Its end of the link the other side keeps too (the one the lower key dialled), and of
+        /// the one both let go, each with whether this side dialled it.
+        fn kept_and_lost(&self, lower: bool) -> ((Link, bool), (Link, bool)) {
+            let (dialled, accepted) =
+                ((self.dialled.clone(), true), (self.accepted.clone(), false));
+            if lower {
+                (dialled, accepted)
+            } else {
+                (accepted, dialled)
+            }
+        }
+    }
+
+    /// Two machines, each trusting the other as `other`, linked both ways: the lower key's first.
+    async fn both_ways(folder: &Path) -> (Side, Side) {
+        let one = MachineKey::load_or_make(&folder.join("one.key")).unwrap();
+        let two = MachineKey::load_or_make(&folder.join("two.key")).unwrap();
+        let (lower, higher) = if one.public().as_bytes() < two.public().as_bytes() {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        let mut ports =
+            flottille_link::relays_in_memory(&[lower.public(), higher.public()]).into_iter();
+        let ends = [&lower, &higher].map(|key| {
+            let endpoint = Endpoint::new(key).unwrap();
+            endpoint.through(ports.next().unwrap());
+            endpoint
+        });
+        let dial = async |from: &Endpoint, to: &Endpoint, key: &MachineKey| {
+            let accepting = to.clone();
+            let accepted = tokio::spawn(async move {
+                let accepting = accepting.accept().await.unwrap();
+                accepting.handshake(&hello(), "other").await.unwrap()
+            });
+            let dialled = from
+                .connect(key.public(), Traffic::Machine, &hello(), "other")
+                .await
+                .unwrap();
+            (dialled, accepted.await.unwrap())
+        };
+        let (lower_dialled, higher_accepted) = dial(&ends[0], &ends[1], &higher).await;
+        let (higher_dialled, lower_accepted) = dial(&ends[1], &ends[0], &lower).await;
+        let side = |name: &str, other: &MachineKey, endpoint: &Endpoint, dialled, accepted| {
+            let place = folder.join(name);
+            std::fs::create_dir_all(&place).unwrap();
+            write_json(
+                &place.join(PEERS_FILE),
+                &Peers {
+                    machines: vec![Peer {
+                        name: "other".to_owned(),
+                        key: other.public(),
+                    }],
+                },
+            )
+            .unwrap();
+            Side {
+                remote: Arc::new(Remote::new(
+                    endpoint.clone(),
+                    place,
+                    Arc::new(|_: &str, _| {}),
+                )),
+                _endpoint: endpoint.clone(),
+                dialled,
+                accepted,
+            }
+        };
+        (
+            side("lower", &higher, &ends[0], lower_dialled, lower_accepted),
+            side("higher", &lower, &ends[1], higher_dialled, higher_accepted),
+        )
+    }
+
+    /// A request one machine sends on the link both let go, which it alone holds yet, while the
+    /// other holds both: answered, by the other's own serving, whatever the order the other took
+    /// its two links in (`kept_first`) and whichever key is the lower.
+    async fn a_request_on_the_link_let_go_is_answered(kept_first: bool) {
+        for receiver_lower in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (lower, higher) = both_ways(dir.path()).await;
+            let (receiver, sender) = if receiver_lower {
+                (lower, higher)
+            } else {
+                (higher, lower)
+            };
+            let (kept, lost) = receiver.kept_and_lost(receiver_lower);
+            let order = if kept_first {
+                [kept, lost]
+            } else {
+                [lost, kept]
+            };
+            for (link, dialled) in order {
+                receiver.remote.linked(link, "other".to_owned(), dialled);
+            }
+            let ((kept, kept_dialled), (lost, lost_dialled)) =
+                sender.kept_and_lost(!receiver_lower);
+            sender
+                .remote
+                .linked(lost.clone(), "other".to_owned(), lost_dialled);
+            let (remote, taken) = (sender.remote.clone(), lost.clone());
+            let sending = tokio::spawn(async move {
+                remote
+                    .send(
+                        &taken,
+                        &Message::Machine(MachineMessage::Addresses(Vec::new())),
+                    )
+                    .await
+            });
+            // The link kept reaches the sender a moment later.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sender.remote.linked(kept, "other".to_owned(), kept_dialled);
+
+            let sent = tokio::time::timeout(Duration::from_secs(15), sending)
+                .await
+                .expect("the request is answered")
+                .unwrap();
+            assert_eq!(
+                sent.map_err(|error| error.to_string()),
+                Ok(json!({})),
+                "kept first: {kept_first}, the receiver's key the lower: {receiver_lower}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_on_a_link_that_lost_as_the_new_one_is_answered_on_the_kept_one() {
+        a_request_on_the_link_let_go_is_answered(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_request_on_a_link_that_lost_as_the_old_one_is_answered_on_the_kept_one() {
+        a_request_on_the_link_let_go_is_answered(false).await;
+    }
+
+    /// A daemon on temporary folders, with no remote of its own.
+    fn a_daemon(dir: &Path) -> Arc<Daemon> {
+        let paths = Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        let store = flottille_core::store::Store::open_in_memory().unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    #[tokio::test]
+    async fn a_delivery_kept_for_a_machine_sent_on_the_link_it_let_go_goes_on_the_kept_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let twice = dialled_twice(dir.path()).await;
+        let daemon = a_daemon(&dir.path().join("daemon"));
+        daemon.set_link(Some(Ok(twice.remote.clone())));
+        let _ = twice.remote.daemon.set(Arc::downgrade(&daemon));
+        let machine: String = twice
+            .ours
+            .peer()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let message = MachineMessage::Addresses(vec!["kept for laptop".to_owned()]);
+        daemon
+            .write(|store| {
+                store
+                    .keep_outgoing(&flottille_core::store::Outgoing {
+                        seq: 0,
+                        id: "delivery-1".to_owned(),
+                        machine: machine.clone(),
+                        name: "laptop".to_owned(),
+                        launch: String::new(),
+                        message: serde_json::to_value(&message).unwrap(),
+                        back: false,
+                        at: 0,
+                    })
+                    .map(|()| ((), None))
+            })
+            .unwrap();
+        // The other machine saw both links first, let this one go, and serves it still.
+        twice.theirs_of_ours.retire(LINKED_ALREADY);
+        let on_ours = answering(twice.theirs_of_ours.clone());
+        let on_kept = answering(twice.theirs_of_kept.clone());
+        // Linked, the link sends what was kept for that machine: turned away there.
+        twice
+            .remote
+            .linked(twice.ours.clone(), "laptop".to_owned(), true);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        twice
+            .remote
+            .linked(twice.kept.clone(), "laptop".to_owned(), false);
+
+        let count = |taken: &std::sync::atomic::AtomicUsize| {
+            taken.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        while count(&on_kept) == 0 && tokio::time::Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!((count(&on_ours), count(&on_kept)), (0, 1));
+        let kept = daemon.read(|store| store.outgoing(Some(&machine))).unwrap();
+        assert_eq!(kept.len(), 0);
+    }
 }
