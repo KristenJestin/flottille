@@ -444,3 +444,36 @@ fn a_default_slot_names_only_the_ready_providers() {
     let gives = review_default(&user, "bugs_model")["gives"].clone();
     assert_eq!(gives.as_object().unwrap().len(), 1, "{gives}");
 }
+
+/// A Codex with no login answers its account read with `account: null` (#875): its models are
+/// not listed, and the provider says why in its own sign-in line, not in the bridge's words.
+#[test]
+fn the_models_of_a_signed_out_codex_say_sign_in() {
+    let user = User::with_fake_codex().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": Value::Null}));
+    assert!(user.run(&["developer", "on"]).status.success());
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    let log = user.path("state/flottille/developer.log");
+    eventually("the failure in the developer log", || {
+        std::fs::read_to_string(&log).is_ok_and(|text| text.contains("\"outcome\":\"failed\""))
+    });
+
+    let codex = listed(&user, "codex");
+    assert_eq!(codex["models"], Value::Null, "{codex}");
+    assert_eq!(
+        codex["models_sign_in"], "Codex's login expired: sign in again (run codex login)",
+        "{codex}"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    let said: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|l: &Value| l["kind"] == "models" && l["outcome"] == "failed")
+        .collect();
+    assert_eq!(said.len(), 1, "{text}");
+    assert_eq!(
+        said[0]["error"], "Codex's login expired: sign in again (run codex login)",
+        "never the bridge's text"
+    );
+}

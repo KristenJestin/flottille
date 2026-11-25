@@ -318,3 +318,64 @@ fn a_resume_refused_for_no_login_at_open_says_sign_in() {
     assert_eq!(opens, 2, "one open, one refused resume");
     assert_eq!(show(&user, &id)["state"], "idle");
 }
+
+/// Codex with no login the first time its agent opens a session: `session/new` is refused as a
+/// login refused at open is, not as a session that cannot start (#1465).
+#[test]
+fn a_first_session_refused_for_no_login_says_sign_in() {
+    let user = User::with_fake_codex();
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    project(&user);
+    user.codex_script(json!({"account": Value::Null}));
+    let (id, _) = run(&user, "hello");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while show(&user, &id)["state_reason"]
+        .as_str()
+        .is_none_or(|reason| !reason.contains("sign in again"))
+        && show(&user, &id)["state"] != "failed"
+    {
+        assert!(std::time::Instant::now() < deadline, "{}", show(&user, &id));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let agent = show(&user, &id);
+    assert_eq!(agent["state"], "idle", "it does not fail: {agent}");
+    assert_eq!(agent["state_reason"], CODEX_LOGIN_LINE);
+    assert_eq!(agent["ended_at"], Value::Null);
+    let listed = in_short(&user, &id);
+    assert_eq!(listed["state"], "idle", "it stays in the sidebar");
+    assert_eq!(listed["state_reason"], CODEX_LOGIN_LINE);
+    // Nothing starts it again in a loop before the user writes.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let opens = user
+        .codex_received()
+        .into_iter()
+        .filter(|e| e["received"]["method"] == "account/read")
+        .count();
+    assert_eq!(opens, 1, "one open, refused, not asked again");
+    assert_eq!(show(&user, &id)["state"], "idle");
+}
+
+/// Claude with no login: its `initialize` and the opening of the session succeed, and the first
+/// turn ends with the kind `authentication_failed` and its real words (#875). Covered by the
+/// turn's reading of a login gone, which a first session goes through as any other.
+#[test]
+fn a_claude_first_session_with_no_login_says_sign_in() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [
+        {"when": "hello", "do": [], "error": EXPIRED, "error_kind": "authentication_failed"}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+
+    let events = events_until(&user, &id, after, &["agent.released", "agent.failed"]);
+
+    let names: Vec<&str> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(!names.contains(&"agent.failed"), "{names:?}");
+    assert_eq!(events.last().unwrap()["name"], "agent.released");
+    let agent = show(&user, &id);
+    assert_eq!(agent["state"], "idle", "the session stays: {agent}");
+    assert_eq!(agent["state_reason"], LOGIN_LINE);
+    assert_eq!(agent["ended_at"], Value::Null);
+}
