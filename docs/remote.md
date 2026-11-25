@@ -3084,6 +3084,9 @@ on a real phone, by hand, and reported.
   has no `ended_at`).
 
 ## Open questions
+- **A renamed session's row on the phone gains a line for its key** (#1488): the phone's row has a
+  second line only for a pilot or an ended session, not the window's two, so a renamed session that
+  has a key is one line higher than the others, and that line unfolds.
 
 1. **The transport's library**: decided in #811, QUIC (`quinn`) with TLS 1.3 on the devices' raw
    keys (`rustls`) ("The transport").
