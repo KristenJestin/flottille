@@ -1563,8 +1563,8 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
   `crates/flottille-mobile/tests`. A real phone proves what none of those can: the camera reading a
   QR, and how it feels.
-- **Not here**: the foreground service and the notifications (#826's followers), Needs you (#1443);
-  closing a session of an offline machine (#1157's kept close).
+- **Not here**: the foreground service and the notifications (#826's followers); closing a session
+  of an offline machine (#1157's kept close). Needs you came with #1443 (below).
 
 **The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
 a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
@@ -1647,16 +1647,25 @@ top bar).
 - **What it lists**: the view's `requests` and `asks`, which are every linked machine's, each on the
   session page's own card (`RequestCard`, `AskCard`: one card pattern), under the session's title
   and the machine's tag, newest first; answered in place, a refusal said on its card as on the page.
-  A card leaves when the machine says it is decided or answered, from the phone or elsewhere; a tap
-  on it outside its buttons opens its session (the agent the card waits on). Empty, one line says
-  `Nothing waits for you.`
-- **Newest first** reads `at` on a request and an ask, the module's own field: the core does not
-  give it yet (0 for every item), so the order is then by machine and, on one machine, the newest
-  number first. A question asked before the phone linked shows once the core reads it (see
+  A card leaves when the machine says it is decided or answered, from the phone or elsewhere; while
+  it folds its buttons are off. A tap on it outside its buttons opens its session. Empty, one line
+  says `Nothing waits for you.`
+- **A child's request** (one a sub-agent asked, forwarded up its tree) is under its session, as on
+  the session page: the card is headed by the root session's title and the child's
+  (`Fix the build · Check the tests`), and a tap opens the root's page. The core names the root
+  (`RequestView.session`, from the parents of `agent.list` and `agent.created`) and the child
+  (`RequestView.child`, its title).
+- **Newest first** reads `at` on a request and an ask: the time the mobile core saw it come, in the
+  phone's clock. One that already waited when the runner linked takes the daemon's time of it (a
+  request's `created_at`, a question's `at` in `agent.tree`), else the link's; one seen again keeps
+  its first time. Request numbers and ask numbers are two counters, and each machine has its own:
+  they only break a tie. A question asked before the phone linked shows once the core reads it (see
   "Defaults taken, to confirm").
 - **Motion**: a card that comes unfolds and fades in, one that leaves fades and folds away (kept on
-  screen until its fold ends), the others slide (`animateItem`); a card sinks a little while pressed (`PRESS`); the tab change cross-fades
-  (`ENTER`, `HOVER`), and the selected tab's fill and ink, the icon's with them, move over `PANEL`.
+  screen until its fold ends), the others slide (`animateItem`); a card sinks a little while
+  pressed (`PRESS`); the line of an empty screen fades in once the last card has folded and out as
+  one comes (`ENTER`, `HOVER`); the tab change cross-fades (`ENTER`, `HOVER`), and the selected
+  tab's fill and ink, the icon's with them, move over `PANEL`.
 
 ## Notifications
 
@@ -2885,23 +2894,23 @@ on a real phone, by hand, and reported.
   runners of the list only, never to another phone or a controller's computer.
 
 - The Android app (#825, #1443): the bottom bar has **Needs you**, **Sessions** and **Machines**,
-  and Settings is reached from the top bar; the app opens on Needs you. In a project, the sessions that wait for the user come first and the
-  ended ones last, then the most recent; the groups stay by project name as the core gives them.
-  An ended session stays in its project, said **Ended**, rather than disappearing. Tapping a
-  session of an online machine opens its page (#826). The app connects to the hub only while it is on screen (the foreground
-  service comes later) and dials it again after a wait that grows (1 s, up to 30 s) when it cannot
-  be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
+  and Settings is reached from the top bar; the app opens on Needs you. In a project, the sessions
+  that wait for the user come first and the ended ones last, then the most recent; the groups stay
+  by project name as the core gives them. An ended session stays in its project, said **Ended**,
+  rather than disappearing. Tapping a session of an online machine opens its page (#826). The app
+  connects to the hub only while it is on screen (the foreground service comes later) and dials it
+  again after a wait that grows (1 s, up to 30 s) when it cannot be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
   ZXing over CameraX, not Google's ML Kit: no proprietary library in a public repository's app.
   A pull request's APK is debug-signed (the release key is never given to the run of a pull
   request, which runs the branch's own scripts); only a push, which runs merged code, signs with
   it. The launcher icon is Android's default until the brand's is added.
 
-- Needs you (#1443) orders the cards newest first by `at`, a field of the app's own `Request` and
-  `Ask` that the mobile core does not give yet: until it does, the cards are ordered by machine and,
-  on a machine, by the newest number first. A question asked before the phone linked is not in the
-  core's view until a page of its session is opened (the `asks` come from the events seen and the
-  followed tree), so Needs you shows it from then on. Both are the core's to add (`RequestView`,
-  `AskView` with a time, and the questions read when a runner links).
+- Needs you (#1443) orders the cards newest first by the time the mobile core saw each come, in the
+  phone's clock; one that waited before the link takes the daemon's time of it, in the machine's
+  clock, which may differ from the phone's by the clocks' drift. A question asked before the phone
+  linked is not in the core's view until a page of its session is opened (the `asks` come from the
+  events seen and the followed tree), so Needs you shows it from then on: reading the questions when
+  a runner links is the core's to add.
 
 - The session page (#826): a request's call is the window's `call_line` computed again in the
   mobile core (a few lines, the same words), not moved to a shared crate (`flottille-core` carries
