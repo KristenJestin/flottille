@@ -125,7 +125,7 @@ class NotificationsOnThePhoneTest {
         // Nothing of the app runs any more: no screen, no service, no connection held.
         context.stopService(android.content.Intent(context, HubService::class.java))
         until("the service to end") { !serviceRuns() && phone.holds == 0 }
-        drawn.actions.single { it.title == "Allow" }.actionIntent.send()
+        drawn.actions.single { it.title.toString() == "Allow" }.actionIntent.send()
         until("the request answered") { phone.answers.isNotEmpty() }
         val answered = phone.answers.single()
         assertEquals(Answered("server", 7, true, answered.holds), answered)
