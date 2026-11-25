@@ -1142,13 +1142,15 @@ notifications follow it.
 #### `agent.updated`
 
 What the session is about changed (`docs/design.md` §10, "What a session is about"): it took
-another ticket in hand, opened a pull request, or what it held was closed or merged. Told once
-per change, against what was last said; a session's first subject is one too.
+another ticket in hand, opened a pull request, or what it held was closed or merged; also when
+only the title of its ticket or pull request changed, or the checks of its pull request. Told once
+per change, against what was last said; a session's first subject is one too. A round of the
+items is one change: each session it concerns is told at most once for it.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `subject` | As `agent.list` gives it (`docs/protocol.md`): `null` when it holds nothing and never did. |
+| `subject` | As `agent.list` gives it (`docs/protocol.md`): `null` when it holds nothing and never did, and when the ticket linked to its workspace, all it had, is unlinked. |
 
 #### `agent.detached`
 

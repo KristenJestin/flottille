@@ -2233,7 +2233,8 @@ it waits for an answer: a child's from its parent, a led session's from its pilo
 root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `auto` or `full`
 (`agent.mode`). `subject` (in `agent.list` and the tree) is what the session is about, derived
-from what it took in hand (`docs/design.md` §10, "What a session is about"): `null` while it
+from what it took in hand (`docs/design.md` §10, "What a session is about") and kept as its last
+`agent.updated` said it, so that a list derives nothing: `null` while it
 never held anything, else `{"kind", "key", "title", "from", "last", "pull_request"}`, `kind`
 being `ticket`, `pull_request` or `free`; `key` the ticket's (`#5`, `ABC-12`) or the pull
 request's (`#12`), `null` when free; `title` as the items last read it, `null` when unknown or
