@@ -295,8 +295,8 @@ fn a_blocked_root_leaves_its_project_for_the_blocked_group(cx: &mut TestAppConte
     });
 
     // It folds away from its project, its gap with it, into the group, folded.
-    assert_eq!(listed(&shell, cx), [other.clone()]);
-    assert_eq!(blocked(&shell, cx), [id.clone()]);
+    assert_eq!(listed(&shell, cx), std::slice::from_ref(&other));
+    assert_eq!(blocked(&shell, cx), std::slice::from_ref(&id));
     after(cx, Duration::from_millis(70));
     let folding =
         frame_height(&shell, &id, IN_PROJECT, cx).expect("still drawn while it folds away");
