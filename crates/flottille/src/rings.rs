@@ -434,6 +434,7 @@ mod tests {
             read_at: None,
             resolved: false,
             needs_you,
+            request: None,
         }
     }
 

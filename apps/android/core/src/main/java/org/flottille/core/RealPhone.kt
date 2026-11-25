@@ -191,6 +191,10 @@ internal fun ViewState.toPhoneView(): PhoneView {
         },
         tunnels = tunnels.map { it.toTunnel() },
         tunnelsEnded = tunnelsEnded.map { TunnelEnd(it.tunnel, it.machine, it.run, it.reason) },
+        notices = notices.map {
+            Notice(it.machine, it.notification.toLong(), it.kind, it.session, it.title, it.excerpt, it.request.toLong())
+        },
+        dismissed = dismissed.map { Dismissed(it.machine, it.notification.toLong()) },
         asks = asks.map { ask ->
             Ask(
                 ask.machine,

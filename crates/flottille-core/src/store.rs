@@ -4841,7 +4841,7 @@ impl Store {
     ) -> Result<Vec<Notification>> {
         let filter = if unread { "AND read_at IS NULL" } else { "" };
         let columns =
-            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved";
+            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved, source";
         let found = match after {
             Some(after) => {
                 let mut statement = self.connection.prepare(&format!(
@@ -5553,6 +5553,10 @@ fn notification_row(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
         excerpt: row.get(7)?,
         read_at: row.get(8)?,
         resolved: row.get::<_, i64>(9)? != 0,
+        request: row
+            .get::<_, String>(10)?
+            .strip_prefix("request:")
+            .and_then(|number| number.parse().ok()),
     })
 }
 
@@ -5951,6 +5955,21 @@ mod tests {
             .unwrap();
         assert_eq!(again, None);
         assert_eq!(store.notifications(None, 10, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_request_s_row_names_its_request_and_another_names_none() {
+        let store = Store::open_in_memory().unwrap();
+        noted(&store, "request:7", 10, "s1", "request");
+        noted(&store, "event:2", 11, "s1", "failure");
+        let listed = store.notifications(None, 10, false).unwrap();
+        assert_eq!(
+            listed.iter().map(|row| row.request).collect::<Vec<_>>(),
+            [Some(7), None]
+        );
+        let shown = serde_json::to_value(&listed).unwrap();
+        assert_eq!(shown[0]["request"], 7);
+        assert!(shown[1].get("request").is_none());
     }
 
     #[test]

@@ -1582,8 +1582,8 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
   `crates/flottille-mobile/tests`. A real phone proves what none of those can: the camera reading a
   QR, and how it feels.
-- **Not here**: Needs you, the foreground service and the notifications (#826's followers);
-  closing a session of an offline machine (#1157's kept close).
+- **Not here**: Needs you (#1443); closing a session of an offline machine (#1157's kept close).
+  The foreground service and the notifications are #828's ("Notifications", "Built (#828)").
 
 **The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
 a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
@@ -1738,6 +1738,45 @@ never told, and with no session to the hub nothing is told and nothing is kept f
 - **The setting**: `[remote] notify = "away" | "always"` in `daemon.toml`, `remote.settings` and
   `remote.configure {notify}` (`docs/protocol.md`), and Settings, Machines, **Phone**: **Notify the
   phone**, **When I am away** or **Always**.
+
+**Built (#828), the phone's side.** The app keeps the connection while the phone is paired; the
+core reads what each notice is about and the app draws it.
+
+- **The core**: a notice of a runner of the list (found by its machine key; any other is dropped)
+  waits for the link to that runner, 20 seconds at most (the phone it woke may still be linking),
+  and reads its row back (`notifications.list {"after": n - 1, "limit": 1}`): the title and the
+  excerpt are the runner's own words. The view state gains `notices` (what was told and is not
+  dismissed, the newest 32) and `dismissed` (the notices dismissed since the core started, the
+  newest 32). A request's notice carries `request`, the request its row names (`notifications.list`,
+  `request`), fixed when the notice is read: what Allow and Deny answer, and nothing else, however
+  many requests of its session wait or come after. It is 0 when the row could not be read.
+- **The service**: `HubService`, a foreground service (`specialUse`), started once the phone joined
+  (by the app when it is on screen, at boot and after an update by `StartReceiver`, and by an
+  answer from a notification), started again by Android when it is killed (`START_STICKY`), ended
+  when the phone is removed from the list. It holds the core's connection (`keepConnected`) and its
+  notification, on a channel of the lowest importance (silent, which the user may hide), says
+  **Flottille is connected**, or **Not connected to your hub** with why while the core dials again.
+- **The notifications**: on a channel of their own (high importance), one per notice, tagged with
+  its machine and numbered with the runner's number, drawn once for the life of the process (a
+  notice swiped away or tapped is not drawn again), removed once dismissed. Its title is the row's,
+  its text the machine and the excerpt; it is private on the lock screen, which shows the title and
+  the machine, never the excerpt. A tap opens its session through the app's own `OpenSession` (#826);
+  a request has **Allow** and **Deny** (**Deny** only for a proposal to write a connection, as the
+  window; neither on a `viewer`, nor while its `request` is 0), each asking for the phone's unlock
+  before it is sent (`setAuthenticationRequired`): a phone left on a table answers nothing.
+- **Allow and Deny** go to `AnswerReceiver`, not exported: with the app killed, the process starts
+  for it, the service comes back, the receiver holds the connection, waits for the machine to be
+  linked and answers, both within 8 seconds (the ten Android gives), signed by the core as any
+  answer. Answered, or decided already elsewhere, the notification goes; refused otherwise, or the
+  machine not reached, it says why (`Not answered: …`) and opens the session.
+- **Settings, Notifications**: what keeps the phone reachable, said once: **This phone stays
+  connected to your hub…** when Android lets the app notify and exempted it from battery
+  optimisation; otherwise what is missing, each with its way: **Allow notifications** (the system's
+  page of the app's notifications) and **Keep it awake** (the system's question to exempt it). The
+  app asks for the notifications' permission once it joined.
+- **Tested** on the emulator against a played core (`NotificationsOnThePhoneTest`, one test per
+  scenario of the issue), the core against a hub and a runner on loopback (`mobile_core`). Not
+  proved by them: a whole night in Doze on a real phone, and its battery (#823).
 
 ## Tunnels
 
@@ -3023,6 +3062,16 @@ on a real phone, by hand, and reported.
   group pinned below every machine, its rows newest ended first by their last exchange (the view
   has no `ended_at`).
 
+- **The phone's notifications** (#828): a request's notification answers the request its row names
+  (`notifications.list` gives it), not the one its session holds now. Allow and Deny need the phone
+  unlocked, and the lock screen shows no excerpt (open question 3): the safe default, which a
+  controller's rights may relax later. A notice is drawn once for the life of the app's process: one the
+  user swiped away does not come back, and after the process was killed only the dismissals of
+  that run of the core remove what an earlier one drew. The app checks for its join every two
+  seconds while it is on screen and not joined, then starts the service. The small icon is the
+  system's sync icon, the one the tunnels' service shows, until the app's own icon (#1456, on `dev`)
+  reaches this line.
+
 ## Open questions
 
 1. **The transport's library**: decided in #811, QUIC (`quinn`) with TLS 1.3 on the devices' raw
@@ -3030,7 +3079,8 @@ on a real phone, by hand, and reported.
 2. **A headless server's keyring**: sharing vault entries needs one; whether Flottille offers a
    keyring of its own there, or the user installs a Secret Service.
 3. **A controller's rights**: whether a `controller` may switch a tree to Full, or answer a base
-   request, without the phone's unlock (biometrics), or whether those need a runner's client.
+   request, without the phone's unlock (biometrics), or whether those need a runner's client. Until
+   it is decided, Allow and Deny on a notification ask for the phone's unlock (#828).
 4. **A led session on another machine starting its own led sessions** there: today a chain is base
    (`tools.md`, "No chain without the user"); whether a session the user sent away for the night
    gets more.

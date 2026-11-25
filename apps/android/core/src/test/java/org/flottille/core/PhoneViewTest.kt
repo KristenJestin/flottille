@@ -35,6 +35,8 @@ class PhoneViewTest {
         role: String = "controller",
         tunnels: List<TunnelView> = emptyList(),
         ended: List<org.flottille.core.ffi.TunnelEnd> = emptyList(),
+        notices: List<org.flottille.core.ffi.NoticeView> = emptyList(),
+        dismissed: List<org.flottille.core.ffi.DismissedView> = emptyList(),
     ) = ViewState(
         role = role,
         name = "pixel",
@@ -49,8 +51,25 @@ class PhoneViewTest {
         asks = asks,
         tunnels = tunnels,
         tunnelsEnded = ended,
+        notices = notices,
+        dismissed = dismissed,
         said = emptyList(),
     )
+
+    @Test
+    fun a_notice_and_a_dismissal_are_the_runner_s_numbers() {
+        val view = state(
+            notices = listOf(
+                org.flottille.core.ffi.NoticeView(
+                    machine = "server", notification = 12uL, kind = "request", session = "a1",
+                    title = "Request #7 waits for you", excerpt = "Run make", request = 7uL,
+                ),
+            ),
+            dismissed = listOf(org.flottille.core.ffi.DismissedView(machine = "server", notification = 11uL)),
+        ).toPhoneView()
+        assertEquals(listOf(Notice("server", 12, "request", "a1", "Request #7 waits for you", "Run make", 7)), view.notices)
+        assertEquals(listOf(Dismissed("server", 11)), view.dismissed)
+    }
 
     @Test
     fun a_machine_s_state_is_a_state_and_its_since_a_time() {

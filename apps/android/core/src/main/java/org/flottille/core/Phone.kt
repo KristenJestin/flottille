@@ -134,6 +134,25 @@ data class Member(
 /** The hub a pair code names: what the phone shows before it sends anything. */
 data class HubCard(val url: String, val fingerprint: String)
 
+/**
+ * What a runner told this phone through the hub (`docs/remote.md`, "Notifications"): [kind] is
+ * `request`, `question`, `report` or `failure`, [notification] the runner's number for it, [session]
+ * the session it is about (empty for none), [title] and [excerpt] the runner's words. For a request,
+ * [request] is the one Allow and Deny answer, 0 while none waits.
+ */
+data class Notice(
+    val machine: String,
+    val notification: Long,
+    val kind: String,
+    val session: String,
+    val title: String,
+    val excerpt: String,
+    val request: Long = 0,
+)
+
+/** A notice the runner dismissed: answered or seen elsewhere. */
+data class Dismissed(val machine: String, val notification: Long)
+
 /** What the screens draw, whole. [role] is empty until the phone is a member of a hub's list. */
 data class PhoneView(
     val role: String = "",
@@ -153,6 +172,10 @@ data class PhoneView(
     val tunnels: List<Tunnel> = emptyList(),
     /** The tunnels that ended, the newest last. */
     val tunnelsEnded: List<TunnelEnd> = emptyList(),
+    /** What the runners told and is not dismissed, the newest last: each is drawn once. */
+    val notices: List<Notice> = emptyList(),
+    /** The notices dismissed since the core started, the newest last. */
+    val dismissed: List<Dismissed> = emptyList(),
 ) {
     val joined: Boolean get() = role.isNotEmpty()
 }

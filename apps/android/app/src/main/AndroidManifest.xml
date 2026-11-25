@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The connection to the hub, kept by a foreground service from the boot on, and through Doze
+         once the user exempted the app from battery optimisation (Settings asks it). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- A phone without a camera pastes the pair code. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -56,6 +60,29 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="A tunnel to a run of the user's machine, kept open for their browser" />
         </service>
+        <!-- The connection to the user's hub, kept while the phone is paired: the hub tells the phone
+             over it when an agent needs the user (no push service). Not exported. -->
+        <service
+            android:name=".HubService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="The connection to the user's own hub, which tells the phone when their agents need them" />
+        </service>
+        <!-- Allow and Deny from a notification: only the app's own PendingIntents reach it. -->
+        <receiver
+            android:name=".AnswerReceiver"
+            android:exported="false" />
+        <!-- The connection comes back at boot and after an update. -->
+        <receiver
+            android:name=".StartReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <!-- The camera's shot: one file of the app's cache, handed to the camera app alone. -->
         <provider
             android:name="androidx.core.content.FileProvider"

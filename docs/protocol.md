@@ -3025,7 +3025,8 @@ A notification is:
   "excerpt": "Read .env",
   "read_at": null,
   "resolved": false,
-  "needs_you": true
+  "needs_you": true,
+  "request": 3
 }
 ```
 
@@ -3036,7 +3037,9 @@ about, one line of 120 characters at most, masked like every stored text, and ne
 arguments. `read_at` is when it was read, `null` while unread; `resolved` is `true` once what it
 waits for was answered, wherever it was answered, and resolving reads it. `needs_you` is `true` for
 the kinds that wait for the user's answer (`request`, `question`, `vault`), `false` for the kinds
-that tell: the daemon says it, so no client keeps a list of kinds.
+that tell: the daemon says it, so no client keeps a list of kinds. `request` is the number of the
+request a `request` row is about, absent on every other row: what a client answers from the row (the
+phone's Allow), never another request of the same session.
 
 | `kind` | Title | Excerpt | Resolved when |
 |---|---|---|---|
