@@ -2569,6 +2569,9 @@ struct Checked<'a> {
     /// How many of `problems` are commits on no remote; the others are work not committed.
     unpushed: usize,
     ours: Vec<PathBuf>,
+    /// Whether a file of it is the uncommitted work of another machine's agent, laid with its
+    /// launch and still as it was laid: no loss, though git counts it as a change.
+    laid: bool,
 }
 
 /// What removing the workspace `name` of the project would lose, each as a sentence: nothing when
@@ -2693,8 +2696,11 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     let mut unpushed = 0;
     let mut read = None;
     let heads = heads(workspace).await;
-    // A workspace made of another machine's launch: what went back there is that machine's now.
+    // A workspace made of another machine's launch: what went back there is that machine's now,
+    // and so is the uncommitted work laid with it, as long as it is still as it was laid.
     let returned = crate::travel::returned(daemon, workspace);
+    let laid_with = crate::travel::laid(daemon, workspace);
+    let mut laid = false;
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
         let mut sent = Vec::new();
@@ -2736,6 +2742,16 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                     ours.push(file);
                     continue;
                 }
+            }
+            let snapshot = laid_with
+                .iter()
+                .find(|(path, _)| *path == worktree.path)
+                .map(|(_, snapshot)| snapshot.as_str());
+            if let Some(snapshot) = snapshot
+                && as_laid(&dir, snapshot, path).await
+            {
+                laid = true;
+                continue;
             }
             let shown = match worktree.path.as_str() {
                 "." => path.to_owned(),
@@ -2833,7 +2849,30 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
         problems,
         unpushed,
         ours,
+        laid,
     })
+}
+
+/// Whether the file `path` of the worktree at `dir`, which git says changed, is as the snapshot
+/// `snapshot` laid it: the same content, or absent from both. A link, or anything git cannot
+/// read, is not.
+async fn as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
+    let at = format!("{snapshot}:{path}");
+    let blob = git::run(dir, &["rev-parse", "--verify", "--quiet", &at], Class::Read).await;
+    let blob = match blob {
+        Ok(blob) if blob.success => Some(blob.stdout.trim().to_owned()),
+        Ok(_) => None,
+        Err(_) => return false,
+    };
+    match (std::fs::symlink_metadata(dir.join(path)), blob) {
+        (Err(error), None) => error.kind() == std::io::ErrorKind::NotFound,
+        (Ok(meta), Some(blob)) if meta.is_file() => {
+            git::output(dir, &["hash-object", "--", path], Class::Read)
+                .await
+                .is_ok_and(|hash| hash.trim() == blob)
+        }
+        _ => false,
+    }
 }
 
 async fn remove_held(
@@ -2849,6 +2888,7 @@ async fn remove_held(
         made,
         problems,
         ours,
+        laid,
         ..
     } = checked(daemon, workspace).await?;
     // The user discards what they were shown, not what appeared since.
@@ -2896,7 +2936,8 @@ async fn remove_held(
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let dir = workspace.folder_of(&worktree.path);
         let dir = dir.to_string_lossy();
-        let force: &[&str] = if approved.is_some() {
+        // What was laid from another machine is still changed to git, and loses nothing.
+        let force: &[&str] = if approved.is_some() || laid {
             &["--force"]
         } else {
             &[]

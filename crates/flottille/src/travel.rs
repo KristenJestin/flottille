@@ -406,6 +406,31 @@ fn sending(launch: &str) -> Arc<tokio::sync::Mutex<()>> {
     locks.entry(launch.to_owned()).or_default().clone()
 }
 
+/// The snapshots laid in `workspace`, the uncommitted work of the agent of another machine whose
+/// launch it was made for: each repository's path with its snapshot. What of it is still as it
+/// was laid is that agent's, which it still has: no work of the workspace's own. Nothing for a
+/// workspace no launch made.
+pub(crate) fn laid(
+    daemon: &Daemon,
+    workspace: &flottille_core::workspace::Workspace,
+) -> Vec<(String, String)> {
+    let launches = daemon
+        .read(|store| store.launches("in", None, flottille_core::store::LaunchFilter::All))
+        .unwrap_or_default();
+    launches
+        .iter()
+        .filter(|launch| {
+            launch.workspace_id == Some(workspace.id) && launch.project == workspace.project
+        })
+        .flat_map(|launch| {
+            daemon
+                .read(|store| store.travels("in", Some(&launch.machine), &launch.launch))
+                .unwrap_or_default()
+        })
+        .map(|travel| (travel.repository, travel.snapshot))
+        .collect()
+}
+
 /// The commits of `workspace` that went back already to the machine whose launch it was made
 /// for: each repository's path with the last tip sent. Nothing for a workspace no launch made.
 pub(crate) fn returned(
