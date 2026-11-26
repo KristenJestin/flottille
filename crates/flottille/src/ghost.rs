@@ -331,7 +331,7 @@ impl Serving {
             if size > FRAME_BYTES {
                 eprintln!(
                     "flottille daemon: an event of session {id} is too large for its ghost on {}: \
-                     it is read there from this machine",
+                     it is left out of it",
                     self.name
                 );
                 continue;
