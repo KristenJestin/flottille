@@ -410,6 +410,17 @@ pub(crate) fn is_older(new: &Version, this: &Version) -> bool {
     new < this && !merged
 }
 
+/// The archive of the higher version of the two: the beta channel gives what is newest, so a
+/// stable above the latest beta (`0.4.4` over `0.4.4-beta.36`) is taken, and a beta above the
+/// stable is taken back. The channel is the user's choice, the version is what it gives.
+fn highest_of(beta: Option<String>, stable: Option<String>) -> Option<String> {
+    let version = |url: &String| version_of(url.rsplit('/').next()?);
+    match (beta, stable) {
+        (Some(beta), Some(stable)) if version(&stable) > version(&beta) => Some(stable),
+        (beta, stable) => beta.or(stable),
+    }
+}
+
 /// The address of the channel's latest archive for this machine.
 fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
     let found = match channel {
@@ -418,16 +429,22 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                 .ok_or("there is no stable release yet")?;
             archives(&release).into_iter().next()
         }
-        "beta" => latest_published(
-            &json(&format!("{}/releases?per_page=100", api()))?
-                .unwrap_or_default()
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
-                .cloned()
-                .collect::<Vec<_>>(),
-        ),
+        "beta" => {
+            let betas = latest_published(
+                &json(&format!("{}/releases?per_page=100", api()))?
+                    .unwrap_or_default()
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            // Dev's betas fill the page of the list, so the stable is asked for apart.
+            let stable = json(&format!("{}/releases/latest", api()))?
+                .and_then(|release| archives(&release).into_iter().next());
+            highest_of(betas, stable)
+        }
         "alpha" => {
             let branch = branch
                 .or(Some(BRANCH).filter(|b| !b.is_empty()))
