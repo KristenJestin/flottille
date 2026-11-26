@@ -1863,3 +1863,35 @@ fn a_part_set_from_the_command_line_is_not_stale_in_an_open_window(cx: &mut Test
         })
     });
 }
+
+#[gpui_kit::test]
+fn an_ended_child_of_another_machine_under_a_review_pilot_is_in_its_ended(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, _session, pilot_id, _check, _) = review_rail(&user, cx);
+    // A child the review's pilot started on another machine, which reported: no agent of this
+    // machine, so the review's group draws it as the ended child it is, and counts it.
+    let key = "child1@server".to_owned();
+    cx.update(|_, cx| {
+        cx.set_global(flottille_window::model::RemoteAgents(vec![
+            flottille_window::model::RemoteAgent {
+                key: key.clone(),
+                machine: "server".into(),
+                agent: "child1".into(),
+                caller: pilot_id.clone(),
+                kind: "child".into(),
+                title: "Render the year".into(),
+                state: "reported".into(),
+                mark: flottille_window::state::AgentState::Completed,
+                icon: "desktop".into(),
+                colour: "grey".into(),
+                offline: false,
+                ended: true,
+            },
+        ]));
+        cx.refresh_windows();
+    });
+    let row = "rail-remote-child1".to_owned();
+    until(&shell, cx, "its row in the review's group", |cx| {
+        present(cx, &row)
+    });
+}

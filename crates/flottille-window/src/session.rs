@@ -7719,6 +7719,9 @@ pub struct SessionRail {
     /// The sessions and children started on other machines the rail has drawn: one that is gone
     /// from the tree's launches folds away with its last words.
     remote_seen: HashMap<String, crate::model::RemoteAgent>,
+    /// The children started on other machines that ended with their report, as the rail last
+    /// read them: each is an ended child of its parent, in its "N ended" (#1520).
+    remote_ended: Vec<crate::model::RemoteAgent>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -7811,6 +7814,7 @@ impl SessionRail {
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             remote_seen: HashMap::new(),
+            remote_ended: Vec::new(),
             menu,
             linked: false,
             removable,
@@ -8007,6 +8011,12 @@ impl SessionRail {
                 ended: a.ended,
                 pilot: a.extensions["review"]["kind"] == "pilot",
             })
+            .chain(self.remote_ended.iter().map(|remote| Node {
+                id: &remote.key,
+                parent: Some(&remote.caller),
+                ended: true,
+                pilot: false,
+            }))
             .collect();
         rail_rows(&nodes, open)
     }
@@ -8279,6 +8289,19 @@ impl Render for SessionRail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
+        // The sessions and children this tree started on other machines. A child among them that
+        // reported is an ended child of its parent, as one of this machine.
+        let remote = self
+            .page
+            .upgrade()
+            .map(|page| page.read(cx).remote(cx))
+            .unwrap_or_default();
+        let ended_remote: Vec<crate::model::RemoteAgent> = remote
+            .iter()
+            .filter(|found| found.ended && self.agents.iter().any(|a| a.id == found.caller))
+            .cloned()
+            .collect();
+        self.remote_ended = ended_remote;
         // A folding "ended" row still has its children until the fold ends.
         let now = cx.background_executor().now();
         let open_now = self.open_keys();
@@ -8391,6 +8414,22 @@ impl Render for SessionRail {
                 (agent.id.clone(), fade(id, on, PANEL, window, cx))
             })
             .collect();
+        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
+        // A child of another machine among the ended, drawn at its depth under its parent.
+        let ended_remote_row = |id: &str, window: &mut Window, cx: &mut App| {
+            let found = self.remote_ended.iter().find(|found| found.key == id)?;
+            let depth = self
+                .agents
+                .iter()
+                .find(|a| a.id == found.caller)
+                .map_or(1, |a| a.depth + 1);
+            Some(
+                div()
+                    .pl(space::LG * depth as f32)
+                    .child(remote_row(found, true, shell.clone(), window, cx))
+                    .into_any_element(),
+            )
+        };
         let rail = cx.entity().downgrade();
         // `fold` is `Some((open, turned))` on a review's row, which folds what is under it.
         let agent_row = |agent: &RailAgent,
@@ -8761,9 +8800,12 @@ impl Render for SessionRail {
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
-                    rows.extend(self.agents.iter().find(|a| a.id == id).map(|agent| {
-                        agent_row(agent, &lines_of(&id), None, window, cx).into_any_element()
-                    }));
+                    rows.extend(match self.agents.iter().find(|a| a.id == id) {
+                        Some(agent) => Some(
+                            agent_row(agent, &lines_of(&id), None, window, cx).into_any_element(),
+                        ),
+                        None => ended_remote_row(&id, window, cx),
+                    });
                 }
                 RailRow::Ended {
                     parent,
@@ -8789,13 +8831,13 @@ impl Render for SessionRail {
                         .by_ref()
                         .take(count)
                         .filter_map(|row| match row {
-                            RailRow::Agent(id) => {
-                                let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(
+                            RailRow::Agent(id) => match self.agents.iter().find(|a| a.id == id) {
+                                Some(agent) => Some(
                                     agent_row(agent, &lines_of(&id), None, window, cx)
                                         .into_any_element(),
-                                )
-                            }
+                                ),
+                                None => ended_remote_row(&id, window, cx),
+                            },
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
                         .collect();
@@ -8843,12 +8885,15 @@ impl Render for SessionRail {
                         .take(count)
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
-                                let agent = self.agents.iter().find(|a| a.id == id)?;
                                 last = id.clone();
-                                Some(
-                                    agent_row(agent, &lines_of(&id), None, window, cx)
-                                        .into_any_element(),
-                                )
+                                match self.agents.iter().find(|a| a.id == id) {
+                                    Some(agent) => Some(
+                                        agent_row(agent, &lines_of(&id), None, window, cx)
+                                            .into_any_element(),
+                                    ),
+                                    // An ended child of another machine, of the pilot.
+                                    None => ended_remote_row(&id, window, cx),
+                                }
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
@@ -8897,21 +8942,18 @@ impl Render for SessionRail {
                 }
             }
         }
-        // The sessions and children this tree started on other machines: a row each, with its
-        // machine's icon. One that is gone folds away with its words.
-        let remote = self
-            .page
-            .upgrade()
-            .map(|page| page.read(cx).remote(cx))
-            .unwrap_or_default();
-        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
-        for found in &remote {
-            self.remote_seen.insert(found.key.clone(), found.clone());
+        // The live sessions and children this tree started on other machines: a row each, with
+        // its machine's icon. One that is gone, or ended among its parent's, folds away with its
+        // words.
+        let live: Vec<&crate::model::RemoteAgent> =
+            remote.iter().filter(|found| !found.ended).collect();
+        for found in &live {
+            self.remote_seen.insert(found.key.clone(), (*found).clone());
         }
         let mut seen: Vec<_> = self.remote_seen.values().cloned().collect();
         seen.sort_by(|a, b| a.key.cmp(&b.key));
         for found in seen {
-            let here = remote.iter().any(|now| now.key == found.key);
+            let here = live.iter().any(|now| now.key == found.key);
             rows.push(remote_row(&found, here, shell.clone(), window, cx));
         }
         let agents = div()
