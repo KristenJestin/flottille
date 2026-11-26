@@ -439,6 +439,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_ticket_subject_kept_before_its_url_was_said_is_read_with_its_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        // Kept by a daemon that did not say the ticket's page yet: no `url` at all.
+        let kept = json!({"kind": "ticket", "key": "#7", "title": "Kept", "from": FROM_CHANGED,
+            "pull_request": null});
+        let mut stored = item("ticket", "7", "Kept", "open");
+        stored.url = Some("https://github.com/acme/api/issues/7".into());
+        daemon
+            .write(|store| {
+                store.put_items(&[stored], Vec::new())?;
+                Ok(((), Some(store.set_agent_subject_shown("c1", &kept)?)))
+            })
+            .unwrap();
+        let said = crate::tree::summary(&daemon, &agent)["subject"].clone();
+        assert_eq!(
+            said["url"], "https://github.com/acme/api/issues/7",
+            "{said}"
+        );
+        // What else it said is as it was kept.
+        assert_eq!(said["key"], "#7");
+        assert_eq!(said["title"], "Kept");
+    }
+
+    #[tokio::test]
     async fn a_burst_of_item_events_refreshes_each_session_once() {
         let dir = tempfile::tempdir().unwrap();
         let agent = crate::daemon::tests::an_agent("c1");

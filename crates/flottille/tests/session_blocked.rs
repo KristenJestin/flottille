@@ -248,6 +248,46 @@ fn a_session_waiting_on_a_ticket_assigned_to_someone_else_is_blocked_by_them() {
 }
 
 #[test]
+fn a_wait_on_a_review_says_which_pull_request_in_a_field_of_its_own() {
+    let user = user();
+    fixture(&user);
+    let maya = json!([{"__typename": "User", "login": "maya", "name": "Maya"}]);
+    script(&user, pull(maya), issue(json!([])));
+    let (id, mcp) = agent(&user);
+
+    subscribe(&mcp, "forge", json!({"events": ["review"]}));
+
+    // A window reads which pull request it is, never the words of `why`.
+    let blocked = blocked(&user, &id);
+    assert_eq!(
+        blocked["on"],
+        json!({"kind": "pull_request", "number": 12}),
+        "{blocked}"
+    );
+}
+
+#[test]
+fn a_wait_on_a_ticket_says_which_ticket_in_a_field_of_its_own() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull(json!([])), issue(json!([{"login": "noor"}])));
+    let (id, mcp) = agent(&user);
+
+    subscribe(
+        &mcp,
+        "tickets",
+        json!({"ticket": "#5", "events": ["commented", "status"]}),
+    );
+
+    let blocked = blocked(&user, &id);
+    assert_eq!(
+        blocked["on"],
+        json!({"kind": "ticket", "key": "#5"}),
+        "{blocked}"
+    );
+}
+
+#[test]
 fn a_session_waiting_on_checks_is_waiting_not_blocked() {
     let user = user();
     fixture(&user);
