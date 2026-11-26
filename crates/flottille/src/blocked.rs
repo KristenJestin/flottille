@@ -47,8 +47,8 @@ pub fn of(daemon: &Daemon, agent: &Agent) -> Value {
 }
 
 /// The people `subscription` waits on, what for in words (`review of #12`, `ticket ABC-1`) and
-/// what it is as data (`{"kind": "pull_request", "number": 12}`, `{"kind": "ticket", "key":
-/// "ABC-1"}`); none when it waits on no one.
+/// what it is as data (`{"kind": "pull_request", "repository": "api", "number": 12}`,
+/// `{"kind": "ticket", "key": "ABC-1"}`); none when it waits on no one.
 fn waits_on(
     daemon: &Daemon,
     subscription: &Subscription,
@@ -67,7 +67,7 @@ fn waits_on(
             let number = target["number"].as_u64()?;
             let key = number.to_string();
             let item = daemon.read(|store| store.item(project, "pull", repository, &key));
-            let on = json!({"kind": "pull_request", "number": number});
+            let on = json!({"kind": "pull_request", "repository": repository, "number": number});
             (item.ok()??, format!("review of #{number}"), on)
         }
         TICKETS => {
