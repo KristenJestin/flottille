@@ -758,3 +758,176 @@ fn a_hidden_project_is_not_offered_to_the_switcher_new_session_or_a_task_copy(
         "a hidden project is not"
     );
 }
+
+#[gpui_kit::test]
+fn hiding_the_open_project_moves_to_the_next_one(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the page of the first project", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.selected() == Some(&Selection::Project("alpha".into()))
+        })
+    });
+    settle(&shell, cx);
+
+    hide_from_its_row("alpha", &shell, cx);
+    settle(&shell, cx);
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("bravo".into())),
+        "the page of a project that is hidden is not left in front"
+    );
+    assert!(present(cx, project_id("bravo")));
+}
+
+#[gpui_kit::test]
+fn hiding_the_only_project_leaves_no_page_of_it_open(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "alpha", "");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the page of the project", |cx| {
+        shell.read_with(cx, |s, _| s.selected().is_some())
+    });
+    settle(&shell, cx);
+
+    hide_from_its_row("alpha", &shell, cx);
+    settle(&shell, cx);
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        None,
+        "nothing is open when no project is shown"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_session_never_starts_in_a_hidden_project(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    let held = session(&user, "alpha");
+    user.call("project.hide", json!({"name": "alpha"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the page of the shown project", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.selected() == Some(&Selection::Project("bravo".into()))
+        })
+    });
+    settle(&shell, cx);
+
+    // A notification, or a session found in the switcher, opens a page of the hidden project.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("alpha".into()), window, cx)
+    });
+    settle(&shell, cx);
+    shell.update_in(cx, |s, window, cx| s.new_session(window, cx));
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("bravo".into())),
+        "from the page of a hidden project"
+    );
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Session(held.clone()), window, cx)
+    });
+    settle(&shell, cx);
+    shell.update_in(cx, |s, window, cx| s.new_session(window, cx));
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("bravo".into())),
+        "from a session of a hidden project"
+    );
+}
+
+#[gpui_kit::test]
+fn a_removal_never_falls_back_on_a_hidden_project(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "abacus", "");
+    add(&user, "bravo", "");
+    add(&user, "cedar", "");
+    user.call("project.hide", json!({"name": "bravo"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the first shown project is open", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.selected() == Some(&Selection::Project("abacus".into()))
+        })
+    });
+    settle(&shell, cx);
+
+    // `abacus` is removed from its settings page: the next of the list is bravo, hidden.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("abacus".into()), window, cx)
+    });
+    until(&shell, cx, "the settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).has_read(cx))
+        })
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("project-more", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("remove-project", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("project-removal-action", cx));
+    until(&shell, cx, "the project is gone", |cx| {
+        shell.read_with(cx, |s, _| {
+            !matches!(s.selected(), Some(Selection::ProjectSettings(_)))
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("cedar".into())),
+        "the page that follows is a shown project's"
+    );
+}
+
+#[gpui_kit::test]
+fn a_machine_whose_projects_are_all_hidden_leaves_the_sections(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server_on(Machine::of(user()), user());
+    add(&pc.user, "app", "git@git.example:acme/app.git");
+    add(&server.user, "site", "git@git.example:acme/site.git");
+    eventually("pc is told server's project", || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        lists["machines"][0]["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|p| p["name"] == "site")
+    });
+    let (shell, cx) = window(&pc.user, cx);
+    until(&shell, cx, "the rows of both machines", |cx| {
+        present(cx, project_id("app")) && present(cx, project_id("site"))
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(projects_menu_id(), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(by_machine_id(), cx));
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    let node = shell.read_with(cx, |s, _| s.section("server").unwrap().entity_id().as_u64());
+    let section = frame("tree-machine", node);
+    let full = height(cx, section.clone());
+
+    shell.update_in(cx, |s, window, cx| s.hide_project("site", window, cx));
+    let seen = heights_over(&shell, cx, &section, 40);
+
+    folds_away(&seen, full, "the section of the server");
+    assert!(
+        !present(cx, machine_id("server")),
+        "no empty header is left for a machine with nothing shown"
+    );
+    assert!(present(cx, machine_id("pc")), "the other machine stays");
+    assert!(present(cx, project_on_id("app", "pc")));
+}
