@@ -17,7 +17,7 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
-use flottille_window::tree::{project_id, project_menu_id, session_id};
+use flottille_window::tree::{project_id, project_options_id, session_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -137,7 +137,7 @@ fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bo
 fn hide_from_its_row(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.hover(project_id(name), cx));
     settle(shell, cx);
-    cx.update(|window, cx| window.click(project_menu_id(name), cx));
+    cx.update(|window, cx| window.click(project_options_id(name), cx));
     settle(shell, cx);
     assert_eq!(
         label(cx, format!("project-hide-{name}")).as_deref(),

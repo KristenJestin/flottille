@@ -18,7 +18,7 @@ use flottille_window::model::elsewhere_id;
 use flottille_window::shell::Selection;
 use flottille_window::tree::{
     by_machine_id, project_gone_id, project_gone_on_id, project_id, project_menu_id, project_on_id,
-    project_remove_id, project_unconfigured_id, projects_menu_id, session_id,
+    project_options_id, project_remove_id, project_unconfigured_id, projects_menu_id, session_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -205,9 +205,20 @@ fn a_project_whose_configuration_is_gone_is_in_the_sidebar(cx: &mut TestAppConte
     cx.update(|window, cx| window.hover(project_id("other"), cx));
     settle(&shell, cx);
     assert!(
-        !present(cx, project_menu_id("other")),
-        "only a project with no file has the menu"
+        present(cx, project_options_id("other")),
+        "a project with its file has a menu, for Hide on this machine"
     );
+    assert!(
+        !present(cx, project_menu_id("other")),
+        "the menu with Remove is a project with no file's"
+    );
+    cx.update(|window, cx| window.click(project_options_id("other"), cx));
+    settle(&shell, cx);
+    assert!(
+        !present(cx, project_remove_id("other")),
+        "but only a project with no file has Remove"
+    );
+    cx.update(|window, cx| window.click(project_options_id("other"), cx));
     cx.update(|window, cx| window.hover(project_gone_id("app"), cx));
     settle(&shell, cx);
     assert!(
@@ -396,10 +407,13 @@ fn an_unconfigured_project_beside_another_machine_s_project_of_its_name_is_one_r
             "it holds this machine's session only"
         );
     });
-    // Only the row with no file has the menu with Remove.
+    // Both rows have a menu; only the row with no file has Remove in it.
     cx.update(|window, cx| window.hover(project_id("app"), cx));
     settle(&shell, cx);
-    assert!(!present(cx, project_menu_id("app")));
+    cx.update(|window, cx| window.click(project_options_id("app"), cx));
+    settle(&shell, cx);
+    assert!(!present(cx, project_remove_id("app")));
+    cx.update(|window, cx| window.click(project_options_id("app"), cx));
     cx.update(|window, cx| window.hover(project_gone_id("app"), cx));
     settle(&shell, cx);
     assert!(present(cx, project_menu_id("app")));

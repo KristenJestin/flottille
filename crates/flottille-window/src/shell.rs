@@ -234,6 +234,10 @@ pub struct Shell {
     /// Each shared project's machine the user chose its sessions start on, by the project's name:
     /// this machine by its name (`window.get`, #1266).
     starts: HashMap<String, String>,
+    /// The rows this machine hides (`project.hidden`, #1526): the user's view of this machine
+    /// alone, which hides a project from the sidebar and the pickers and nothing else, in the
+    /// order they were hidden.
+    hidden: Vec<String>,
     /// They are shown by machine now: the choice, and another machine to group by.
     grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
@@ -575,6 +579,7 @@ fn settings_of(
     let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(asks.clone()));
     let vault = cx.new(|_| VaultSection::new(asks.clone(), modals.clone()));
     let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(asks.clone(), modals.clone()));
+    let hidden = cx.new(|_| crate::hidden_projects::HiddenProjects::new(asks.clone()));
     let connections =
         cx.new(|_| ConnectionsSection::new(asks.clone(), vault.clone(), modals.clone()));
     let filing = cx.new(|cx| crate::findings::Filing::new(asks.clone(), window, cx));
@@ -598,6 +603,7 @@ fn settings_of(
             shared.machines.clone(),
             shared.version.clone(),
             sign_in.clone(),
+            hidden,
             filing,
             check,
             all_settings,
@@ -919,6 +925,7 @@ impl Shell {
             sections: HashMap::new(),
             by_machine: false,
             starts: HashMap::new(),
+            hidden: Vec::new(),
             grouped: false,
             ended: None,
             blocked: None,
@@ -2313,14 +2320,17 @@ impl Shell {
 
     /// The projects' list as the user arranged it, for the projects the window holds.
     pub fn listing(&self) -> Listed {
-        self.arrangement.listed(
-            &self
-                .snapshot
-                .projects
-                .iter()
-                .map(|project| project.name.clone())
-                .collect::<Vec<_>>(),
-        )
+        self.arrangement.listed(&self.project_names())
+    }
+
+    /// Whether this machine hides the project row `name`.
+    pub fn is_hidden(&self, name: &str) -> bool {
+        self.hidden.iter().any(|hidden| hidden == name)
+    }
+
+    /// The rows this machine hides, in the order they were hidden.
+    pub fn hidden_projects(&self) -> &[String] {
+        &self.hidden
     }
 
     /// Whether the Projects header's menu offers Group by machine now (there is another machine).
@@ -2338,6 +2348,7 @@ impl Shell {
         self.snapshot
             .projects
             .iter()
+            .filter(|project| !self.is_hidden(&project.name))
             .map(|project| project.name.clone())
             .collect()
     }
@@ -3306,6 +3317,45 @@ impl Shell {
         self.sidebar_changed(cx);
     }
 
+    /// "Hide on this machine" in a project's row: its row and its sessions fold away at once, and
+    /// the daemon keeps the choice (`project.hide`). Nothing is sent to the project's machine.
+    pub fn hide_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_hidden(name, true, window, cx);
+    }
+
+    /// "Show" in Settings, General, Hidden projects: its row unfolds in the sidebar again.
+    pub fn show_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_hidden(name, false, window, cx);
+    }
+
+    fn set_hidden(&mut self, name: &str, hide: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_hidden(name) == hide {
+            return;
+        }
+        match hide {
+            true => self.hidden.push(name.to_owned()),
+            false => self.hidden.retain(|hidden| hidden != name),
+        }
+        self.rearrange(window, cx);
+        self.hidden_changed(cx);
+        // This machine's own daemon keeps it, whichever machine's page is in front.
+        self.perform_here(Command::HideProject {
+            name: name.to_owned(),
+            hide,
+        });
+    }
+
+    /// What follows the list of hidden projects besides the sidebar: what the switcher finds, and
+    /// Settings' list.
+    fn hidden_changed(&mut self, cx: &mut Context<Self>) {
+        let read = self.snapshot.clone();
+        let hidden = self.hidden.clone();
+        self.switcher
+            .update(cx, |switcher, cx| switcher.set_snapshot(&read, &hidden, cx));
+        let section = self.settings.read(cx).hidden().clone();
+        section.update(cx, |section, cx| section.set(hidden, cx));
+    }
+
     /// The rows again from the snapshot held, as the projects are now to be shown.
     fn rearrange(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let snapshot = self.snapshot.clone();
@@ -3599,8 +3649,9 @@ impl Shell {
                     self.read_texts(cx);
                 }
             }
-            Update::Kept(folds, arrangement, drafts) => {
+            Update::Kept(folds, arrangement, drafts, hidden) => {
                 let by_machine = folds.by_machine;
+                let hid = std::mem::replace(&mut self.hidden, hidden) != self.hidden;
                 self.starts = folds.starts.clone();
                 self.kept = folds;
                 self.kept_read = true;
@@ -3610,8 +3661,9 @@ impl Shell {
                 self.arrangement_kept = arrangement;
                 let now = self.arrangement_now();
                 let moved = std::mem::replace(&mut self.arrangement, now) != self.arrangement;
-                if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
+                if std::mem::replace(&mut self.by_machine, by_machine) != by_machine || hid {
                     self.rearrange(window, cx);
+                    self.hidden_changed(cx);
                 } else if moved {
                     self.show_arrangement(cx);
                 }
@@ -3953,6 +4005,51 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::ProjectHidden { name, hide, result } => match result {
+                Ok(hidden) => {
+                    gpui_design_system::toast(
+                        match hide {
+                            true => gpui_design_system::Toast::success("Hidden on this machine")
+                                .detail(format!("{name}: show it again in Settings, General.")),
+                            false => gpui_design_system::Toast::success("Shown again")
+                                .detail(format!("{name} is back in the sidebar.")),
+                        },
+                        cx,
+                    );
+                    // The daemon's list is the truth (another window may have hidden another).
+                    if self.hidden != hidden {
+                        self.hidden = hidden;
+                        self.rearrange(window, cx);
+                        self.hidden_changed(cx);
+                    }
+                }
+                Err(why) => {
+                    // What the window showed at once is taken back.
+                    match hide {
+                        true => self.hidden.retain(|hidden| *hidden != name),
+                        false if !self.is_hidden(&name) => self.hidden.push(name.clone()),
+                        false => {}
+                    }
+                    self.rearrange(window, cx);
+                    self.hidden_changed(cx);
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure(match hide {
+                            true => "Not hidden",
+                            false => "Not shown again",
+                        })
+                        .detail(why),
+                        cx,
+                    );
+                }
+            },
+            Outcome::HiddenRead(Some(hidden)) => {
+                if self.hidden != hidden {
+                    self.hidden = hidden;
+                    self.rearrange(window, cx);
+                    self.hidden_changed(cx);
+                }
+            }
+            Outcome::HiddenRead(None) => {}
             Outcome::Renamed { refused } => gpui_design_system::toast(
                 match refused {
                     None => gpui_design_system::Toast::success("Session renamed"),
@@ -5293,6 +5390,8 @@ impl Shell {
         self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
+        // Hidden here, by this window or by `flottille project hide` since it opened.
+        self.perform_here(Command::HiddenRead);
         self.ask_appearance(None);
     }
 
@@ -5664,6 +5763,9 @@ impl Shell {
     fn show(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         let now = now_ms();
         let this = cx.entity().downgrade();
+        // A hidden project keeps its rows and its sessions' (a notification still opens its
+        // session): it is only not put in the sidebar, whose list folds its row away.
+        let hidden = self.hidden.clone();
         let mut projects = HashMap::new();
         let mut sessions = HashMap::new();
         let mut project_nodes = Vec::new();
@@ -5748,7 +5850,9 @@ impl Shell {
                             )
                         });
                     }
-                    nodes.push(node.clone());
+                    if !hidden.contains(&project.name) {
+                        nodes.push(node.clone());
+                    }
                     machine_projects.insert(key, node);
                 }
                 if snapshot.homes.first() == Some(home) {
@@ -5819,7 +5923,9 @@ impl Shell {
                         )
                     });
                 }
-                project_nodes.push(node.clone());
+                if !hidden.contains(&project.name) {
+                    project_nodes.push(node.clone());
+                }
                 projects.insert(project.name.clone(), node);
             }
             // The projects with no file go after the user's own list, to be removed.
@@ -5854,7 +5960,8 @@ impl Shell {
         }
         self.sections = sections;
         // The ended sessions leave their places for one folded group below every project.
-        let ended = snapshot.ended_sessions();
+        let mut ended = snapshot.ended_sessions();
+        ended.retain(|session| !hidden.contains(&session.project));
         let mut marks = Vec::new();
         let rows = self.session_rows(
             ended.iter().copied(),
@@ -5878,7 +5985,8 @@ impl Shell {
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
         // The roots blocked by someone else leave their projects for one folded group above it.
-        let blocked = snapshot.blocked_sessions();
+        let mut blocked = snapshot.blocked_sessions();
+        blocked.retain(|session| !hidden.contains(&session.project));
         let who = blocked_who(&blocked);
         let mut marks = Vec::new();
         let rows = self.session_rows(
@@ -5923,7 +6031,12 @@ impl Shell {
                 sidebar.set_arrangement(grouped, offered, cx)
             });
         }
-        let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+        let names: Vec<String> = snapshot
+            .projects
+            .iter()
+            .map(|p| p.name.clone())
+            .filter(|name| !hidden.contains(name))
+            .collect();
         let arranged = self.arranged_rows(&names, &self.projects, cx);
         self.sidebar_changed(cx);
         // GPUI Fast takes any update for a change: touch the list only when it did.
@@ -5980,8 +6093,9 @@ impl Shell {
         }
         // The sessions on other machines are found there, not here: they are not in `sessions`.
         let read = self.snapshot.clone();
+        let hidden = self.hidden.clone();
         self.switcher
-            .update(cx, |switcher, cx| switcher.set_snapshot(&read, cx));
+            .update(cx, |switcher, cx| switcher.set_snapshot(&read, &hidden, cx));
         self.ring(cx);
 
         self.reshow(window, cx);
@@ -6001,7 +6115,12 @@ impl Shell {
     fn reshow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected.clone() {
             None => {
-                if let Some(first) = self.snapshot.projects.first() {
+                let first = self
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| !self.is_hidden(&p.name));
+                if let Some(first) = first {
                     self.select(Selection::Project(first.name.clone()), window, cx);
                 }
             }
@@ -7012,7 +7131,14 @@ impl Shell {
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
             Some(Selection::Settings | Selection::Services | Selection::WhatsNew) | None => None,
         }
-        .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
+        .or_else(|| {
+            let first = self
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| !self.is_hidden(&p.name));
+            first.map(|p| p.name.clone())
+        });
         if let Some(project) = project {
             self.open(Selection::Project(project.clone()), window, cx);
             if let Some(composer) = self.composer_of(&project).cloned() {

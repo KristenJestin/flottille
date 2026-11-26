@@ -674,6 +674,15 @@ pub enum Command {
     Resume {
         session: String,
     },
+    /// Hides a project on this machine, or shows it again: this machine's own choice, which
+    /// reaches no other machine (`project.hide`, `project.unhide`).
+    HideProject {
+        name: String,
+        hide: bool,
+    },
+    /// What this machine hides now, as its daemon says it (`project.hidden`): another client may
+    /// have changed it since the window read it.
+    HiddenRead,
     /// Names a session: the user's title, which its agent can no longer change.
     Rename {
         session: String,
@@ -1478,6 +1487,15 @@ pub enum Outcome {
         session: String,
         refused: Option<String>,
     },
+    /// A project was hidden on this machine or shown again: what the machine hides now, or why the
+    /// daemon refused.
+    ProjectHidden {
+        name: String,
+        hide: bool,
+        result: Result<Vec<String>, String>,
+    },
+    /// What this machine hides, as its daemon said it; nothing when it did not.
+    HiddenRead(Option<Vec<String>>),
     /// The session was renamed, or the daemon refused with why.
     Renamed {
         refused: Option<String>,
@@ -3917,6 +3935,36 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             };
             Outcome::Resumed { session, refused }
         }
+        Command::HideProject { name, hide } => {
+            let method = if hide {
+                "project.hide"
+            } else {
+                "project.unhide"
+            };
+            let result = match ask_alone(connect, method, json!({"name": name}), bounds.quick) {
+                Ok(Ok(answer)) => Ok(answer["hidden"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect()),
+                Ok(Err(why)) | Err(why) => Err(why),
+            };
+            Outcome::ProjectHidden { name, hide, result }
+        }
+        Command::HiddenRead => Outcome::HiddenRead(
+            match ask_alone(connect, "project.hidden", json!({}), bounds.quick) {
+                Ok(Ok(answer)) => Some(
+                    answer["hidden"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect(),
+                ),
+                _ => None,
+            },
+        ),
         Command::Compact { session } => {
             let answer = ask_alone(
                 connect,
