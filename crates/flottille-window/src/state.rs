@@ -112,6 +112,25 @@ impl AgentState {
         }
     }
 
+    /// The mark a folded project shows for what it holds: needs you, then a failure, running,
+    /// waiting, and last a session blocked by someone else (the person). A blocked session never
+    /// needs the user, so it never shows as that.
+    pub fn strongest_held(states: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let rank = |state: &Self| match state {
+            Self::NeedsYou => Some(5),
+            Self::Failed => Some(4),
+            Self::Running => Some(3),
+            Self::Waiting => Some(2),
+            Self::Blocked => Some(1),
+            _ => None,
+        };
+        states
+            .into_iter()
+            .filter_map(|state| rank(&state).map(|rank| (rank, state)))
+            .max_by_key(|(rank, _)| *rank)
+            .map(|(_, state)| state)
+    }
+
     /// The mark a folded level shows for what it holds: waiting for the user beats running, and
     /// nothing else is shown.
     pub fn strongest(states: impl IntoIterator<Item = Self>) -> Option<Self> {
@@ -591,6 +610,20 @@ mod tests {
                 .filter(|s| s.moves())
                 .eq([Running, NeedsYou].iter())
         );
+    }
+
+    #[test]
+    fn a_folded_project_shows_its_strongest_mark() {
+        use AgentState::*;
+        // Needs you, then a failure, running, waiting, and last the person.
+        let ranked = [NeedsYou, Failed, Running, Waiting, Blocked];
+        for (at, strongest) in ranked.iter().enumerate() {
+            let held = ranked[at..].iter().rev().copied();
+            assert_eq!(AgentState::strongest_held(held), Some(*strongest));
+        }
+        // What is at rest shows nothing, and a blocked session never makes the project need you.
+        assert_eq!(AgentState::strongest_held([Idle, Completed, Stopped]), None);
+        assert_eq!(AgentState::strongest_held([Blocked, Idle]), Some(Blocked));
     }
 
     #[test]

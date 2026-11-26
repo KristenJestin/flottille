@@ -262,8 +262,9 @@ pub struct Folds {
     pub leads: HashMap<String, bool>,
     /// The "Ended" group: whether it is unfolded.
     pub ended: Option<bool>,
-    /// The "Blocked by others" group: whether it is unfolded.
-    pub blocked: Option<bool>,
+    /// Each project's `N blocked by others`, by the key of its project's node: the ones the user unfolded (a
+    /// foot is folded until then, so a folded one is not kept).
+    pub blocked: HashMap<String, bool>,
     /// The projects are shown by machine, one section each, instead of in one list.
     pub by_machine: bool,
     /// Each machine's section, by its name: whether it is unfolded.
@@ -296,7 +297,7 @@ impl Folds {
             projects: flags("projects"),
             leads: flags("leads"),
             ended: state["sidebar"]["ended"].as_bool(),
-            blocked: state["sidebar"]["blocked"].as_bool(),
+            blocked: flags("blocked"),
             by_machine: state["sidebar"]["by_machine"].as_bool().unwrap_or(false),
             machines: flags("machines"),
             on_machines: flags("on_machines"),
@@ -316,8 +317,8 @@ impl Folds {
         if let Some(ended) = self.ended {
             json["ended"] = json!(ended);
         }
-        if let Some(blocked) = self.blocked {
-            json["blocked"] = json!(blocked);
+        if !self.blocked.is_empty() {
+            json["blocked"] = json!(self.blocked);
         }
         if self.by_machine {
             json["by_machine"] = json!(true);

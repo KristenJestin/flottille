@@ -533,6 +533,8 @@ pub struct Subject {
     /// `SHOP-60`, `#5`, `#12`; `None` when free.
     pub key: Option<String>,
     pub title: Option<String>,
+    /// A ticket's page on its tracker, as the items last read it.
+    pub url: Option<String>,
     /// Where it comes from, in a few words: `the workspace's linked ticket`.
     pub from: String,
     /// What a free session last held: `SHOP-60 done · #117 merged`.
@@ -552,6 +554,7 @@ impl Subject {
             kind,
             key: said("key"),
             title: said("title"),
+            url: said("url"),
             from: said("from").unwrap_or_default(),
             last: said("last"),
             pull: pull["key"]
@@ -1493,20 +1496,33 @@ impl Snapshot {
         self.unconfigured.iter().any(|gone| gone.name == project)
     }
 
-    /// The live sessions of one row of `project`: this machine's alone on the row of the project
-    /// with no settings file (`gone`), and the others' on the group of that name, which has none
-    /// of this machine's while this machine's is that row.
+    /// The live sessions of one row of `project` that wait on no one else: this machine's alone on
+    /// the row of the project with no settings file (`gone`), and the others' on the group of that
+    /// name, which has none of this machine's while this machine's is that row.
     pub fn level_sessions(&self, project: &str, gone: bool) -> Vec<&Session> {
-        let twin = self.is_gone_here(project);
-        self.live_sessions_of(project)
-            .into_iter()
-            .filter(|session| !twin || self.is_here(session) == gone)
+        self.level_of(project, gone)
             .filter(|session| !self.blocked_apart(session))
             .collect()
     }
 
-    /// Whether `session` leaves its project's list for the "Blocked by others" group: a root no
-    /// agent leads, blocked by someone else, that leads no live session. A led one stays under its
+    /// The sessions of the same level that wait on someone else and sit at the foot of the project,
+    /// under `N blocked by others`, in the order the project has them: a session keeps its place
+    /// whatever its state.
+    pub fn level_blocked(&self, project: &str, gone: bool) -> Vec<&Session> {
+        self.level_of(project, gone)
+            .filter(|session| self.blocked_apart(session))
+            .collect()
+    }
+
+    fn level_of(&self, project: &str, gone: bool) -> impl Iterator<Item = &Session> {
+        let twin = self.is_gone_here(project);
+        self.live_sessions_of(project)
+            .into_iter()
+            .filter(move |session| !twin || self.is_here(session) == gone)
+    }
+
+    /// Whether `session` goes to its project's foot, `N blocked by others`: a root no agent
+    /// leads, blocked by someone else, that leads no live session. A led one stays under its
     /// pilot, which speaks for it; a pilot stays with the sessions it leads.
     pub fn blocked_apart(&self, session: &Session) -> bool {
         session.blocked.is_some()
@@ -1516,20 +1532,6 @@ impl Snapshot {
                 .iter()
                 .chain(&self.elsewhere)
                 .any(|led| !led.ended && led.pilot.as_deref() == Some(session.id.as_str()))
-    }
-
-    /// The roots blocked by someone else, whatever their project and their machine, the most
-    /// recently blocked first, as "Ended" holds its rows: the "Blocked by others" group's.
-    pub fn blocked_sessions(&self) -> Vec<&Session> {
-        let mut blocked: Vec<&Session> = self
-            .sessions
-            .iter()
-            .chain(&self.elsewhere)
-            .filter(|s| !s.ended && self.blocked_apart(s))
-            .collect();
-        let since = |s: &Session| s.blocked.as_ref().map_or(0, |b| b.since);
-        blocked.sort_by(|a, b| since(b).cmp(&since(a)).then(a.id.cmp(&b.id)));
-        blocked
     }
 
     /// The sessions that ended, whatever their project and their machine, the most recent end

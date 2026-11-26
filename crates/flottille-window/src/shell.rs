@@ -57,7 +57,7 @@ use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{Arranged, ArrangedGroup};
-use crate::tree::{BlockedNode, EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
+use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar, node_key};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -242,8 +242,6 @@ pub struct Shell {
     grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<EndedNode>>,
-    /// The "Blocked by others" group above it, made when a root is first blocked.
-    blocked: Option<Entity<BlockedNode>>,
     /// What the daemon keeps of what the sidebar has folded: read once at opening, which makes
     /// the nodes as they were left, then what was last written. `None` until it is read: nothing
     /// is written before, which would replace it with the defaults.
@@ -928,7 +926,6 @@ impl Shell {
             hidden: Vec::new(),
             grouped: false,
             ended: None,
-            blocked: None,
             kept: Folds::default(),
             kept_read: false,
             kept_asked: None,
@@ -3523,11 +3520,16 @@ impl Shell {
                 .as_ref()
                 .map(|group| group.read(cx).is_open())
                 .or(self.kept.ended),
+            // Only the feet the user unfolded: a foot is folded until then.
             blocked: self
-                .blocked
-                .as_ref()
-                .map(|group| group.read(cx).is_open())
-                .or(self.kept.blocked),
+                .projects
+                .values()
+                .chain(self.machine_projects.values())
+                .chain(self.gone.values())
+                .map(|node| node.read(cx))
+                .filter(|node| node.blocked_open(cx))
+                .map(|node| (node.blocked_key(), true))
+                .collect(),
         }
     }
 
@@ -3581,11 +3583,6 @@ impl Shell {
     /// The "Ended" group at the bottom of the tree, once a session ended.
     pub fn ended(&self) -> Option<&Entity<EndedNode>> {
         self.ended.as_ref()
-    }
-
-    /// The "Blocked by others" group above "Ended", once a root was blocked.
-    pub fn blocked(&self) -> Option<&Entity<BlockedNode>> {
-        self.blocked.as_ref()
     }
 
     fn relayout(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -5679,6 +5676,10 @@ impl Shell {
             if row.read(cx).waits() != session.waits {
                 row.update(cx, |row, cx| row.set_waits(&session.waits, cx));
             }
+            let blocked = session.blocked.is_some();
+            if row.read(cx).is_blocked() != blocked {
+                row.update(cx, |row, cx| row.set_blocked(blocked, cx));
+            }
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
@@ -5694,9 +5695,9 @@ impl Shell {
                     row.set_subject(session.subject.as_ref(), session.renamed, cx)
                 });
             }
-            // Ended or blocked apart, it sits among other projects' sessions: its row says whose
-            // it is, and the machine of one of another machine (#1280).
-            let scope = (session.ended || self.snapshot.blocked_apart(session)).then(|| {
+            // Ended, it sits among other projects' sessions: its row says whose it is, and the
+            // machine of one of another machine (#1280).
+            let scope = session.ended.then(|| {
                 match session.elsewhere.as_ref().filter(|there| !there.here) {
                     Some(there) => format!("{} on {}", session.project, there.machine),
                     None => session.project.clone(),
@@ -5769,6 +5770,21 @@ impl Shell {
                 cx,
             );
             let rows = nested(&live, &rows, cx);
+            let at_foot: Vec<&crate::model::Session> = snapshot
+                .level_blocked(&gone.name, true)
+                .into_iter()
+                .filter(|session| {
+                    machine.is_none_or(|machine| snapshot.machine_of(session) == machine)
+                })
+                .collect();
+            let at_foot = self.session_rows(
+                at_foot.iter().copied(),
+                &snapshot.homes,
+                sessions,
+                &mut marks,
+                now,
+                cx,
+            );
             let key = (gone.name.clone(), machine.map(str::to_owned));
             let node = self.gone.remove(&key).unwrap_or_else(|| {
                 let this = this.clone();
@@ -5783,12 +5799,18 @@ impl Shell {
                         .copied(),
                 }
                 .unwrap_or(true);
+                let unfolded = self
+                    .kept
+                    .blocked
+                    .get(&node_key(&name, machine, true))
+                    .copied()
+                    .unwrap_or(false);
                 let machine = machine.map(str::to_owned);
-                cx.new(|cx| ProjectNode::gone(name, machine, this, open, cx))
+                cx.new(|cx| ProjectNode::gone(name, machine, this, open, unfolded, cx))
             });
-            let mark = AgentState::strongest(marks);
-            if !node.read(cx).holds(&rows, mark, cx) {
-                node.update(cx, |node, cx| node.set(rows, mark, cx));
+            let mark = AgentState::strongest_held(marks);
+            if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
+                node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
             }
             // Beside the group of another machine's project of its name, the row says whose it is
             // (by machine, the sections do).
@@ -5858,6 +5880,19 @@ impl Shell {
                         cx,
                     );
                     let rows = nested(&live, &rows, cx);
+                    let at_foot: Vec<&crate::model::Session> = snapshot
+                        .level_blocked(&project.name, false)
+                        .into_iter()
+                        .filter(|session| snapshot.machine_of(session) == home.machine)
+                        .collect();
+                    let at_foot = self.session_rows(
+                        at_foot.iter().copied(),
+                        &snapshot.homes,
+                        &mut sessions,
+                        &mut marks,
+                        now,
+                        cx,
+                    );
                     let key = (project.name.clone(), home.machine.clone());
                     let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
                         let this = this.clone();
@@ -5870,11 +5905,17 @@ impl Shell {
                             .copied()
                             .unwrap_or(true);
                         let (name, machine) = key.clone();
-                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, cx))
+                        let unfolded = self
+                            .kept
+                            .blocked
+                            .get(&node_key(&name, Some(&machine), false))
+                            .copied()
+                            .unwrap_or(false);
+                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, unfolded, cx))
                     });
-                    let mark = AgentState::strongest(marks);
-                    if !node.read(cx).holds(&rows, mark, cx) {
-                        node.update(cx, |node, cx| node.set(rows, mark, cx));
+                    let mark = AgentState::strongest_held(marks);
+                    if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
+                        node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
                     }
                     // Its commands run on the machine this was read from.
                     let commands =
@@ -5951,15 +5992,30 @@ impl Shell {
                     cx,
                 );
                 let rows = nested(&live, &rows, cx);
+                let at_foot = snapshot.level_blocked(&project.name, false);
+                let at_foot = self.session_rows(
+                    at_foot.iter().copied(),
+                    &snapshot.homes,
+                    &mut sessions,
+                    &mut marks,
+                    now,
+                    cx,
+                );
                 let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                     let name = project.name.clone();
                     let this = this.clone();
                     let open = self.kept.projects.get(&name).copied().unwrap_or(true);
-                    cx.new(|cx| ProjectNode::new(name, None, this, open, cx))
+                    let unfolded = self
+                        .kept
+                        .blocked
+                        .get(&node_key(&name, None, false))
+                        .copied()
+                        .unwrap_or(false);
+                    cx.new(|cx| ProjectNode::new(name, None, this, open, unfolded, cx))
                 });
-                let mark = AgentState::strongest(marks);
-                if !node.read(cx).holds(&rows, mark, cx) {
-                    node.update(cx, |node, cx| node.set(rows, mark, cx));
+                let mark = AgentState::strongest_held(marks);
+                if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
+                    node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
                 }
                 if node.read(cx).commands() != project.commands {
                     node.update(cx, |node, cx| node.set_commands(project.commands, cx));
@@ -6037,31 +6093,6 @@ impl Shell {
             }
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
-        }
-        // The roots blocked by someone else leave their projects for one folded group above it.
-        let mut blocked = snapshot.blocked_sessions();
-        blocked.retain(|session| !hidden.contains(&session.project));
-        let who = blocked_who(&blocked);
-        let mut marks = Vec::new();
-        let rows = self.session_rows(
-            blocked.iter().copied(),
-            &snapshot.homes,
-            &mut sessions,
-            &mut marks,
-            now,
-            cx,
-        );
-        let present = !rows.is_empty();
-        if self.blocked.is_none() && present {
-            let open = self.kept.blocked.unwrap_or(false);
-            self.blocked = Some(cx.new(|cx| BlockedNode::new(this.clone(), open, cx)));
-        }
-        if let Some(group) = self.blocked.clone() {
-            if !group.read(cx).holds(&rows, &who, cx) {
-                group.update(cx, |group, cx| group.set(rows, who, cx));
-            }
-            self.sidebar
-                .update(cx, |sidebar, cx| sidebar.set_blocked(group, present, cx));
         }
         self.say_unlisted(cx);
         match grouped {
@@ -8088,21 +8119,6 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
-}
-
-/// Whom the blocked roots wait on, each once, in the order of their rows.
-fn blocked_who(sessions: &[&crate::model::Session]) -> Vec<String> {
-    let mut who: Vec<String> = Vec::new();
-    for name in sessions
-        .iter()
-        .filter_map(|session| session.blocked.as_ref())
-        .flat_map(|blocked| blocked.by.iter())
-    {
-        if !who.contains(name) {
-            who.push(name.clone());
-        }
-    }
-    who
 }
 
 /// The rows of a project's live sessions as the tree draws them: a session led by another of

@@ -214,16 +214,6 @@ pub fn project_blocked_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-blocked-{name}").into())
 }
 
-/// The element id of the "Blocked by others" group, above "Ended".
-pub fn blocked_id() -> ElementId {
-    ElementId::Name("blocked".into())
-}
-
-/// The element id of what the "Blocked by others" heading says: the count and who.
-pub fn blocked_who_id() -> ElementId {
-    ElementId::Name("blocked-who".into())
-}
-
 /// The element id of the block inside the "Ended" group that holds its rows and scrolls.
 pub fn ended_scroll_id() -> ElementId {
     ElementId::Name("ended-sessions".into())
@@ -551,8 +541,6 @@ pub struct Sidebar {
     offered: bool,
     /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
     ended: Option<(Entity<EndedNode>, bool)>,
-    /// The "Blocked by others" group, and whether it holds a session: absent while empty.
-    blocked: Option<(Entity<BlockedNode>, bool)>,
     /// The session whose ending the user is asked to confirm, and how many agents end.
     ending: Option<(String, usize)>,
     /// The count the confirmation said last, which it still shows while it fades out.
@@ -590,7 +578,6 @@ impl Sidebar {
             group_parts: HashMap::new(),
             offered: false,
             ended: None,
-            blocked: None,
             ending: None,
             said: 0,
             led: Vec::new(),
@@ -747,23 +734,6 @@ impl Sidebar {
             .is_some_and(|(held, shown)| *held == group && *shown == present);
         if !same {
             self.ended = Some((group, present));
-            cx.notify();
-        }
-    }
-
-    /// The "Blocked by others" group, and whether it holds a session now.
-    pub fn set_blocked(
-        &mut self,
-        group: Entity<BlockedNode>,
-        present: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let same = self
-            .blocked
-            .as_ref()
-            .is_some_and(|(held, shown)| *held == group && *shown == present);
-        if !same {
-            self.blocked = Some((group, present));
             cx.notify();
         }
     }
@@ -1132,25 +1102,6 @@ impl Render for Sidebar {
                     .test_support(),
             )
         });
-        // Above "Ended", the same footer's pattern: it unfolds and fades in with its first row,
-        // folds away with its last.
-        let blocked = self.blocked.clone().map(|(group, present)| {
-            presence(
-                "sidebar-blocked",
-                present,
-                div()
-                    .id("blocked-footer")
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(p.line)
-                    .bg(p.side)
-                    .px(space::SM)
-                    .pt(space::XS)
-                    .pb(space::SM)
-                    .child(group)
-                    .test_support(),
-            )
-        });
         let count = self.ending.as_ref().map_or(self.said, |(_, count)| *count);
         let this = cx.entity().downgrade();
         let modal = Modal::new("sidebar-end-modal", "End the session?")
@@ -1237,7 +1188,6 @@ impl Render for Sidebar {
                     .child(projects)
                     .children(sections),
             )
-            .children(blocked)
             .children(ended)
             .child(presence_of(
                 "sidebar-refused-line",
@@ -1358,6 +1308,8 @@ pub struct ProjectNode {
     removal: Option<Entity<ProjectRemoval>>,
     menu: Option<(Entity<Menu>, Subscription)>,
     sessions: Entity<Level>,
+    /// What it holds at its foot: its sessions blocked by someone else.
+    foot: Entity<BlockedFoot>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
 }
@@ -1370,6 +1322,7 @@ impl ProjectNode {
         machine: Option<String>,
         shell: WeakEntity<Shell>,
         open: bool,
+        blocked_open: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let sessions = cx.new(|_| Level::new());
@@ -1377,7 +1330,7 @@ impl ProjectNode {
             Some(machine) => format!("{name}-on-{machine}"),
             None => name.clone(),
         };
-        let fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions.clone(), open));
+        let (foot, fold) = Self::fold_of(&key, &sessions, &shell, open, blocked_open, cx);
         // Hiding works on any project of the list, whichever machine has it: one entry, the row's.
         let menu = {
             let (shell, name, key) = (shell.clone(), name.clone(), key.clone());
@@ -1411,9 +1364,28 @@ impl ProjectNode {
             removal: None,
             menu: Some((menu, watch)),
             sessions,
+            foot,
             fold,
             shell,
         }
+    }
+
+    /// The foot of the project `key` and the fold that holds its rows and the foot.
+    fn fold_of(
+        key: &str,
+        sessions: &Entity<Level>,
+        shell: &WeakEntity<Shell>,
+        open: bool,
+        blocked_open: bool,
+        cx: &mut Context<Self>,
+    ) -> (Entity<BlockedFoot>, Entity<Fold>) {
+        let foot = cx.new(|cx| BlockedFoot::new(key.to_owned(), shell.clone(), blocked_open, cx));
+        let body = cx.new(|_| ProjectBody {
+            sessions: sessions.clone(),
+            foot: foot.clone(),
+        });
+        let fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), body, open));
+        (foot, fold)
     }
 
     /// The row of a project whose settings file is gone, which the daemon still holds sessions or
@@ -1424,9 +1396,10 @@ impl ProjectNode {
         machine: Option<String>,
         shell: WeakEntity<Shell>,
         open: bool,
+        blocked_open: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut node = Self::new(name, machine, shell, open, cx);
+        let mut node = Self::new(name, machine, shell, open, blocked_open, cx);
         node.unconfigured = true;
         let removal = cx.new(|_| ProjectRemoval::new(node.shell.clone().into(), node.name.clone()));
         node.removal = Some(removal.clone());
@@ -1444,7 +1417,8 @@ impl ProjectNode {
         // Its ids are made from the key, which says it: so the fold is made again.
         let key = node.key();
         let sessions = node.sessions.clone();
-        node.fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions, open));
+        (node.foot, node.fold) =
+            Self::fold_of(&key, &sessions, &node.shell, open, blocked_open, cx);
         node
     }
 
@@ -1456,14 +1430,7 @@ impl ProjectNode {
     /// What its ids are made from: its name, and its machine in a machine's section; a row of a
     /// project with no file is [`GONE`] before.
     fn key(&self) -> String {
-        let key = match &self.machine {
-            Some(machine) => format!("{}-on-{machine}", self.name),
-            None => self.name.clone(),
-        };
-        match self.unconfigured {
-            true => format!("{GONE}{key}"),
-            false => key,
-        }
+        node_key(&self.name, self.machine.as_deref(), self.unconfigured)
     }
 
     /// What the list of projects tells its rows by: the name, [`GONE`] before it on a row of a
@@ -1563,33 +1530,48 @@ impl ProjectNode {
         self.sessions.read(cx).rows.clone()
     }
 
-    /// The rows of its foot, `N blocked by others`.
-    pub fn blocked(&self, _cx: &App) -> Vec<Entity<SessionRow>> {
-        Vec::new()
+    /// The rows of its foot, `N blocked by others`, in the order the project has its sessions.
+    pub fn blocked(&self, cx: &App) -> Vec<Entity<SessionRow>> {
+        self.foot.read(cx).rows(cx)
     }
 
     /// Whether its foot is unfolded.
-    pub fn blocked_open(&self, _cx: &App) -> bool {
-        false
+    pub fn blocked_open(&self, cx: &App) -> bool {
+        self.foot.read(cx).open
     }
 
-    /// Whether it holds these sessions and this mark already.
+    /// What the daemon keeps its foot's fold under: its own key, which tells a project of a
+    /// machine's section from the same project in the list.
+    pub fn blocked_key(&self) -> String {
+        self.key()
+    }
+
+    /// Whether it holds these sessions, these blocked ones and this mark already.
     pub fn holds(
         &self,
         sessions: &[Entity<SessionRow>],
+        blocked: &[Entity<SessionRow>],
         mark: Option<AgentState>,
         cx: &App,
     ) -> bool {
-        self.held == mark && self.sessions.read(cx).rows == sessions
+        self.held == mark
+            && self.sessions.read(cx).rows == sessions
+            && self.foot.read(cx).holds(blocked, cx)
     }
 
     pub fn set(
         &mut self,
         sessions: Vec<Entity<SessionRow>>,
+        blocked: Vec<Entity<SessionRow>>,
         mark: Option<AgentState>,
         cx: &mut Context<Self>,
     ) {
         self.set_rows(sessions, cx);
+        if !self.foot.read(cx).holds(&blocked, cx) {
+            self.foot.update(cx, |foot, cx| foot.set(blocked, cx));
+            // Its chevron comes with the foot's first row too.
+            cx.notify();
+        }
         self.held = mark;
         self.show_mark(cx);
     }
@@ -1622,6 +1604,20 @@ impl ProjectNode {
         self.show_mark(cx);
         cx.notify();
         kept_changed(&self.shell, cx);
+    }
+}
+
+/// What the ids of a project's node, and what the daemon keeps its foot's fold under, are made
+/// from: its name, and its machine in a machine's section; [`GONE`] before it on a row of a
+/// project with no file.
+pub fn node_key(name: &str, machine: Option<&str>, gone: bool) -> String {
+    let key = match machine {
+        Some(machine) => format!("{name}-on-{machine}"),
+        None => name.to_owned(),
+    };
+    match gone {
+        true => format!("{GONE}{key}"),
+        false => key,
     }
 }
 
@@ -1735,7 +1731,8 @@ impl Render for ProjectNode {
         let toggled = cx.entity().downgrade();
         // A project with nothing under it has nothing to fold: the kit fades its chevron out where
         // it stands, so its title starts where the others' do, and back in when something comes.
-        let holds = !self.sessions.read(cx).rows.is_empty();
+        let holds =
+            !self.sessions.read(cx).rows.is_empty() || !self.foot.read(cx).rows(cx).is_empty();
         let row = TreeLevel::Project
             .row(id, self.title.clone())
             .expanded(self.open)
@@ -1967,6 +1964,9 @@ pub struct Level {
     /// Takes at most [`ENDED_ROWS`] rows, or [`ENDED_SHARE`] of the window when that is less, and
     /// scrolls inside itself beyond it, in the block it names; `None` for a project's level.
     scroll: Option<ElementId>,
+    /// What its rows' frames are named after: a project's fold holds two levels, the foot's rows
+    /// are framed under a name of their own.
+    frames: &'static str,
 }
 
 /// How many rows the "Ended" group shows before it scrolls.
@@ -1983,6 +1983,15 @@ impl Level {
             rows: Vec::new(),
             list: Listing::default(),
             scroll: None,
+            frames: "tree-row",
+        }
+    }
+
+    /// The level of a project's foot, `N blocked by others`.
+    fn foot() -> Self {
+        Self {
+            frames: "blocked-row",
+            ..Self::new()
         }
     }
 
@@ -2012,7 +2021,7 @@ impl Render for Level {
         let rows = framed(
             &mut self.list,
             &self.rows,
-            "tree-row",
+            self.frames,
             |row, cx| row.read(cx).led_by().is_some(),
             cx,
         );
@@ -2152,67 +2161,52 @@ impl Render for EndedNode {
     }
 }
 
-/// The "Blocked by others" group, above "Ended": the roots at rest that wait on a person, of every
-/// project, folded until the user opens it (`docs/design.md` §10). Its heading says how many and
-/// who; it is absent while it holds none.
-pub struct BlockedNode {
+/// What a project holds at its foot: the sessions that wait on someone else, under a foldable
+/// `N blocked by others` (the rail's `N ended`), folded until the user opens it. The row is there
+/// while the project holds one, and unfolds and folds away with the first and the last.
+pub struct BlockedFoot {
     open: bool,
-    /// Whom its sessions wait on, each once.
-    who: Vec<String>,
+    /// What its ids are made from: its project's key.
+    key: String,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
 }
 
-impl BlockedNode {
-    /// The group, folded unless the user left it unfolded.
-    pub fn new(shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
-        let sessions = cx.new(|_| Level::scrolling_as(blocked_scroll_id()));
-        let fold = cx.new(|_| Fold::new("fold-blocked", sessions.clone(), open));
+impl BlockedFoot {
+    /// The foot of the project `key`, folded unless the user left it unfolded: made so, it never
+    /// animates from the other.
+    fn new(key: String, shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
+        let sessions = cx.new(|_| Level::foot());
+        let fold = cx.new(|_| Fold::new(format!("fold-blocked-{key}"), sessions.clone(), open));
         Self {
             open,
-            who: Vec::new(),
+            key,
             sessions,
             fold,
             shell,
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    /// Its sessions' rows, the most recently blocked first.
-    pub fn sessions(&self, cx: &App) -> Vec<Entity<SessionRow>> {
+    fn rows(&self, cx: &App) -> Vec<Entity<SessionRow>> {
         self.sessions.read(cx).rows.clone()
     }
 
-    /// What its heading says beside its name: `2 · Maya, Noor`.
-    pub fn said(&self, cx: &App) -> String {
-        heading_words(self.sessions.read(cx).rows.len(), &self.who)
+    /// Whether it holds these sessions already.
+    fn holds(&self, sessions: &[Entity<SessionRow>], cx: &App) -> bool {
+        self.sessions.read(cx).rows == sessions
     }
 
-    /// Whether it holds these sessions, blocked by these people, already.
-    pub fn holds(&self, sessions: &[Entity<SessionRow>], who: &[String], cx: &App) -> bool {
-        self.sessions.read(cx).rows == sessions && self.who == who
-    }
-
-    pub fn set(
-        &mut self,
-        sessions: Vec<Entity<SessionRow>>,
-        who: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
+    fn set(&mut self, sessions: Vec<Entity<SessionRow>>, cx: &mut Context<Self>) {
         if self.sessions.read(cx).rows != sessions {
             self.sessions
                 .update(cx, |level, cx| level.set(sessions, cx));
+            // The row counts them.
+            cx.notify();
         }
-        self.who = who;
-        // The heading counts them and names who.
-        cx.notify();
     }
 
-    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+    fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
@@ -2221,51 +2215,58 @@ impl BlockedNode {
     }
 }
 
-/// The words of the "Blocked by others" heading: the count, then who.
-fn heading_words(count: usize, who: &[String]) -> String {
-    match who.is_empty() {
-        true => count.to_string(),
-        false => format!("{count} · {}", who.join(", ")),
+impl Render for BlockedFoot {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let count = self.sessions.read(cx).rows.len();
+        let said = (count > 0).then(|| SharedString::from(format!("{count} blocked by others")));
+        let (id, open, fold) = (
+            ElementId::Name(format!("project-blocked-{}", self.key).into()),
+            self.open,
+            self.fold.clone(),
+        );
+        let (on_toggle, on_click) = (cx.entity().downgrade(), cx.entity().downgrade());
+        // It unfolds and fades in with the project's first blocked session, and folds away with
+        // its last, still saying how many while it goes.
+        presence_of(
+            ElementId::Name(format!("project-blocked-block-{}", self.key).into()),
+            said,
+            move |said| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .child(
+                        TreeLevel::Session
+                            .row(id, said)
+                            .expanded(open)
+                            .foldable(true)
+                            .on_toggle(move |_, _, cx| {
+                                on_toggle.update(cx, |foot, cx| foot.toggle(cx)).ok();
+                            })
+                            .on_click(move |_, _, cx| {
+                                on_click.update(cx, |foot, cx| foot.toggle(cx)).ok();
+                            }),
+                    )
+                    .child(fold)
+                    .into_any_element()
+            },
+        )
     }
 }
 
-/// The element id of the block inside the "Blocked by others" group that holds its rows.
-pub fn blocked_scroll_id() -> ElementId {
-    ElementId::Name("blocked-sessions".into())
+/// What a project's fold holds: its sessions' rows, and at its foot the blocked ones.
+struct ProjectBody {
+    sessions: Entity<Level>,
+    foot: Entity<BlockedFoot>,
 }
 
-impl Render for BlockedNode {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let said = SharedString::from(self.said(cx));
-        let faint = palette(cx).faint;
-        // The count and the names fade to their new words.
-        let words = div()
-            .id(blocked_who_id())
-            .aria_label(said.clone())
-            .min_w_0()
-            .overflow_hidden()
-            .test_support()
-            .child(changing("blocked-who-words", said, move |said| {
-                div()
-                    .text_size(px(11.))
-                    .text_color(faint)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(said)
-                    .into_any_element()
-            }));
-        let row = TreeLevel::Session
-            .row(blocked_id(), "Blocked by others")
-            .unfolds_upward()
-            .trailing(words)
-            .expanded(self.open)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
+impl Render for ProjectBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .child(row)
-            .child(self.fold.clone())
+            .child(self.sessions.clone())
+            .child(self.foot.clone())
     }
 }
 
@@ -2305,6 +2306,8 @@ pub struct SessionRow {
     /// while the line folds away.
     waits: SharedString,
     waits_shown: SharedString,
+    /// It waits on someone else: its second line says who, in the `away` ink.
+    blocked: bool,
     /// What a led session runs on, for the second line, and the last words it said, which stay
     /// drawn while the line folds away; empty for a session no agent leads.
     runs: SharedString,
@@ -2382,6 +2385,7 @@ impl SessionRow {
             said: SharedString::default(),
             words: SharedString::default(),
             waits: SharedString::default(),
+            blocked: false,
             waits_shown: SharedString::default(),
             runs: SharedString::default(),
             runs_shown: SharedString::default(),
@@ -2820,6 +2824,18 @@ impl SessionRow {
         &self.waits
     }
 
+    pub fn is_blocked(&self) -> bool {
+        self.blocked
+    }
+
+    /// Whether it waits on someone else, as the daemon derives it.
+    pub fn set_blocked(&mut self, blocked: bool, cx: &mut Context<Self>) {
+        if self.blocked != blocked {
+            self.blocked = blocked;
+            cx.notify();
+        }
+    }
+
     pub fn set_waits(&mut self, waits: &str, cx: &mut Context<Self>) {
         if self.waits() != waits {
             self.waits = SharedString::from(waits.to_owned());
@@ -3115,11 +3131,10 @@ const LINE: f32 = 16.;
 const FIRST: f32 = 18.;
 
 impl SessionRow {
-    /// Whether it is a row of the "Blocked by others" group, which says on its second line who it
-    /// waits for: a scoped row (its project is in its meta) that waits. An ended row waits for
-    /// nothing and has no second line.
+    /// Whether its second line says who it waits for: it is blocked by someone else, as the
+    /// daemon says it.
     fn blocked_line(&self) -> bool {
-        self.scope.is_some() && !self.waits.is_empty()
+        self.blocked && !self.waits.is_empty()
     }
 
     /// The second line of a row of the "Blocked by others" group: `waits for Maya · review of

@@ -244,6 +244,9 @@ pub fn forget_project(daemon: &Daemon, name: &str, agents: &[String]) {
             leads.remove(agent);
         }
     }
+    if let Some(blocked) = sidebar["blocked"].as_object_mut() {
+        blocked.remove(name);
+    }
     let _ = daemon.write(|store| {
         store.set_window_state(SIDEBAR, Some(&sidebar))?;
         Ok(((), None::<flottille_core::protocol::Event>))
