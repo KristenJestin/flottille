@@ -501,10 +501,10 @@ pub fn applied(daemon: &Arc<Daemon>, names: &[String]) {
             results::SHARED_LIMIT | results::SHARED_UNCHANGED => "tool_results.changed",
             appearance::SHARED_SHADE => "appearance.changed",
             name if TEXTS.contains(&name) => "review.changed",
-            "specs.language" | "specs.mode" => "extension.specs",
+            "specs.language" | "specs.mode" => "specs",
             "autosubscriptions.created_pull"
             | "autosubscriptions.branch_pull"
-            | "autosubscriptions.ticket" => "extension.autosubscriptions",
+            | "autosubscriptions.ticket" => "autosubscriptions",
             name if name.starts_with("review.") => "extension.changed",
             name if name.starts_with("about.") => "about.changed",
             _ => continue,
@@ -549,9 +549,9 @@ fn say(daemon: &Arc<Daemon>, event: &str) -> Result<(), Failure> {
             Ok(())
         }
         "extension.changed" => emit(event, json!({"name": "review", "project": null})),
-        "extension.specs" | "extension.autosubscriptions" => {
-            let name = event.trim_start_matches("extension.");
-            emit("extension.changed", json!({"name": name, "project": null}))
+        // An extension's setting: `extension.changed` with the extension's name.
+        "specs" | "autosubscriptions" => {
+            emit("extension.changed", json!({"name": event, "project": null}))
         }
         "rules.changed" => emit(event, json!({"project": null})),
         "tool_results.changed" => results::announce(daemon).map_err(invalid),
