@@ -868,9 +868,15 @@ fn back_to_stable_keeps_a_newer_beta_until_a_stable_passes_it() {
     assert_eq!(shown["ahead_of"], Value::Null);
 }
 
-/// A beta machine: the beta `old` listed, then the stable `NEWER` (the latest), each with notes,
-/// the user's channel set to beta through the window's way.
-fn beta_machine_with_a_newer_stable(releases: &Releases, programs: &Path, old: &str) -> User {
+/// A beta machine: the beta `old` listed, then the stable `NEWER` (the latest), the user's channel
+/// set to beta through the window's way. Its daemon runs from `binary`, a copy of its own: what
+/// is downloaded is staged beside the binary the daemon runs from, never beside the shared one.
+fn beta_machine_with_a_newer_stable(
+    releases: &Releases,
+    programs: &Path,
+    old: &str,
+    binary: &Path,
+) -> User {
     let beta = releases.release(&format!("v{old}"), old, &standing_for(programs, old), None);
     let stable = releases.release(
         &format!("v{NEWER}"),
@@ -884,6 +890,7 @@ fn beta_machine_with_a_newer_stable(releases: &Releases, programs: &Path, old: &
     );
     releases.list_as_github(&[&stable, &beta]);
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    runs_from(&start_through(&user, binary), binary);
     user.call("update.set", json!({"channel": "beta"})).unwrap();
     user
 }
@@ -892,7 +899,9 @@ fn beta_machine_with_a_newer_stable(releases: &Releases, programs: &Path, old: &
 fn a_beta_machine_that_took_a_stable_stays_on_the_beta_channel() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
-    let user = beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3");
+    let binary = installed();
+    let user =
+        beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3", &binary);
 
     // The check, which the window's Check now is, offers the stable above the latest beta.
     let shown = shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
@@ -909,10 +918,10 @@ fn a_beta_machine_that_took_a_stable_stays_on_the_beta_channel() {
 fn a_beta_machine_is_told_the_stable_s_notes_when_it_takes_the_stable() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
-    let user = beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3");
-    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
     let binary = installed();
-    runs_from(&start_through(&user, &binary), &binary);
+    let user =
+        beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3", &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
 
     user.call("update.download", json!({})).unwrap();
 
