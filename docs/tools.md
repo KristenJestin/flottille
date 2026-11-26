@@ -2138,7 +2138,8 @@ project `project` names), a session that ended and an empty text.
   `session_send`, and that neither asked, reported nor made a request for the user, does not wake
   it again at its end: that message woke it. A turn that went on after its message (more calls, a
   question, a report) wakes it at its end as any other (#1540); the wake of a turn carries that turn's last message only (`(no message
-  this turn)` when it said nothing), and says it asked only when it did in that turn.
+  this turn)` when it said nothing), and says it asked when it did in that turn, or when a question
+  of an earlier turn, cancelled to take a delivery, was not said yet.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.

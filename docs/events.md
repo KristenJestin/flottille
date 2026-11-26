@@ -1005,7 +1005,7 @@ after, whatever ended the turns between. No sign of activity.
 | Field | |
 |---|---|
 | `agent` | |
-| `upto` | The `seq` of the last `agent.asked` event the wake said. |
+| `upto` | The `seq` of the last `agent.asked` event the wake said: the questions past the wake's character budget, shown only as `[N more]`, count as said too, as requests do. |
 
 #### `agent.released`
 
