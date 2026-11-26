@@ -139,15 +139,16 @@ one for a user who never chose (`"picked": true`), or the user saw the notice of
 
 A program's own sign-in or sign-out, started from the window, moved (`signin.start`,
 `signin.cancel`, `signin.sign_out`; `docs/agents.md`, "Signing in"). It says the program and its
-state only: never the address, the code nor anything the program printed, since every event is
-stored. `signin.list` says the rest.
+state only: never the address nor the code, and of what the program printed only the last lines
+of a failure's error output (`why`), masked, since every event is stored. `signin.list` says the
+rest.
 
 | Field | |
 |---|---|
 | `program` | `claude`, `codex`, `gh`, `glab`, `acli` or `bkt`. |
 | `host` | The host it signs in to, `null` for an agent. |
 | `state` | `started`, `signed_in`, `failed`, `cancelled` or `signed_out`. |
-| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed), never the program's words. |
+| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed) and, when the program ended with a code, its last three lines of error output, masked, without any line holding an address or a one-time code (#1529). |
 
 ### `judge.changed`
 

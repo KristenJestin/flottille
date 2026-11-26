@@ -9,7 +9,7 @@
 //! The methods are the user's (`drive`, `docs/protocol.md`, "The sign-in methods"): no tool of an
 //! agent reaches them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,8 @@ type Answer = Result<Value, Failure>;
 fn status_time() -> Duration {
     crate::forge::gh_time()
 }
+/// How many of a failed sign-in's last lines of error output its toast says.
+const SAID_LINES: usize = 3;
 /// A sign-in is given this long: a device code lasts 15 minutes.
 const FLOW_TIME: Duration = Duration::from_secs(15 * 60);
 /// `signin.start` waits this long for the address and the code before it answers.
@@ -140,7 +142,11 @@ impl Program {
                 false,
             ),
             Program::Glab => run(&["auth", "login", "--hostname", host, "--device"], false),
-            Program::Acli => run(&["jira", "auth", "login", "--web"], false),
+            // Without a terminal it cannot ask which site to sign in to (its picker "Select the
+            // site to login"), so the row's site answers it (#1529). No project names a site:
+            // its documented `--web` alone.
+            Program::Acli if host.is_empty() => run(&["jira", "auth", "login", "--web"], false),
+            Program::Acli => run(&["jira", "auth", "login", "--web", "--site", host], false),
             Program::Bkt if host == declared::BITBUCKET_CLOUD => run(
                 &[
                     "auth",
@@ -546,12 +552,17 @@ impl Reading {
     }
 }
 
-/// Reads a stream of the sign-in line by line, keeping only the address and the code.
+/// The last lines a sign-in said on its error output, held to say why it failed.
+type Tail = Arc<Mutex<VecDeque<String>>>;
+
+/// Reads a stream of the sign-in line by line, keeping only the address and the code, and, of its
+/// error output (`tail`), the last lines.
 async fn read_stream(
     program: Program,
     id: u64,
     stream: impl AsyncRead + Unpin,
     reading: Arc<Mutex<Reading>>,
+    tail: Option<Tail>,
 ) {
     let mut lines = BufReader::new(stream).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -560,6 +571,22 @@ async fn read_stream(
             reading.line(&line);
             (reading.address.clone(), reading.code.clone())
         };
+        // The one-time code and the address are the user's to see in the dialog, never in a
+        // failure said in an event: a line holding either is not kept.
+        let sensitive = line.contains("://")
+            || line.to_ascii_lowercase().contains("one-time code")
+            || code_in(&line).is_some()
+            || code.as_deref().is_some_and(|code| line.contains(code));
+        if let Some(tail) = &tail
+            && !sensitive
+            && !line.trim().is_empty()
+        {
+            let mut tail = tail.lock().unwrap();
+            tail.push_back(line.trim().to_owned());
+            if tail.len() > SAID_LINES {
+                tail.pop_front();
+            }
+        }
         let mut running = running().lock().unwrap();
         if let Some(flow) = running.get_mut(&program).filter(|flow| flow.id == id) {
             let changed = flow.address != address || flow.code != code;
@@ -802,11 +829,13 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
         let said = Arc::new(Notify::new());
         let reading = Arc::new(Mutex::new(Reading::default()));
         if let Some(out) = child.stdout.take() {
-            tokio::spawn(read_stream(program, id, out, reading.clone()));
+            tokio::spawn(read_stream(program, id, out, reading.clone(), None));
         }
-        if let Some(err) = child.stderr.take() {
-            tokio::spawn(read_stream(program, id, err, reading));
-        }
+        let tail = Tail::default();
+        let errors = child
+            .stderr
+            .take()
+            .map(|err| tokio::spawn(read_stream(program, id, err, reading, Some(tail.clone()))));
         flows.insert(
             program,
             Running {
@@ -825,7 +854,15 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
                 ended: false,
             },
         );
-        tokio::spawn(follow(daemon.clone(), program, id, path, child));
+        tokio::spawn(follow(
+            daemon.clone(),
+            program,
+            id,
+            path,
+            child,
+            errors,
+            tail,
+        ));
         said
     };
     announce(&daemon, program, host.as_deref(), "started", None);
@@ -854,14 +891,30 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
     }
 }
 
+/// The last lines of error output of a failed sign-in, masked as every output is: what the
+/// program said, never what it printed on its output (the address and the code are there).
+fn said_by(tail: &Tail) -> String {
+    let lines: Vec<String> = tail
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|line| masked(&declared::without_credentials(line)))
+        .map(|line| line.chars().take(200).collect())
+        .collect();
+    lines.join(" / ")
+}
+
 /// Waits for the sign-in's end (cut after `FLOW_TIME`), then says how it ended: signed in by the
-/// program's own status, or why not, in a sentence of Flottille's (never what it printed).
+/// program's own status, or why not, in a sentence of Flottille's and, when it failed, the last
+/// lines the program said on its error output (masked).
 async fn follow(
     daemon: Arc<Daemon>,
     program: Program,
     id: u64,
     path: PathBuf,
     mut child: tokio::process::Child,
+    errors: Option<tokio::task::JoinHandle<()>>,
+    tail: Tail,
 ) {
     let ended = tokio::time::timeout(FLOW_TIME, child.wait()).await;
     let pid = child.id();
@@ -870,6 +923,10 @@ async fn follow(
             crate::agents::signal_group(pid, libc::SIGKILL);
         }
         let _ = child.wait().await;
+    }
+    if let Some(errors) = errors {
+        // What a program started itself may hold its pipe open: the lines read so far are enough.
+        let _ = tokio::time::timeout(Duration::from_secs(1), errors).await;
     }
     let (host, cancelled) = {
         let mut flows = running().lock().unwrap();
@@ -902,12 +959,20 @@ async fn follow(
                     .map(|host| format!(" to {host}"))
                     .unwrap_or_default()
             ),
-            Ok(Ok(exit)) => format!(
-                "{}'s sign-in ended without signing in (exit code {})",
-                program.name(),
-                exit.code()
-                    .map_or_else(|| "none".to_owned(), |code| code.to_string())
-            ),
+            Ok(Ok(exit)) => {
+                let said = said_by(&tail);
+                format!(
+                    "{}'s sign-in ended without signing in (exit code {}){}",
+                    program.name(),
+                    exit.code()
+                        .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                    if said.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {said}")
+                    }
+                )
+            }
             Ok(Err(error)) => format!(
                 "{}'s sign-in could not be followed: {error}",
                 program.name()
