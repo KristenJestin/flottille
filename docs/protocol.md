@@ -222,6 +222,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `draft.list` | local |
 | `window.get` | local |
 | `window.set` | local |
+| `project.hide` | local |
+| `project.unhide` | local |
+| `project.hidden` | local |
 | `vault.list` | read |
 | `vault.set` | drive |
 | `vault.remove` | drive |
