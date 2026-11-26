@@ -1810,3 +1810,41 @@ fn a_child_launched_on_another_machine_that_reported_goes_into_ended(cx: &mut Te
     settle(&shell, cx);
     assert!(present(cx, live.into()), "behind its parent's ended row");
 }
+
+#[gpui_kit::test]
+fn a_launch_closed_while_its_machine_is_off_leaves_its_pilot_s_rail_too(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("its turn ended on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    open_page(&shell, &pilot, cx);
+    let live = format!("rail-remote-{agent}");
+    until(&shell, cx, "its row in the pilot's rail", |cx| {
+        present(cx, live.clone().into())
+    });
+    server_off(&pc, &server, &shell, cx);
+
+    // The user ends it from its row's menu, the close waiting for its machine.
+    cx.update(|window, cx| window.hover(session_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(flottille_window::tree::session_menu_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(flottille_window::tree::session_end_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("sidebar-end-confirm", cx));
+
+    // Its sidebar row folds away, and so does its row in the pilot's rail: no live row is left
+    // for a session the user closed.
+    until(&shell, cx, "its sidebar row is gone", |cx| {
+        !present(cx, session_id(&row))
+    });
+    until(&shell, cx, "its row leaves the pilot's rail", |cx| {
+        !present(cx, live.clone().into())
+    });
+}
