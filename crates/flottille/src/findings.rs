@@ -47,10 +47,17 @@ pub fn is(args: &Value) -> bool {
 /// the guide that says when to use them.
 pub fn offer(tool: &mut rmcp::model::Tool) {
     let mut schema = Value::Object((*tool.input_schema).clone());
-    if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+    // Read, never indexed into: indexing adds the keys that are missing, as `null` (#1509).
+    if let Some(actions) = schema
+        .pointer_mut("/properties/action/enum")
+        .and_then(Value::as_array_mut)
+    {
         actions.extend(ACTIONS.iter().map(|action| json!(action)));
     }
-    if let Some(fields) = schema["properties"].as_object_mut() {
+    if let Some(fields) = schema
+        .pointer_mut("/properties")
+        .and_then(Value::as_object_mut)
+    {
         let texts = [
             (
                 "title",
