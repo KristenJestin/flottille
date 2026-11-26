@@ -6,7 +6,7 @@
 //! folders; the people in it are invented.
 
 use crate::common;
-use crate::rules::{instructions, project, root};
+use crate::rules::{cli, done, held, instructions, project, request, root, settled};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
@@ -179,4 +179,126 @@ fn about_toml_edited_by_hand_reaches_a_new_session() {
     let (later, _) = root(&user, None);
     let (before, _) = instructions(&user, &later);
     assert!(!before.contains("About the user"), "{before}");
+}
+
+// What an agent reads and proposes of About you (`docs/tools.md`, "The project").
+
+#[test]
+fn an_agent_reads_about_you() {
+    let user = User::with_fake_agent();
+    project(&user);
+    user.call("about.set", json!({"name": SAM, "notes": NOTES}))
+        .unwrap();
+    let (_, mcp) = root(&user, None);
+
+    let read = done(mcp.call("project", json!({"action": "about"})));
+    let (said, shown) = read.split_once('\n').unwrap_or_else(|| panic!("{read}"));
+    assert!(said.contains("only the user can allow"), "{said}");
+    let shown: serde_json::Value =
+        serde_json::from_str(shown).unwrap_or_else(|e| panic!("{e}: {read}"));
+    assert_eq!(shown, user.call("about.show", json!({})).unwrap());
+}
+
+#[test]
+fn an_agent_proposes_a_note_for_this_machine() {
+    let user = User::with_fake_agent();
+    project(&user);
+    user.call("about.set", json!({"notes": NOTES})).unwrap();
+    let (running, mcp) = root(&user, None);
+    let note = "Answer in French.";
+
+    let asked = request(
+        &user,
+        mcp.call("project", json!({"action": "set_about", "notes": note})),
+    );
+    let number = asked["number"].as_u64().unwrap();
+    assert_eq!(asked["class"], "base", "{asked}");
+    // The card shows the text before and after.
+    assert_eq!(
+        asked["says"],
+        json!([
+            "Change what every agent should know, in About you on this machine: every agent started after it reads it, on every project.",
+            format!("Before: {NOTES}"),
+            format!("After: {note}"),
+        ])
+    );
+    // Nothing is written while it waits.
+    let file = || std::fs::read_to_string(user.path("config/flottille/about.toml")).unwrap();
+    assert!(!file().contains(note));
+
+    cli(&user, &["approve", &number.to_string()]);
+    let body = settled(&user, number).body;
+    assert!(body.contains("Saved."), "{body}");
+    assert!(file().contains(note), "{}", file());
+    // The one that asked keeps what it started with; the next one reads the new text.
+    let (kept, _) = instructions(&user, &running);
+    assert!(kept.contains(NOTES) && !kept.contains(note), "{kept}");
+    let (next, _) = root(&user, None);
+    let (before, _) = instructions(&user, &next);
+    assert!(before.contains(note), "{before}");
+}
+
+#[test]
+fn a_refused_about_you_change_writes_nothing() {
+    let user = User::with_fake_agent();
+    project(&user);
+    user.call("about.set", json!({"name": SAM})).unwrap();
+    let (_, mcp) = root(&user, None);
+    let was = std::fs::read_to_string(user.path("config/flottille/about.toml")).unwrap();
+
+    let number = held(mcp.call("project", json!({"action": "set_about", "name": "Alex"})));
+    cli(&user, &["deny", &number.to_string()]);
+    let body = settled(&user, number).body;
+    assert!(body.contains("was refused by the user"), "{body}");
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/about.toml")).unwrap(),
+        was
+    );
+    assert_eq!(user.call("about.show", json!({})).unwrap()["name"], SAM);
+}
+
+#[test]
+fn about_you_is_held_even_in_full() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (agent, mcp) = root(&user, None);
+    user.call("agent.mode", json!({"agent": agent, "mode": "full"}))
+        .unwrap();
+
+    let asked = request(
+        &user,
+        mcp.call("project", json!({"action": "set_about", "notes": NOTES})),
+    );
+    assert_eq!(asked["class"], "base", "{asked}");
+    assert!(!user.path("config/flottille/about.toml").exists());
+}
+
+#[test]
+fn an_about_you_change_past_the_limit_is_refused() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let long = json!({"notes": "é".repeat(8_001)});
+    // The same refusal as the window's, said at once: nothing is held.
+    let window = user.call("about.set", long.clone()).unwrap_err().1;
+    let mut call = long;
+    call["action"] = "set_about".into();
+    let refused = mcp.call("project", call);
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.contains(&window),
+        "{} / {window}",
+        refused.text
+    );
+    let nothing = mcp.call("project", json!({"action": "set_about"}));
+    assert!(
+        nothing.error && nothing.text.contains("set_about needs"),
+        "{}",
+        nothing.text
+    );
+    assert_eq!(
+        user.call("approval.list", json!({})).unwrap()["requests"],
+        json!([])
+    );
+    assert!(!user.path("config/flottille/about.toml").exists());
 }

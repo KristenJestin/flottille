@@ -73,7 +73,9 @@ pub enum RunState {
     Running,
     /// Its process ended by itself, with an exit code or by a signal.
     Exited,
-    /// Ended by `run_status` with `action: stop`, or by the call that started it being stopped.
+    /// Ended by `run_status` with `action: stop`, the user, its session ending or its workspace
+    /// removed: who stopped it is kept beside it (`stopped_by`). A call given up never stops its
+    /// run.
     Stopped,
     /// The daemon that ran it stopped, or died.
     Interrupted,

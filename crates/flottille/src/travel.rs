@@ -156,12 +156,41 @@ pub async fn send(
     place: &[(String, PathBuf)],
     testing: Testing,
 ) -> Result<Value, String> {
-    let remote = remote_of(daemon)?;
-    let (link, key) = remote.link_to(machine)?;
-    if !stored(daemon.read(|store| store.travels("out", None, launch)))?.is_empty() {
-        return Err(format!("launch {launch} was sent already"));
+    let (sent, snapshots) =
+        send_placing(daemon, machine, launch, project, place, testing, || ()).await;
+    snapshots.remove().await;
+    sent.map(|(answer, ())| answer)
+}
+
+/// [`send`], `placing` called once the code is there, as its workspace is asked, and what it
+/// returned given back with the answer; the snapshots left for the caller to remove, once it
+/// recorded what it must at once.
+pub(crate) async fn send_placing<'a, G>(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    launch: &str,
+    project: &str,
+    place: &'a [(String, PathBuf)],
+    testing: Testing,
+    placing: impl FnOnce() -> G,
+) -> (Result<(Value, G), String>, Snapshots<'a>) {
+    let mut snapshots = Snapshots {
+        launch: launch.to_owned(),
+        folders: Vec::new(),
+    };
+    let remote = match remote_of(daemon) {
+        Ok(remote) => remote,
+        Err(why) => return (Err(why), snapshots),
+    };
+    let (link, key) = match remote.link_to(machine) {
+        Ok(link) => link,
+        Err(why) => return (Err(why), snapshots),
+    };
+    match stored(daemon.read(|store| store.travels("out", None, launch))) {
+        Ok(travels) if travels.is_empty() => {}
+        Ok(_) => return (Err(format!("launch {launch} was sent already")), snapshots),
+        Err(why) => return (Err(why), snapshots),
     }
-    let mut snapshotted = Vec::new();
     let sent = send_place(
         daemon,
         &remote,
@@ -170,22 +199,35 @@ pub async fn send(
         project,
         place,
         &testing,
-        &mut snapshotted,
+        &mut snapshots.folders,
+        placing,
     )
     .await;
-    for folder in snapshotted {
-        if let Err(error) = bundle::remove_ref(folder, &bundle::outgoing_ref(launch)).await {
-            eprintln!(
-                "flottille daemon: the snapshot of launch {launch} in {} is kept: {error}",
-                folder.display()
-            );
+    (sent, snapshots)
+}
+
+/// The snapshots made of a place for a launch, whose refs are removed once it is sent.
+pub(crate) struct Snapshots<'a> {
+    launch: String,
+    folders: Vec<&'a Path>,
+}
+
+impl Snapshots<'_> {
+    pub(crate) async fn remove(self) {
+        let launch = &self.launch;
+        for folder in self.folders {
+            if let Err(error) = bundle::remove_ref(folder, &bundle::outgoing_ref(launch)).await {
+                eprintln!(
+                    "flottille daemon: the snapshot of launch {launch} in {} is kept: {error}",
+                    folder.display()
+                );
+            }
         }
     }
-    sent
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_place<'a>(
+async fn send_place<'a, G>(
     daemon: &Arc<Daemon>,
     remote: &Remote,
     (link, key, machine): (&Link, &PublicKey, &str),
@@ -194,7 +236,8 @@ async fn send_place<'a>(
     place: &'a [(String, PathBuf)],
     testing: &Testing,
     snapshotted: &mut Vec<&'a Path>,
-) -> Result<Value, String> {
+    placing: impl FnOnce() -> G,
+) -> Result<(Value, G), String> {
     let mut sent = Vec::new();
     let mut records = Vec::new();
     let mut branch = None;
@@ -262,6 +305,7 @@ async fn send_place<'a>(
     let Some(branch) = branch else {
         return Err("a place has at least one repository".to_owned());
     };
+    let placing = placing();
     let placed = ask(
         link,
         Git::Place(GitPlace {
@@ -280,7 +324,7 @@ async fn send_place<'a>(
     }))?;
     let mut answer = placed;
     answer["repositories"] = sent.into();
-    Ok(answer)
+    Ok((answer, placing))
 }
 
 /// Sends back the new commits of the workspace this machine made for `launch`: for each of its

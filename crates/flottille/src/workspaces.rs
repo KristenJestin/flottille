@@ -3637,7 +3637,7 @@ pub async fn workspace_remove(
             Err(failure) => return Outcome::Failed(failure.message),
         };
         for run in runs {
-            crate::runs::stop_by_user(daemon, &run.id).await;
+            crate::runs::stop_by_removal(daemon, &run.id, agent).await;
         }
     }
     let removed = match removed(

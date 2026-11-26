@@ -165,7 +165,7 @@ fn opened(pid: u32) -> io::Result<Network> {
 pub async fn made(vault: &Path) -> Result<Network, String> {
     let pasta = pasta().ok_or_else(|| format!("{NO_PASTA}: {INSTALL}"))?;
     ended(vault);
-    let program = std::env::current_exe()
+    let program = crate::program::own(crate::program::Started::Here)
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     // SAFETY: getuid and getgid cannot fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };

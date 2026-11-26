@@ -498,9 +498,20 @@ pending requests.
   back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
-  A call stopped by its client stops its run.
+  A call its client gives up because Flottille cancelled its turn (to take a delivery that was
+  not taken in time, a message sent at once, a compaction) leaves its run going, as the timeout
+  does: its end is delivered, also when it ends as the call is given up. **The user's Stop on the
+  turn stops the runs its calls wait on**, as the user's (`was stopped by the user`), and their
+  ends are not delivered: that would start again the turn the user stopped. **A run goes on to
+  its end unless someone stops it**: the agent (`run_status` with `action: stop`), the user, its
+  session ending, the removal of its workspace by an agent of its tree, or the daemon stopping;
+  no one else.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
-  `was killed by signal N`, `was stopped`, `was interrupted…`), then, while it runs, `it keeps
+  `was killed by signal N (SIGKILL) from outside Flottille: the system's out-of-memory killer, or
+  a kill`, `was killed by signal N from outside Flottille`, `was stopped by the agent that started
+  it`, `was stopped by the user`, `was stopped because its session ended`, `was stopped because
+  its workspace was removed`, `was interrupted: Flottille stopped while it ran`): who stopped it, never only that it stopped (`was stopped`
+  alone is a run stopped before who stopped it was kept), then, while it runs, `it keeps
   going: read it with run_status {"run": "<id>"}, stop it with run_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
@@ -708,12 +719,14 @@ pending requests.
   pinned as a note on the next tool result): the line, how it ended (`exited with code N`, `was
   killed by signal N`, or `was stopped by the user`), how long it ran and the last 20 lines of its
   output, masked. A command whose call saw it end, one the agent stopped with `run_status`,
-  and those that stop with their agent or the daemon deliver nothing. No timer is involved. A
+  those that stop with their agent or the daemon, those the user's Stop on the turn stopped, and
+  those of the agent that removed their workspace deliver nothing (another agent of its tree is
+  told `was stopped because its workspace was removed`). No timer is involved. A
   command that ends at the very moment its call answers can give both: the call's answer (the end
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
   nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops
   while its call still waits says so in that answer (`was stopped by the user`); the agent's own
-  stop says `was stopped`. A command the user restarts from the window (`run.restart`) is not
+  stop says `was stopped by the agent that started it`. A command the user restarts from the window (`run.restart`) is not
   delivered as stopped: the agent is told, in a `command-ended` delivery of its own for each
   restart (so also when it was already told the first run's end), that the user restarted it and
   which run it now is (its own, read with `run_status`); if the stop happened and the new run could
@@ -1600,12 +1613,12 @@ child none of them (it does its brief). Families with an `action`, as `agent_sta
 | `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
 | `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. A command imported from a `.claude` folder points at a file: `show` names it and gives its text as it is now, and an edit of its instructions is refused (the file's to edit). |
 | `setup {action: list \| add \| edit \| remove \| move, number?, to?, step?}` | The project's setup (`docs/projects.md`, "The setup"), its steps numbered from 1 in order. `add {step, number?}` adds one, the last when `number` is left out; `edit {number, step}` replaces one; `remove {number}`; `move {number, to}`. A `step` is whole, as the file has it: one of `copy` (globs), `link`, `root_entries`, `run` (a line) and `task`, with `repository` or `for_each_repository`, and `time_limit` (seconds) with `run` or `task`; it is checked as the file is. The workspaces made after play it; one already made keeps its own. |
-| `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the global rules, the user's else Flottille's default, then the project's own; or the project's alone when it says `rules_alone`, `docs/projects.md`, "Rules"), and says when the project's text repeats the global one; `set_rules {text?, rules_alone?}` replaces the project's own rules by `text` (8,000 characters at most) and sets whether it uses only them (`rules_alone`), one of the two at least, what is left out being kept, for the agents created after: the one that asked keeps what it started with. |
+| `project {action: settings \| set_settings \| rules \| set_rules \| about \| set_about, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the global rules, the user's else Flottille's default, then the project's own; or the project's alone when it says `rules_alone`, `docs/projects.md`, "Rules"), and says when the project's text repeats the global one; `set_rules {text?, rules_alone?}` replaces the project's own rules by `text` (8,000 characters at most) and sets whether it uses only them (`rules_alone`), one of the two at least, what is left out being kept, for the agents created after: the one that asked keeps what it started with. `about` reads About you (`docs/design.md` §8, "Instructions") as `about.show` answers it: what agents read, the fields this machine holds and the values of all machines; `set_about {name?, pronouns?, notes?}` writes this machine's own fields through `about.set`, with its checks and limits (8,000 characters for the notes, 100 and one line for the others, no secret), each field given whole, one given empty cleared, for the agents started after: the one that asked keeps what it started with. The values of all machines change only as a request the user's device signs (`about.share`), in the window, on All machines: no action of an agent sets them. |
 
 The file is written where it stands, its comments kept.
 
 - **Reads run at once.** `list` and `show` of `tasks`, `skills` and `commands`, `setup` `list`,
-  `project` `settings` and `rules`.
+  `project` `settings`, `rules` and `about`.
 - **Every write is to judge** (a card in Ask, the judge in Auto) unless it is base below, as any call is (answered at
   once that it waits, the result later as a delivery). Its request is an `action`: it says what
   it changes in words, one sentence each (`Add the skill style (docs/STYLE.md): The code style`;
@@ -1615,7 +1628,10 @@ The file is written where it stands, its comments kept.
   changed meanwhile is not written (`Request #n (commands) was not executed: what it does changed
   since the user allowed it; it would now: …`). A change of the tracker is base: nothing checks it
   against the project, as a forge is checked against its remote. A `set_rules` is base too: it
-  rewrites the instructions of every agent created after it, so no judge decides it.
+  rewrites the instructions of every agent created after it, so no judge decides it. A
+  `set_about` is base and held for the user in every mode, Full included: About you is read by
+  every agent started after it, on every project, so a text an agent writes there is an
+  instruction to all of them. Its request says each field before and after.
 - **A line set is judged as a run of it.** A task's `line` and a setup step's `run` or `task`
   run later without the gate: a task in a workspace is harmless, a workspace's setup plays on
   its own. So `add` and `edit` that set one are also judged as `run` would judge that run, with
@@ -2705,7 +2721,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
      emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads the tickets with
      `tickets` and the pull requests with `forge`;
    - a `forge` merge that waives the checks or a review; a change of the project's tracker
-     or of its rules (`set_rules`);
+     or of its rules (`set_rules`); a change of About you (`set_about`), held in Full too;
    - a write of `forge` or `tickets` whose title or body, or a session for the user whose brief,
      holds what the masking takes for a secret; a session for the user started by a session an
      agent started ("Sessions an agent starts");

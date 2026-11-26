@@ -103,6 +103,10 @@ struct ProjectCall {
     text: Option<String>,
     /// set_rules: whether the project's agents get its rules alone.
     rules_alone: Option<bool>,
+    /// set_about: About you's fields, as `about.set` takes them.
+    name: Option<String>,
+    pronouns: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +183,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("commands", "add" | "edit" | "remove") => Some("commands"),
         ("project", "set_settings") => Some("settings"),
         ("project", "set_rules") => Some("rules"),
+        ("project", "set_about") => Some("about"),
         ("workspace", "create" | "prepare") => Some("workspace"),
         ("workspace", "link_ticket") => Some("ticket"),
         ("services", "add" | "edit" | "remove") => Some("services"),
@@ -195,6 +200,7 @@ pub fn asked(family: &str) -> String {
         "skills" => "it adds, changes or removes a skill of the project",
         "commands" => "it adds, changes or removes a command of the project",
         "rules" => "it changes how the project's agents are told to work",
+        "about" => "it changes About you, which every agent started after it reads",
         "workspace" => {
             "it makes a workspace ready, playing setup steps that run without the gate, each \
              judged as its run"
@@ -534,8 +540,9 @@ pub async fn prepared(
             match call.action.as_str() {
                 "settings" => Ok(Vec::new()),
                 "set_settings" => settings_says(&project, &call),
-                "rules" => Ok(Vec::new()),
+                "rules" | "about" => Ok(Vec::new()),
                 "set_rules" => rules_say(&project, &call),
+                "set_about" => about_says(daemon, &call),
                 other => Err(unknown("project", other, PROJECT_ACTIONS)),
             }
         }
@@ -1849,6 +1856,20 @@ async fn performed(
                     Ok(format!("Saved.\n{}", settings_text(&saved, &settings)))
                 }
                 "rules" => Ok(rules_text(&project, &daemon.paths)),
+                "about" => {
+                    let shown = crate::about::show(daemon).map_err(refusal)?;
+                    Ok(format!("{ABOUT_READ}\n{shown}"))
+                }
+                "set_about" => {
+                    about_says(daemon, &call)?;
+                    crate::about::call(daemon, "about.set", about_given(&call)).map_err(refusal)?;
+                    Ok(
+                        "Saved. About you reaches the agents started from now on, on every \
+                         project; you, and the agents already started, keep what you were \
+                         started with."
+                            .to_owned(),
+                    )
+                }
                 "set_rules" => {
                     rules_say(&project, &call)?;
                     crate::rules::set_project(
@@ -2518,7 +2539,78 @@ fn workspace_text(workspace: &Workspace, ready_at: Option<u64>) -> String {
     text
 }
 
-const PROJECT_ACTIONS: &str = "settings, set_settings, rules and set_rules";
+const PROJECT_ACTIONS: &str = "settings, set_settings, rules, set_rules, about and set_about";
+
+/// What `about` says before what `about.show` answers.
+const ABOUT_READ: &str = "About you, as about.show answers it: what every agent started from now \
+    on reads (yours is in your instructions). set_about proposes a change of this machine's, which \
+    only the user can allow; the values of all machines change only in the window, on All \
+    machines, signed by the user's device.";
+
+/// The fields of a `set_about`, as `about.set` takes them.
+fn about_given(call: &ProjectCall) -> Value {
+    let mut params = json!({});
+    for (key, text) in [
+        ("name", &call.name),
+        ("pronouns", &call.pronouns),
+        ("notes", &call.notes),
+    ] {
+        if let Some(text) = text {
+            params[key] = json!(text);
+        }
+    }
+    params
+}
+
+/// What `set_about` changes, each field before and after, or the refusal `about.set` would give.
+fn about_says(daemon: &Daemon, call: &ProjectCall) -> Result<Vec<String>, Outcome> {
+    if call.text.is_some()
+        || call.rules_alone.is_some()
+        || call.repositories.is_some()
+        || call.tracker.is_some()
+    {
+        return Err(Outcome::Refused(
+            "refused: set_about takes name, pronouns and notes only".into(),
+        ));
+    }
+    let (name, pronouns, notes) = crate::about::given(about_given(call)).map_err(refusal)?;
+    if name.is_none() && pronouns.is_none() && notes.is_none() {
+        return Err(Outcome::Refused(
+            "refused: set_about needs name, pronouns or notes: {\"action\": \"set_about\", \
+             \"notes\": \"Answer in French.\"}, each the field whole; about reads the current \
+             ones"
+                .into(),
+        ));
+    }
+    let shown = crate::about::show(daemon).map_err(refusal)?;
+    let mut says = Vec::new();
+    for (key, what, text) in [
+        ("name", "the user's name", name),
+        ("pronouns", "how to refer to the user", pronouns),
+        ("notes", "what every agent should know", notes),
+    ] {
+        let Some(text) = text else { continue };
+        let said = |text: &str| match text.trim().is_empty() {
+            true => "nothing".to_owned(),
+            false => text.trim_end().to_owned(),
+        };
+        // A field cleared on a machine with a hub follows all machines' value again.
+        let after = match (text.trim().is_empty(), shown["all"][key].as_str()) {
+            (true, Some(all)) => format!("the value of all machines, {}", said(all)),
+            _ => said(&text),
+        };
+        says.push(format!(
+            "Change {what}, in About you on this machine: every agent started after it reads it, \
+             on every project."
+        ));
+        says.push(format!(
+            "Before: {}",
+            said(shown[key].as_str().unwrap_or_default())
+        ));
+        says.push(format!("After: {after}"));
+    }
+    Ok(says)
+}
 
 /// What `set_rules` changes, in words, or the refusal of a call that does not fit.
 fn rules_say(project: &Project, call: &ProjectCall) -> Result<Vec<String>, Outcome> {

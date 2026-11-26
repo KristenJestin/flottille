@@ -208,6 +208,9 @@ pub struct Remote {
     /// The calls of this machine's agents sent to another machine and not answered yet
     /// (`across::forward`).
     pub(crate) calling: crate::across::Calling,
+    /// The launches sent to another machine whose session is not recorded here yet
+    /// (`launches.rs`).
+    pub(crate) placing: crate::launches::Placings,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
     /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
@@ -389,6 +392,7 @@ impl Remote {
             transfers: Default::default(),
             receiving: Default::default(),
             calling: Default::default(),
+            placing: Default::default(),
         }
     }
 
