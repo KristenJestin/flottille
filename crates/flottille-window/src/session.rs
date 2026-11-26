@@ -8967,8 +8967,7 @@ impl Render for SessionRail {
                     });
                     let row =
                         div()
-                            .id("rail-about-ticket")
-                            .aria_label(said)
+                            .id("rail-about-line")
                             .px(space::XS)
                             .min_h(px(24.))
                             .flex()
@@ -8996,16 +8995,19 @@ impl Render for SessionRail {
                                             .child(SharedString::from(title))
                                     })),
                             )
-                            .children(open)
-                            .test_support();
-                    tipped(
-                        row,
-                        format!("What it is about, from {}.", about.from),
-                        24.,
-                        window,
-                        cx,
-                    )
-                    .into_any_element()
+                            .children(open);
+                    div()
+                        .id("rail-about-ticket")
+                        .aria_label(said)
+                        .child(tipped(
+                            row,
+                            format!("What it is about, from {}.", about.from),
+                            24.,
+                            window,
+                            cx,
+                        ))
+                        .test_support()
+                        .into_any_element()
                 }
                 None => div().into_any_element(),
             };
@@ -9032,8 +9034,7 @@ impl Render for SessionRail {
                         let said = SharedString::from(blocked_line(blocked));
                         let row =
                             div()
-                                .id("rail-wait")
-                                .aria_label(said.clone())
+                                .id("rail-wait-line")
                                 .px(space::XS)
                                 .min_h(px(24.))
                                 .flex()
@@ -9049,10 +9050,14 @@ impl Render for SessionRail {
                                         .min_w_0()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
-                                        .child(said),
-                                )
-                                .test_support();
-                        tipped(row, blocked_tip(blocked), 24., window, cx).into_any_element()
+                                        .child(said.clone()),
+                                );
+                        div()
+                            .id("rail-wait")
+                            .aria_label(said)
+                            .child(tipped(row, blocked_tip(blocked), 24., window, cx))
+                            .test_support()
+                            .into_any_element()
                     }
                     None => div().into_any_element(),
                 };
