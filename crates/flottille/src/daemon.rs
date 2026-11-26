@@ -1343,6 +1343,14 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        // The window's own state of this machine, kept beside the sidebar's: no project file.
+        method if matches!(method, "project.hide" | "project.unhide" | "project.hidden") => (
+            match crate::drafts::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

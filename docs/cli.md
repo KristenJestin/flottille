@@ -726,6 +726,35 @@ shop  /work/shop  1
 project whose file is gone but whose sessions or workspaces are still there is listed under the
 table, with how many it holds: `flottille project remove <name>` removes them.
 
+`--hidden` lists the projects this machine's window hides instead, one a line (`project.hidden`;
+`--json` prints `{"hidden": [<name>]}`), or says `No project is hidden on this machine.`
+
+### `flottille project hide <name>`
+
+Hides a project on this machine: its row and its sessions leave this machine's window, and it is
+no longer offered where a project is chosen. Nothing else changes: the project stays registered
+where it is, its sessions keep running, nothing is sent to the machine that has it, and another
+machine's window still shows it. A session of a hidden project that needs you is still in the
+notifications and rings as it would. It works on any project, this machine's own included: the
+name is not looked up, so a project of another machine is hidden by the name its row has. Hiding
+twice is hiding once. `--json` prints `project.hide`'s answer, `{"hidden": [<name>]}`.
+
+```
+$ flottille project hide shop
+Hid shop on this machine.
+```
+
+### `flottille project unhide <name>`
+
+Shows a project hidden on this machine again (`project.unhide`; it is `unhide` and not `show`,
+which already prints a project's configuration). In the window it is the Show of Settings,
+General, Hidden projects.
+
+```
+$ flottille project unhide shop
+Showing shop again on this machine.
+```
+
 ### `flottille project show <name>`
 
 One project's configuration, every default filled in. `--json` prints the project.

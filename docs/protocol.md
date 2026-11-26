@@ -1427,6 +1427,16 @@ pictures decoded and written off the runtime's threads.
   answer is what the window shows from then on. A window that makes no change does not see
   another's until it is opened again (there is no event for it yet).
 - `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
+- `project.hide {name}` and `project.unhide {name}` keep, under their own key of the window's state
+  (`hidden`: `[<name>]`, in the order they were hidden), which projects this machine's window does
+  not show (#1526): the rows' keys, the name a project's row has in the list. Each reads and
+  writes in one transaction, hiding twice is hiding once, a name that is no project (another
+  machine's, not reached for now) is kept all the same, and each answers `{"hidden": [<name>]}`.
+  `project.hidden` answers the same list. The three are of the machine alone (`Local`): a device
+  that follows over a link reads and changes none of it, and nothing of it is sent to the machine
+  that has the project. A window reads it when it opens (`window.get`, `hidden`) and asks the
+  daemon at each change it makes; a hiding made elsewhere (`flottille project hide`) reaches a
+  window that is open when it is opened again.
 
 The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by
 composer): they go with the draft, with the session that is forgotten, and with the project that

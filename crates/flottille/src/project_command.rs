@@ -28,8 +28,24 @@ pub enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
-    /// The registered projects
+    /// The registered projects, or with --hidden the projects this machine's window hides
     List {
+        /// The projects hidden on this machine instead
+        #[arg(long)]
+        hidden: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hide a project on this machine: its row and its sessions leave this machine's window, and
+    /// nothing changes for the project, its sessions or its machine
+    Hide {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a project hidden on this machine again
+    Unhide {
+        name: String,
         #[arg(long)]
         json: bool,
     },
@@ -162,7 +178,32 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        ProjectAction::List { json } => {
+        ProjectAction::List { hidden: true, json } => {
+            let listed = ask("project.hidden", Value::Null)?;
+            if json {
+                println!("{listed}");
+            } else {
+                print!("{}", hidden_text(&listed));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectAction::Hide { name: wanted, json } => {
+            let hidden = ask("project.hide", name(wanted.clone())?)?;
+            match json {
+                true => println!("{hidden}"),
+                false => println!("Hid {wanted} on this machine."),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectAction::Unhide { name: wanted, json } => {
+            let hidden = ask("project.unhide", name(wanted.clone())?)?;
+            match json {
+                true => println!("{hidden}"),
+                false => println!("Showing {wanted} again on this machine."),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectAction::List { json, .. } => {
             let list = ask("project.list", Value::Null)?;
             let errors = list["errors"].as_array().map_or(&[][..], Vec::as_slice);
             if json {
@@ -470,6 +511,15 @@ fn detected_text(found: &Value, file: &std::path::Path) -> String {
         file.display()
     ));
     shown
+}
+
+/// The projects this machine hides, one a line.
+fn hidden_text(listed: &Value) -> String {
+    let names = list_of(&listed["hidden"]);
+    match names.is_empty() {
+        true => "No project is hidden on this machine.\n".to_owned(),
+        false => names.iter().map(|name| format!("{name}\n")).collect(),
+    }
 }
 
 fn list_text(list: &Value) -> String {

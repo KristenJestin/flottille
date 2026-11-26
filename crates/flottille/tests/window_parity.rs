@@ -113,7 +113,10 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("review", Window(&["review.start"])),
     // ── Projects ─────────────────────────────────────────────────────────────────────────────
     ("project add", Window(&["project.add"])),
-    ("project list", Window(&["project.list"])),
+    ("project list", Window(&["project.list", "project.hidden"])),
+    // The row's menu (Hide on this machine) and Settings, General, Hidden projects (Show).
+    ("project hide", Window(&["project.hide"])),
+    ("project unhide", Window(&["project.unhide"])),
     ("project show", Window(&["project.show"])),
     ("project check", Window(&["project.check"])),
     ("project commit-checks", Window(&["project.commit_checks"])),
