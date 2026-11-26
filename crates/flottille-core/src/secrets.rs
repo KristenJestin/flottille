@@ -802,6 +802,14 @@ fn expression(value: &str) -> bool {
             || matches!(&value[head.len()..], "(" | "["))
 }
 
+/// Whether the tight value of a `key=value` in the middle of a line is code, read back from a
+/// diff, a file or a command's output (`Client(url, token=self.token)`, `let token=foo_bar;`,
+/// `local token=$(gh auth token)`, `--token=$GH_TOKEN`): it ends a call or a statement, is a
+/// variable's expansion, or a dotted name. An opaque value is none of these.
+fn in_code(value: &str) -> bool {
+    value.ends_with([')', ',', ';']) || value.starts_with('$') || expression(value)
+}
+
 /// Whether a value set to a password with spaces around its `=` is plainly code, for an ini
 /// file's password may hold dots and brackets: a name of lowercase letters (`password`, `pw`), a
 /// member of `self`, `this` or of a password's name (`self.password`, `cfg.password`), or a call
@@ -985,7 +993,8 @@ fn settings(text: &str) -> Vec<LoginField> {
         // number (`token: str`, `max_token: 100`). Punctuation alone is no secret (`token=<>`).
         let clear = !value.contains(char::is_alphanumeric)
             || (!quoted
-                && (value.strip_suffix(',') == Some(key)
+                && (place == Place::Word && in_code(value)
+                    || value.strip_suffix(',') == Some(key)
                     || if password {
                         let statement = value.strip_suffix(';');
                         !tight
