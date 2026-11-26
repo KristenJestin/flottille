@@ -467,6 +467,106 @@ mod tests {
         command.status().unwrap().success()
     }
 
+    /// What a child confined as the daemon's runs are, out of `runtime` but for `read` given to
+    /// read, says of each thing it tries on `read`'s file `0`: `name=done` or the error's name.
+    fn tried_on_a_folder_to_read(runtime: &Path, read: &Path, outside: &Path) -> Vec<String> {
+        use std::os::unix::process::CommandExt;
+        let mut paths = Vec::new();
+        allowed(
+            Path::new("/"),
+            &[runtime.canonicalize().unwrap()],
+            &mut paths,
+        );
+        let given = CString::new(read.as_os_str().as_bytes()).unwrap();
+        let rights = rights(abi());
+        let mut command = std::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import errno, os, sys\n\
+             folder, outside = sys.argv[1], sys.argv[2]\n\
+             def attempt(name, action):\n\
+             \x20   try:\n\
+             \x20       action()\n\
+             \x20       print(name + '=done')\n\
+             \x20   except OSError as e:\n\
+             \x20   \x20   print(name + '=' + errno.errorcode.get(e.errno, str(e.errno)))\n\
+             attempt('read', lambda: open(folder + '/0').read())\n\
+             attempt('list', lambda: os.listdir(folder))\n\
+             attempt('append', lambda: open(folder + '/0', 'a').write('x'))\n\
+             attempt('truncate', lambda: open(folder + '/0', 'w'))\n\
+             attempt('create', lambda: open(folder + '/1', 'w'))\n\
+             attempt('mkdir', lambda: os.mkdir(folder + '/sub'))\n\
+             attempt('link', lambda: os.link(folder + '/0', outside + '/hard'))\n\
+             attempt('rename', lambda: os.rename(folder + '/0', folder + '/moved'))\n\
+             attempt('move out', lambda: os.rename(folder + '/0', outside + '/moved'))\n\
+             attempt('replace', lambda: os.rename(outside + '/other', folder + '/0'))\n\
+             attempt('remove', lambda: os.unlink(folder + '/0'))\n",
+        ]);
+        command.arg(read).arg(outside);
+        command.stderr(std::process::Stdio::null());
+        // SAFETY: as in `confined_but`.
+        unsafe {
+            command.pre_exec(move || {
+                restrict(
+                    rights,
+                    &paths,
+                    &[],
+                    std::slice::from_ref(&given),
+                    0,
+                    &[],
+                    None,
+                )
+            })
+        };
+        let output = command.output().unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_given_to_read_is_read_only() {
+        if abi() < 2 {
+            eprintln!(
+                "skipped: this kernel's Landlock (ABI {}) is not used",
+                abi()
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let copies = runtime.join("flottille/git-settings");
+        std::fs::create_dir_all(&copies).unwrap();
+        std::fs::write(copies.join("0"), "[user]\n\tname = a\n").unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("other"), "planted\n").unwrap();
+
+        let said = tried_on_a_folder_to_read(&runtime, &copies, &outside);
+
+        // Reading works; writing, truncating, creating, linking, moving in, out, over and removing
+        // each is refused, whatever the error.
+        assert_eq!(said[0], "read=done", "{said:?}");
+        assert_eq!(said[1], "list=done", "{said:?}");
+        assert_eq!(said.len(), 11, "{said:?}");
+        for line in &said[2..] {
+            assert!(!line.ends_with("=done"), "{said:?}");
+        }
+        // And nothing changed.
+        assert_eq!(
+            std::fs::read_to_string(copies.join("0")).unwrap(),
+            "[user]\n\tname = a\n"
+        );
+        assert_eq!(std::fs::read_dir(&copies).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("other")).unwrap(),
+            "planted\n"
+        );
+        assert!(!outside.join("moved").exists() && !outside.join("hard").exists());
+    }
+
     #[test]
     fn a_shown_browser_reaches_the_wayland_socket() {
         if abi() < 2 {

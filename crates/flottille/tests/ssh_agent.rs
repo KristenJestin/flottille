@@ -2675,6 +2675,18 @@ fn desktop_settings(user: User, hash: &str, text: &str) -> User {
     user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap())
 }
 
+/// What the desktop's update does when it changes nothing of the settings: the version `to` made
+/// holding `text`, the link renamed onto it, the version `from` removed.
+fn desktop_update(user: &User, text: &str, from: &str, to: &str) {
+    let version = user.path(&format!("home/.local/share/desk/versions/{to}/git/config"));
+    std::fs::create_dir_all(version.parent().unwrap()).unwrap();
+    std::fs::write(&version, text).unwrap();
+    let new = user.path("home/.config/git/config.new");
+    std::os::unix::fs::symlink(&version, &new).unwrap();
+    std::fs::rename(&new, user.path("home/.config/git/config")).unwrap();
+    std::fs::remove_dir_all(user.path(&format!("home/.local/share/desk/versions/{from}"))).unwrap();
+}
+
 #[test]
 fn a_push_after_the_git_config_moved_to_the_same_bytes_goes_through() {
     let (user, _agent, _bus) = user();
@@ -2683,15 +2695,7 @@ fn a_push_after_the_git_config_moved_to_the_same_bytes_goes_through() {
     let text = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
     let user = desktop_settings(user, "aaa", &text);
     let mcp = session(&user, &url);
-    // The desktop's update: a new version holding the same, the link renamed onto it, the old
-    // version removed.
-    let version = user.path("home/.local/share/desk/versions/bbb/git/config");
-    std::fs::create_dir_all(version.parent().unwrap()).unwrap();
-    std::fs::write(&version, &text).unwrap();
-    let new = user.path("home/.config/git/config.new");
-    std::os::unix::fs::symlink(&version, &new).unwrap();
-    std::fs::rename(&new, user.path("home/.config/git/config")).unwrap();
-    std::fs::remove_dir_all(user.path("home/.local/share/desk/versions/aaa")).unwrap();
+    desktop_update(&user, &text, "aaa", "bbb");
 
     let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/moved");
 
@@ -2700,6 +2704,108 @@ fn a_push_after_the_git_config_moved_to_the_same_bytes_goes_through() {
         helper_said(&user).contains(&"get".to_owned()),
         "{:?}",
         helper_said(&user)
+    );
+}
+
+/// What a confined run of `mcp` gets trying each change of the copy of the git settings the
+/// daemon took at its start (`runtime/flottille/git-settings/0`) and reading it: `name=done`, or
+/// the error's name, one line each.
+fn tried_on_the_copy(user: &User, mcp: &Mcp) -> Vec<String> {
+    let other = user.path("other-file");
+    std::fs::write(&other, "[core]\n\tsshCommand = ./run-me\n").unwrap();
+    let folder = user.path("runtime/flottille/git-settings");
+    let out = python(
+        user,
+        mcp,
+        &format!(
+            "import errno\n\
+             folder, other = {folder:?}, {other:?}\n\
+             def attempt(name, action):\n\
+             \x20   try:\n\
+             \x20       action()\n\
+             \x20       print('@' + name + '=done')\n\
+             \x20   except OSError as e:\n\
+             \x20       print('@' + name + '=' + errno.errorcode.get(e.errno, str(e.errno)))\n\
+             attempt('read', lambda: open(folder + '/0').read())\n\
+             attempt('write', lambda: open(folder + '/0', 'a').write('x'))\n\
+             attempt('truncate', lambda: open(folder + '/0', 'w'))\n\
+             attempt('create', lambda: open(folder + '/1', 'w'))\n\
+             attempt('rename', lambda: os.rename(folder + '/0', folder + '/moved'))\n\
+             attempt('move out', lambda: os.rename(folder + '/0', other + '.moved'))\n\
+             attempt('replace', lambda: os.rename(other, folder + '/0'))\n\
+             attempt('remove', lambda: os.unlink(folder + '/0'))\n\
+             attempt('remove the folder', lambda: os.rmdir(folder))\n\
+             attempt('rename the folder', lambda: os.rename(folder, folder + '-moved'))\n",
+            folder = folder.to_str().unwrap(),
+            other = other.to_str().unwrap(),
+        ),
+    );
+    out.lines()
+        .filter_map(|line| line.strip_prefix('@'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A run of the user's agent, confined, changes nothing of the copy of the git settings a lifted
+/// push reads once the file git reads has moved (a settings link's update): a run that could
+/// would choose what the push, which runs outside the sandbox, is given (`core.sshCommand`, a
+/// credential helper).
+fn a_run_cannot_change_what_the_push_reads(user: User) {
+    let (_server, url) = http_remote(&user);
+    let user = credential_helper(user);
+    let text = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
+    let user = desktop_settings(user, "aaa", &text);
+    let mcp = session(&user, &url);
+    let copy = user.path("runtime/flottille/git-settings/0");
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), text);
+
+    let said = tried_on_the_copy(&user, &mcp);
+
+    assert_eq!(said.len(), 10, "{said:?}");
+    assert_eq!(said[0], "read=done", "{said:?}");
+    for attempt in &said[1..] {
+        assert!(!attempt.ends_with("=done"), "{said:?}");
+    }
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), text);
+    assert_eq!(
+        std::fs::read_dir(user.path("runtime/flottille/git-settings"))
+            .unwrap()
+            .count(),
+        1
+    );
+    // The desktop's update, then a push: it reads the copy, which holds what it held.
+    desktop_update(&user, &text, "aaa", "bbb");
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/after-the-run");
+    assert!(remote_has(&user, "after-the-run"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_run_cannot_change_the_copy_of_the_git_settings() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    a_run_cannot_change_what_the_push_reads(user);
+}
+
+#[test]
+fn a_run_cannot_change_the_copy_of_the_git_settings_with_landlock_alone() {
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) cannot keep the runtime folder out",
+            landlock_abi()
+        );
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    a_run_cannot_change_what_the_push_reads(
+        user.with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1"),
     );
 }
 
@@ -3046,7 +3152,7 @@ fn a_confined_run_cannot_write_below_the_kept_dotfiles_folder() {
              \x20       act()\n\
              \x20       print(name + '=written')\n\
              \x20   except OSError as e:\n\
-             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+             \x20       print('@' + name + '=' + errno.errorcode[e.errno])\n",
             versions = versions.to_str().unwrap(),
             b = b.to_str().unwrap(),
         ),
@@ -3096,7 +3202,7 @@ fn a_confined_run_cannot_write_below_ssh_where_a_folder_is_kept_in_place() {
              \x20       act()\n\
              \x20       print(name + '=written')\n\
              \x20   except OSError as e:\n\
-             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+             \x20       print('@' + name + '=' + errno.errorcode[e.errno])\n",
             folder = folder.to_str().unwrap(),
         ),
     );
