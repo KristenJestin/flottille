@@ -37,10 +37,32 @@ const TAKES: &[&str] = &[
 /// The session's subject as last said, which `agent.list` and the tree carry: `null` while it
 /// never held anything. Kept by `refresh`, so that a list derives nothing.
 pub fn said(daemon: &Daemon, agent: &Agent) -> Value {
-    daemon
+    let mut said = daemon
         .read(|store| store.agent_subject(&agent.id))
         .map(|(_, said)| said)
-        .unwrap_or(Value::Null)
+        .unwrap_or(Value::Null);
+    // A subject kept before `url` was said has none: its ticket's page, as the items last read
+    // it, is given when it is read, so that a window always has what its Open button opens.
+    if said["kind"] == "ticket"
+        && said["url"].as_str().is_none()
+        && let Some(key) = said["key"].as_str()
+        && let Ok(Some(item)) = daemon.read(|store| Ok(ticket_item(store, &agent.project, key)))
+    {
+        said["url"] = json!(item.url);
+    }
+    said
+}
+
+/// The ticket `key` (`#5`, `ABC-1`) of `project` as the items last read it.
+fn ticket_item(store: &flottille_core::store::Store, project: &str, key: &str) -> Option<Item> {
+    let stored = match Key::parse(key).ok()? {
+        Key::Issue(number) => number.to_string(),
+        Key::Jira(key) => key,
+    };
+    store
+        .item_by_key(project, "ticket", None, &stored)
+        .ok()
+        .flatten()
 }
 
 /// The session's subject now, derived from what it holds and from the items.
@@ -52,17 +74,7 @@ fn derived(daemon: &Daemon, agent: &Agent) -> Value {
                 Some(name) => store.workspace(&agent.project, name)?,
                 None => None,
             };
-            let ticket = |key: &str| {
-                let key = Key::parse(key).ok()?;
-                let stored = match &key {
-                    Key::Issue(number) => number.to_string(),
-                    Key::Jira(key) => key.clone(),
-                };
-                store
-                    .item_by_key(&agent.project, "ticket", None, &stored)
-                    .ok()
-                    .flatten()
-            };
+            let ticket = |key: &str| ticket_item(store, &agent.project, key);
             let pull = |held: &Value| -> Option<Item> {
                 let branch = held["branch"].as_str()?;
                 let repositories: Vec<String> =
@@ -118,7 +130,11 @@ fn derive(
         (!done).then_some(item)
     };
     let of_ticket = |key: &str, item: Option<Item>, from: &str| {
-        json!({"kind": "ticket", "key": key, "title": item.map(|item| item.title),
+        let (title, url) = match item {
+            Some(item) => (Some(item.title), item.url),
+            None => (None, None),
+        };
+        json!({"kind": "ticket", "key": key, "title": title, "url": url,
             "from": from, "pull_request": pull_request})
     };
     for (key, from) in &tickets {
@@ -432,6 +448,32 @@ mod tests {
             .write(|store| Ok(((), Some(store.set_agent_subject_shown("c1", &kept)?))))
             .unwrap();
         assert_eq!(crate::tree::summary(&daemon, &agent)["subject"], kept);
+    }
+
+    #[tokio::test]
+    async fn a_ticket_subject_kept_before_its_url_was_said_is_read_with_its_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        // Kept by a daemon that did not say the ticket's page yet: no `url` at all.
+        let kept = json!({"kind": "ticket", "key": "#7", "title": "Kept", "from": FROM_CHANGED,
+            "pull_request": null});
+        let mut stored = item("ticket", "7", "Kept", "open");
+        stored.url = Some("https://github.com/acme/api/issues/7".into());
+        daemon
+            .write(|store| {
+                store.put_items(&[stored], Vec::new())?;
+                Ok(((), Some(store.set_agent_subject_shown("c1", &kept)?)))
+            })
+            .unwrap();
+        let said = crate::tree::summary(&daemon, &agent)["subject"].clone();
+        assert_eq!(
+            said["url"], "https://github.com/acme/api/issues/7",
+            "{said}"
+        );
+        // What else it said is as it was kept.
+        assert_eq!(said["key"], "#7");
+        assert_eq!(said["title"], "Kept");
     }
 
     #[tokio::test]

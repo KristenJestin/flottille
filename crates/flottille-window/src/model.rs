@@ -488,10 +488,25 @@ pub struct Session {
 pub struct Blocked {
     /// The people, by the names the forge or the tracker gives them.
     pub by: Vec<String>,
-    /// What for: `review of #123`, `ticket SHOP-12`.
+    /// What for, in words: `review of #123`, `ticket SHOP-12`.
     pub why: String,
+    /// What it waits on, as the daemon says it as data; none from a daemon of before.
+    pub on: Option<WaitOn>,
     /// Since when, in milliseconds since the Unix epoch.
     pub since: u64,
+}
+
+/// What a blocked session waits on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitOn {
+    /// The review of a pull request: its number, and its repository's path in the project (#12
+    /// of another repository is not it); none from a daemon of before, then the number alone.
+    PullRequest {
+        repository: Option<String>,
+        number: u64,
+    },
+    /// A ticket assigned to someone else, by its key as the tracker says it (`#5`, `SHOP-12`).
+    Ticket(String),
 }
 
 impl Blocked {
@@ -505,6 +520,20 @@ impl Blocked {
         (!by.is_empty()).then(|| Blocked {
             by,
             why: value["why"].as_str().unwrap_or_default().to_owned(),
+            on: match value["on"]["kind"].as_str() {
+                Some("pull_request") => {
+                    value["on"]["number"]
+                        .as_u64()
+                        .map(|number| WaitOn::PullRequest {
+                            repository: value["on"]["repository"].as_str().map(str::to_owned),
+                            number,
+                        })
+                }
+                Some("ticket") => value["on"]["key"]
+                    .as_str()
+                    .map(|key| WaitOn::Ticket(key.to_owned())),
+                _ => None,
+            },
             since: value["since"].as_u64().unwrap_or_default(),
         })
     }
@@ -533,6 +562,8 @@ pub struct Subject {
     /// `SHOP-60`, `#5`, `#12`; `None` when free.
     pub key: Option<String>,
     pub title: Option<String>,
+    /// A ticket's page on its tracker, as the items last read it.
+    pub url: Option<String>,
     /// Where it comes from, in a few words: `the workspace's linked ticket`.
     pub from: String,
     /// What a free session last held: `SHOP-60 done · #117 merged`.
@@ -552,6 +583,7 @@ impl Subject {
             kind,
             key: said("key"),
             title: said("title"),
+            url: said("url"),
             from: said("from").unwrap_or_default(),
             last: said("last"),
             pull: pull["key"]
@@ -1495,18 +1527,22 @@ impl Snapshot {
 
     /// The live sessions of one row of `project`: this machine's alone on the row of the project
     /// with no settings file (`gone`), and the others' on the group of that name, which has none
-    /// of this machine's while this machine's is that row.
+    /// of this machine's while this machine's is that row. The ones that wait on someone else
+    /// come last, in the order the project has them: a blocked session stays a row of its
+    /// project, at its foot, and goes back to its place when the wait ends.
     pub fn level_sessions(&self, project: &str, gone: bool) -> Vec<&Session> {
         let twin = self.is_gone_here(project);
-        self.live_sessions_of(project)
+        let (blocked, mut sessions): (Vec<&Session>, Vec<&Session>) = self
+            .live_sessions_of(project)
             .into_iter()
             .filter(|session| !twin || self.is_here(session) == gone)
-            .filter(|session| !self.blocked_apart(session))
-            .collect()
+            .partition(|session| self.blocked_apart(session));
+        sessions.extend(blocked);
+        sessions
     }
 
-    /// Whether `session` leaves its project's list for the "Blocked by others" group: a root no
-    /// agent leads, blocked by someone else, that leads no live session. A led one stays under its
+    /// Whether `session` goes to its project's foot: a root no agent
+    /// leads, blocked by someone else, that leads no live session. A led one stays under its
     /// pilot, which speaks for it; a pilot stays with the sessions it leads.
     pub fn blocked_apart(&self, session: &Session) -> bool {
         session.blocked.is_some()
@@ -1516,20 +1552,6 @@ impl Snapshot {
                 .iter()
                 .chain(&self.elsewhere)
                 .any(|led| !led.ended && led.pilot.as_deref() == Some(session.id.as_str()))
-    }
-
-    /// The roots blocked by someone else, whatever their project and their machine, the most
-    /// recently blocked first, as "Ended" holds its rows: the "Blocked by others" group's.
-    pub fn blocked_sessions(&self) -> Vec<&Session> {
-        let mut blocked: Vec<&Session> = self
-            .sessions
-            .iter()
-            .chain(&self.elsewhere)
-            .filter(|s| !s.ended && self.blocked_apart(s))
-            .collect();
-        let since = |s: &Session| s.blocked.as_ref().map_or(0, |b| b.since);
-        blocked.sort_by(|a, b| since(b).cmp(&since(a)).then(a.id.cmp(&b.id)));
-        blocked
     }
 
     /// The sessions that ended, whatever their project and their machine, the most recent end
@@ -2080,6 +2102,30 @@ pub fn ago(now_ms: u64, then_ms: u64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_wait_on_a_pull_request_reads_its_repository() {
+        let said = |on: Value| {
+            Blocked::of(&json!({"by": ["Maya"], "why": "review of #12", "on": on, "since": 1}))
+                .unwrap()
+                .on
+        };
+        assert_eq!(
+            said(json!({"kind": "pull_request", "repository": "web", "number": 12})),
+            Some(WaitOn::PullRequest {
+                repository: Some("web".into()),
+                number: 12
+            })
+        );
+        // From a daemon of before: the number alone.
+        assert_eq!(
+            said(json!({"kind": "pull_request", "number": 12})),
+            Some(WaitOn::PullRequest {
+                repository: None,
+                number: 12
+            })
+        );
+    }
 
     fn agent(id: &str, parent: Option<&str>, state: &str, workspace: Option<&str>) -> Value {
         json!({"id": id, "parent": parent, "state": state, "project": "app",

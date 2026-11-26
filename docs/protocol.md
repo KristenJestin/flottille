@@ -1411,9 +1411,8 @@ pictures decoded and written off the runtime's threads.
   "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
-  "leads": {<agent>: <unfolded>}, "ended": <unfolded>, "blocked": <unfolded>}`, each node as the
-  user left it; one that is not in it keeps its default (a project and a lead unfolded, the "Ended"
-  and "Blocked by others" groups folded). Beside
+  "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that
+  is not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). Beside
   them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
   start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
   arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
@@ -2316,10 +2315,10 @@ it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `au
 (`agent.mode`). `subject` (in `agent.list` and the tree) is what the session is about, derived
 from what it took in hand (`docs/design.md` §10, "What a session is about") and kept as its last
 `agent.updated` said it, so that a list derives nothing: `null` while it
-never held anything, else `{"kind", "key", "title", "from", "last", "pull_request"}`, `kind`
+never held anything, else `{"kind", "key", "title", "url", "from", "last", "pull_request"}`, `kind`
 being `ticket`, `pull_request` or `free`; `key` the ticket's (`#5`, `ABC-12`) or the pull
 request's (`#12`), `null` when free; `title` as the items last read it, `null` when unknown or
-free; `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
+free; `url` a ticket's page on its tracker as the items last read it, `null` when unknown (a subject kept before `url` was said gets it from the items when it is read, so a client always has what its Open button opens; a pull request's is `pull_request.url`); `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
 changed`, `a ticket it subscribed to`, `a ticket it read`, `a pull request it opened`, `what it
 last held`); `last`, only when free, what it last held (`#5 done · #12 merged`); `pull_request`
 the pull request it opened or its branch's, from the items the daemon keeps (`details.head`),
@@ -2633,7 +2632,7 @@ the session has not taken yet, `null` when nothing waits; `resumable`: whether `
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
-a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9; `blocked`: `null`, or while the agent is at rest (between turns, asking nothing) and one of its open subscriptions waits on a person, `{"by", "why", "since"}`: `by` the names of the people (a pull request's reviewers asked and not given yet, other than the user; a ticket's assignees other than the user), as the forge or the tracker names them, never an account id or an e-mail, `why` what for (`review of #12`, `ticket ABC-1`), `since` when it came to rest with that subscription, in milliseconds; a subscription to checks, a run, a wake or a session waits on no one, `docs/design.md` §10, "Blocked by others", and `agent.blocked` says each change); `doing` a sentence of what it does
+a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9; `blocked`: `null`, or while the agent is at rest (between turns, asking nothing) and one of its open subscriptions waits on a person, `{"by", "why", "on", "since"}`: `by` the names of the people (a pull request's reviewers asked and not given yet, other than the user; a ticket's assignees other than the user), as the forge or the tracker names them, never an account id or an e-mail, `why` what for, in words (`review of #12`, `ticket ABC-1`), `on` what it is, as data to read instead of the words: `{"kind": "pull_request", "repository": "api", "number": 12}` (`repository` the repository's path in the project, as `workspace.forge` says it: #12 of another repository is not it; a daemon of before leaves it out) or `{"kind": "ticket", "key": "ABC-1"}` (the key as `why` says it, `#5` for an issue; a client of before this field reads `why` only), `since` when it came to rest with that subscription, in milliseconds; a subscription to checks, a run, a wake or a session waits on no one, `docs/design.md` §10, "Blocked by others", and `agent.blocked` says each change); `doing` a sentence of what it does
 (`working`, `idle`, `compacting the conversation`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then

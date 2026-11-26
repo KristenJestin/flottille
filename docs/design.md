@@ -1338,11 +1338,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   line's tooltip and the page's header. The ticket's key is never on the first line, where it
   would push the title: it is the mono word of the second line, before the place, in place of the
   model a led session runs on (a session about no ticket keeps its model there). A title the user
-  gave (Rename…) wins the first line the same way. The session's page says, under its
-  header, the chips of its ticket and of its pull request with its checks' mark, then one faint
-  line, `What it is about, from <where it comes from>.` (`the workspace's linked ticket`, `a ticket
-  it changed`, `a pull request it opened`…), so that a wrong guess can be understood; its
-  workspace stays in the header and its runs in the rail. A subject that changes fades in over
+  gave (Rename…) wins the first line the same way. The session's page says it in the **Workspace** section of
+  its right panel, never in its header (title and place only): one line under the workspace's own
+  ticket line, the key (`SHOP-60`, `#12`), its title, and an icon button `Open <key>` that opens
+  its page on the tracker or the forge, its tooltip saying `What it is about, from <where it comes
+  from>.` (`the workspace's linked ticket`, `a ticket it changed`, `a pull request it opened`…),
+  so that a wrong guess can be understood; and, under it, what a free session last held, in faint
+  ink (`#5 done · #12 merged`). A line the section already says is not said twice: the ticket the
+  workspace links (its keys compared whatever their spelling: `#5`, `5`, `abc-1`, `ABC-1`) and a
+  pull request that has its own line there. A page with no workspace says them all the same; its
+  runs stay in the rail. A subject that changes fades in over
   the old one, the key unfolds and fades in on the second line as the model fades out, and back, and
   the row's height never changes, nor does anything on its first line. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
@@ -1723,20 +1728,28 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   set by hand; a check, a run, a wake or a led session it follows is `waiting`, as before, and a
   person is a named human, never a CI, a bot or the user). Its mark is a person's silhouette in
   the `away` ink, its line 1 what it is about as every row's, its line 2 `waits for Maya ·
-  review of #123` (in the group too, where the project stays in the row's meta: the words alone
-  on the line, in the `away` ink, cut with an ellipsis inside the row and whole in a tooltip,
-  fading as they change; a row that leaves the group gets its usual line 2 back, the words
-  swapped by a fade). A blocked **root** leaves its
-  project's list for one group "Blocked by others", pinned at the bottom of the sidebar above
-  "Ended", folded by default, the pattern of Ended (its rows say their project and their machine's
-  icon), its heading saying the count and who (`Blocked by others 2 · Maya, Noor`), absent while
-  empty, its fold kept with the sidebar's folds. It is the one state that moves a row, and only at
-  rest, never during a turn: what the user waits on someone else for is out of the way of what
-  needs them, and it comes back by itself, on top of its project, when its subscription fires
-  (the agent takes a turn) or the person answers. A **led** session that is blocked stays under
-  its pilot, which speaks for it, and a blocked root that leads a live session stays in its
-  project with the sessions it leads, its mark saying it is blocked. The page of a blocked session has a banner above its composer:
-  who, what, since when, and that it comes back by itself. The phone follows in its own issue.
+  review of #123` (the words alone on the line, in the `away` ink, cut with an ellipsis inside
+  the row and whole in a tooltip, fading as they change; a row that stops waiting gets its usual
+  line 2 back, the words swapped by a fade). A blocked **root** stays a plain, visible row of its
+  project, moved to the foot of the project's sessions: after the others, which keep their
+  order, and the blocked ones in the order the project has them. There is no group, no fold and
+  no count for it, and nothing of it is kept with the sidebar's folds. The row slides into the
+  foot as the session becomes blocked and back to its place when the wait ends, the way a row
+  moves in any list. It is the one state that moves a row, and only at rest, never during a turn:
+  what the user waits on someone else for is out of the way of what needs them, and it comes back
+  by itself when its subscription fires (the agent takes a turn) or the person answers. A folded
+  project shows its strongest mark: needs you, then a failure, running, waiting, and last the
+  person of a blocked session, which never counts as needing the user. A **led** session that is
+  blocked stays under its pilot, which speaks for it, and a blocked root that leads a live
+  session stays in its project with the sessions it leads, its mark saying it is blocked. The
+  page of a blocked session says nothing above its composer and nothing in its header (title and
+  place only): its Workspace section, in the right panel, holds a ticket line under the
+  workspace's (the key, its title or what it is about, and an icon button `Open <key>`) and,
+  under the ticket it waits on (or under the pull request's line when it waits on a review), the
+  wait: the person's mark and `Waits for Maya · since 14:02`, its tooltip `It comes back by
+  itself when Maya answers.`; both unfold and fade in and fold away and fade out. Its row in the
+  Agents panel takes the person's mark in place of the clock and keeps `waiting for ticket
+  <key>`. The phone follows in its own issue.
   An ended session's page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is

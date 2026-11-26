@@ -209,16 +209,6 @@ pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
 }
 
-/// The element id of the "Blocked by others" group, above "Ended".
-pub fn blocked_id() -> ElementId {
-    ElementId::Name("blocked".into())
-}
-
-/// The element id of what the "Blocked by others" heading says: the count and who.
-pub fn blocked_who_id() -> ElementId {
-    ElementId::Name("blocked-who".into())
-}
-
 /// The element id of the block inside the "Ended" group that holds its rows and scrolls.
 pub fn ended_scroll_id() -> ElementId {
     ElementId::Name("ended-sessions".into())
@@ -546,8 +536,6 @@ pub struct Sidebar {
     offered: bool,
     /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
     ended: Option<(Entity<EndedNode>, bool)>,
-    /// The "Blocked by others" group, and whether it holds a session: absent while empty.
-    blocked: Option<(Entity<BlockedNode>, bool)>,
     /// The session whose ending the user is asked to confirm, and how many agents end.
     ending: Option<(String, usize)>,
     /// The count the confirmation said last, which it still shows while it fades out.
@@ -585,7 +573,6 @@ impl Sidebar {
             group_parts: HashMap::new(),
             offered: false,
             ended: None,
-            blocked: None,
             ending: None,
             said: 0,
             led: Vec::new(),
@@ -742,23 +729,6 @@ impl Sidebar {
             .is_some_and(|(held, shown)| *held == group && *shown == present);
         if !same {
             self.ended = Some((group, present));
-            cx.notify();
-        }
-    }
-
-    /// The "Blocked by others" group, and whether it holds a session now.
-    pub fn set_blocked(
-        &mut self,
-        group: Entity<BlockedNode>,
-        present: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let same = self
-            .blocked
-            .as_ref()
-            .is_some_and(|(held, shown)| *held == group && *shown == present);
-        if !same {
-            self.blocked = Some((group, present));
             cx.notify();
         }
     }
@@ -1127,25 +1097,6 @@ impl Render for Sidebar {
                     .test_support(),
             )
         });
-        // Above "Ended", the same footer's pattern: it unfolds and fades in with its first row,
-        // folds away with its last.
-        let blocked = self.blocked.clone().map(|(group, present)| {
-            presence(
-                "sidebar-blocked",
-                present,
-                div()
-                    .id("blocked-footer")
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(p.line)
-                    .bg(p.side)
-                    .px(space::SM)
-                    .pt(space::XS)
-                    .pb(space::SM)
-                    .child(group)
-                    .test_support(),
-            )
-        });
         let count = self.ending.as_ref().map_or(self.said, |(_, count)| *count);
         let this = cx.entity().downgrade();
         let modal = Modal::new("sidebar-end-modal", "End the session?")
@@ -1232,7 +1183,6 @@ impl Render for Sidebar {
                     .child(projects)
                     .children(sections),
             )
-            .children(blocked)
             .children(ended)
             .child(presence_of(
                 "sidebar-refused-line",
@@ -2137,123 +2087,6 @@ impl Render for EndedNode {
     }
 }
 
-/// The "Blocked by others" group, above "Ended": the roots at rest that wait on a person, of every
-/// project, folded until the user opens it (`docs/design.md` §10). Its heading says how many and
-/// who; it is absent while it holds none.
-pub struct BlockedNode {
-    open: bool,
-    /// Whom its sessions wait on, each once.
-    who: Vec<String>,
-    sessions: Entity<Level>,
-    fold: Entity<Fold>,
-    shell: WeakEntity<Shell>,
-}
-
-impl BlockedNode {
-    /// The group, folded unless the user left it unfolded.
-    pub fn new(shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
-        let sessions = cx.new(|_| Level::scrolling_as(blocked_scroll_id()));
-        let fold = cx.new(|_| Fold::new("fold-blocked", sessions.clone(), open));
-        Self {
-            open,
-            who: Vec::new(),
-            sessions,
-            fold,
-            shell,
-        }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    /// Its sessions' rows, the most recently blocked first.
-    pub fn sessions(&self, cx: &App) -> Vec<Entity<SessionRow>> {
-        self.sessions.read(cx).rows.clone()
-    }
-
-    /// What its heading says beside its name: `2 · Maya, Noor`.
-    pub fn said(&self, cx: &App) -> String {
-        heading_words(self.sessions.read(cx).rows.len(), &self.who)
-    }
-
-    /// Whether it holds these sessions, blocked by these people, already.
-    pub fn holds(&self, sessions: &[Entity<SessionRow>], who: &[String], cx: &App) -> bool {
-        self.sessions.read(cx).rows == sessions && self.who == who
-    }
-
-    pub fn set(
-        &mut self,
-        sessions: Vec<Entity<SessionRow>>,
-        who: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.sessions.read(cx).rows != sessions {
-            self.sessions
-                .update(cx, |level, cx| level.set(sessions, cx));
-        }
-        self.who = who;
-        // The heading counts them and names who.
-        cx.notify();
-    }
-
-    pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        self.open = !self.open;
-        let open = self.open;
-        self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
-        cx.notify();
-        kept_changed(&self.shell, cx);
-    }
-}
-
-/// The words of the "Blocked by others" heading: the count, then who.
-fn heading_words(count: usize, who: &[String]) -> String {
-    match who.is_empty() {
-        true => count.to_string(),
-        false => format!("{count} · {}", who.join(", ")),
-    }
-}
-
-/// The element id of the block inside the "Blocked by others" group that holds its rows.
-pub fn blocked_scroll_id() -> ElementId {
-    ElementId::Name("blocked-sessions".into())
-}
-
-impl Render for BlockedNode {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let said = SharedString::from(self.said(cx));
-        let faint = palette(cx).faint;
-        // The count and the names fade to their new words.
-        let words = div()
-            .id(blocked_who_id())
-            .aria_label(said.clone())
-            .min_w_0()
-            .overflow_hidden()
-            .test_support()
-            .child(changing("blocked-who-words", said, move |said| {
-                div()
-                    .text_size(px(11.))
-                    .text_color(faint)
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(said)
-                    .into_any_element()
-            }));
-        let row = TreeLevel::Session
-            .row(blocked_id(), "Blocked by others")
-            .unfolds_upward()
-            .trailing(words)
-            .expanded(self.open)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .child(row)
-            .child(self.fold.clone())
-    }
-}
-
 /// What ends a session's row: one mark, chosen in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trailing {
@@ -2300,6 +2133,9 @@ pub struct SessionRow {
     /// The project it belongs to, said in the "Ended" group where projects are mixed; a row with
     /// none is a live one, which says its place on a second line.
     scope: Option<SharedString>,
+    /// Whether it waits for someone else: its project sorts it at the foot, and says who on its
+    /// second line.
+    blocked: bool,
     /// Where it works: `main`, or a workspace.
     place: Place,
     /// Its place's pull request, when the window has read it, and the last one it showed, which
@@ -2374,6 +2210,7 @@ impl SessionRow {
             ago: SharedString::default(),
             selected: false,
             scope: None,
+            blocked: false,
             place: None,
             pull: None,
             pull_shown: None,
@@ -2624,6 +2461,17 @@ impl SessionRow {
     /// What its meta says of its project (the "Ended" group).
     pub fn scope(&self) -> Option<&str> {
         self.scope.as_deref()
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        self.blocked
+    }
+
+    pub fn set_blocked(&mut self, blocked: bool, cx: &mut Context<Self>) {
+        if self.blocked != blocked {
+            self.blocked = blocked;
+            cx.notify();
+        }
     }
 
     /// Says its project in its meta (the "Ended" group), or stops.
@@ -3099,14 +2947,13 @@ const LINE: f32 = 16.;
 const FIRST: f32 = 18.;
 
 impl SessionRow {
-    /// Whether it is a row of the "Blocked by others" group, which says on its second line who it
-    /// waits for: a scoped row (its project is in its meta) that waits. An ended row waits for
-    /// nothing and has no second line.
+    /// Whether it says on its second line who it waits for: a blocked row, once the daemon has
+    /// said who.
     fn blocked_line(&self) -> bool {
-        self.scope.is_some() && !self.waits.is_empty()
+        self.blocked && !self.waits.is_empty()
     }
 
-    /// The second line of a row of the "Blocked by others" group: `waits for Maya · review of
+    /// The second line of a blocked row: `waits for Maya · review of
     /// #123` in the `away` ink, cut with an ellipsis inside the row and whole in a tooltip; its
     /// words fade as they change.
     fn blocked_line_of(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
