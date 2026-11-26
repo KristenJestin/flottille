@@ -3649,6 +3649,50 @@ mod tests {
         }
     }
 
+    /// `git` in `dir`, as the tests' own user, which must succeed.
+    async fn git_ok(dir: &Path, args: &[&str]) -> String {
+        let line = [
+            &[
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=ada@example.invalid",
+            ][..],
+            args,
+        ]
+        .concat();
+        let done = git::run(dir, &line, Class::Work).await.unwrap();
+        assert!(done.success, "git {args:?}: {}", done.stderr);
+        done.stdout.trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_missing_snapshot_counts_every_change_as_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_ok(repo, &["init", "--quiet"]).await;
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git_ok(repo, &["add", "--all"]).await;
+        git_ok(repo, &["commit", "--quiet", "-m", "start"]).await;
+        // The snapshot laid it, then went: pruned, or never received whole.
+        let gone = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::remove_file(repo.join("a.txt")).unwrap();
+        std::fs::write(repo.join("b.txt"), "changed\n").unwrap();
+
+        // Without the snapshot nothing tells the change from the work of the workspace: a loss.
+        assert!(!as_laid(repo, gone, "a.txt").await);
+        assert!(!as_laid(repo, gone, "b.txt").await);
+        assert!(!as_laid(repo, "not-a-commit", "a.txt").await);
+        // The snapshot there, a file it does not hold and the workspace deleted is as it laid it.
+        let snapshot = git_ok(repo, &["rev-parse", "HEAD"]).await;
+        git_ok(repo, &["rm", "--quiet", "--cached", "a.txt"]).await;
+        git_ok(repo, &["commit", "--quiet", "-m", "without a"]).await;
+        let without = git_ok(repo, &["rev-parse", "HEAD"]).await;
+        assert!(as_laid(repo, &without, "a.txt").await);
+        assert!(!as_laid(repo, &snapshot, "a.txt").await);
+    }
+
     #[test]
     fn a_copy_failing_halfway_leaves_no_partial_file() {
         let dir = tempfile::tempdir().unwrap();
