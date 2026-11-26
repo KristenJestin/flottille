@@ -730,21 +730,17 @@ fn pilot_ends_and_its_led_sessions_end() {
             .call("agent.stop", json!({"agent": play.root}))
             .unwrap();
         soon(|| play.shown(&session)["state"] == "ended");
-        // What the End confirmation says would be lost: the session there works on a copy of
-        // the pilot's place, in a workspace of its own, which here it does not.
-        let losses: Vec<String> = ending["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|session| {
-                format!(
-                    "{}: {} {}",
-                    session["title"], session["state"], session["losses"]
-                )
-            })
-            .collect();
+        // The End confirmation whole, less what differs by nature: the session there works in a
+        // workspace of its own, a copy of the pilot's place, which here it does not
+        // (`workspace`), and is said with its machine (`machine`).
+        let mut ending = ending;
+        for session in ending["sessions"].as_array_mut().unwrap() {
+            let session = session.as_object_mut().unwrap();
+            session.remove("workspace");
+            session.remove("machine");
+        }
         vec![
-            seen("pilot's end: agent.ending", list(losses)),
+            seen("pilot's end: agent.ending", ending.to_string()),
             seen("pilot's end: session", Play::end_of(play.there(), &session)),
         ]
     });
