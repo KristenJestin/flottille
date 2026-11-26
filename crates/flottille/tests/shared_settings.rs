@@ -405,9 +405,44 @@ fn a_share_the_hub_refuses_is_said_to_the_user() {
     let shown = share(&pc, "pc", json!({"name": SAM}));
 
     assert_eq!(shown["hub"], "sent", "{shown}");
+    let refused = refusal(&pc);
+    assert_eq!(refused["data"]["name"], "about.name", "{refused}");
+    let why = refused["data"]["why"].as_str().unwrap();
+    assert!(why.contains("cannot be written"), "{refused}");
+    std::fs::remove_dir(&blocked).unwrap();
+}
+
+/// The hub does not answer in time (busy past the daemon's wait): the answer said it was sent,
+/// and the user is told the hub did not answer, as a refusal is.
+#[test]
+fn a_share_the_hub_does_not_answer_is_said_to_the_user() {
+    let (hub, pc, _server) = pc_and_server(User::new());
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        // The hub's state held longer than the daemon waits for an answer.
+        scope.spawn(|| {
+            hub.with_hub(|_| {
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(12));
+            })
+        });
+        holding.recv().unwrap();
+
+        let shown = share(&pc, "pc", json!({"name": SAM}));
+
+        assert_eq!(shown["hub"], "sent", "{shown}");
+        let refused = refusal(&pc);
+        assert_eq!(refused["data"]["name"], "about.name", "{refused}");
+        let why = refused["data"]["why"].as_str().unwrap();
+        assert!(why.contains("did not answer"), "{refused}");
+    });
+}
+
+/// The `settings.share_refused` event `machine` emitted, once it did.
+fn refusal(machine: &Machine) -> Value {
     let mut refused = Value::Null;
     eventually("the refusal is said", || {
-        let events = pc
+        let events = machine
             .user
             .watch(&["--after", "0"])
             .within(Duration::from_secs(1));
@@ -417,10 +452,7 @@ fn a_share_the_hub_refuses_is_said_to_the_user() {
             .unwrap_or_default();
         !refused.is_null()
     });
-    assert_eq!(refused["data"]["name"], "about.name", "{refused}");
-    let why = refused["data"]["why"].as_str().unwrap();
-    assert!(why.contains("cannot be written"), "{refused}");
-    std::fs::remove_dir(&blocked).unwrap();
+    refused
 }
 
 #[test]
