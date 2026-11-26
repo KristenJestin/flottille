@@ -909,3 +909,71 @@ fn doctor_says_the_root_owned_files_past_those_copied() {
 
     assert!(warnings.contains("64 files"), "{warnings}");
 }
+
+/// The version `hash` of a desktop's files, which it keeps as a copy of the home under `config/`:
+/// its git settings, the same in every version.
+fn desktop_version(user: &User, hash: &str) -> PathBuf {
+    let file = user.path(&format!(
+        "home/.local/share/desk/versions/{hash}/config/.config/git/config"
+    ));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "[user]\n\tname = Test\n[push]\n\tdefault = simple\n").unwrap();
+    file
+}
+
+/// The user's `~/.config/git/config`, a link to the desktop's version `hash`, as the settings git
+/// reads (`GIT_CONFIG_GLOBAL`: the tests' `XDG_CONFIG_HOME` is not in their home).
+fn desktop_settings(user: User, hash: &str) -> User {
+    let link = user.path("home/.config/git/config");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(desktop_version(&user, hash), &link).unwrap();
+    user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap())
+}
+
+/// What the desktop's update does: the version `to` made, the link moved to it (a new link
+/// renamed over the old), the version `from` removed.
+fn desktop_update(user: &User, from: &str, to: &str) {
+    let target = desktop_version(user, to);
+    let link = user.path("home/.config/git/config");
+    let new = user.path("home/.config/git/config.new");
+    std::os::unix::fs::symlink(&target, &new).unwrap();
+    std::fs::rename(&new, &link).unwrap();
+    std::fs::remove_dir_all(user.path(&format!("home/.local/share/desk/versions/{from}"))).unwrap();
+}
+
+#[test]
+fn a_git_config_symlink_retargeted_by_an_update_does_not_refuse_the_push() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = desktop_settings(User::with_fake_agent(), "aaa");
+    started(&user);
+    let (lent_at_start, warnings) = lent(&user);
+    assert!(lent_at_start, "{warnings}");
+
+    desktop_update(&user, "aaa", "bbb");
+
+    let (lent, warnings) = lent(&user);
+    assert!(lent, "{warnings}");
+}
+
+#[test]
+fn the_daemon_s_restart_reads_the_git_config_again() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = desktop_settings(User::with_fake_agent(), "aaa");
+    started(&user);
+    desktop_update(&user, "aaa", "bbb");
+
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    started(&user);
+    let (lent_after_restart, warnings) = lent(&user);
+    assert!(lent_after_restart, "{warnings}");
+    assert!(!warnings.contains("versions/aaa"), "{warnings}");
+
+    // The next update is read again too: the restart started from the version of then.
+    desktop_update(&user, "bbb", "ccc");
+    let (lent, warnings) = lent(&user);
+    assert!(lent, "{warnings}");
+}

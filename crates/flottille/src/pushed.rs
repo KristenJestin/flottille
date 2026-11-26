@@ -2152,6 +2152,35 @@ mod tests {
     }
 
     #[test]
+    fn a_git_config_that_really_changed_is_refused_naming_the_file_the_user_knows() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let version = |hash: &str, text: &str| {
+            let file = home.join(format!(
+                ".local/share/desk/versions/{hash}/config/.config/git/config"
+            ));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, text).unwrap();
+            file
+        };
+        let a = version("aaa", "[user]\n\tname = a\n");
+        let kept = home.join(".config/git");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let found = found_settings(&home, &[&link], &[&kept]);
+
+        // An update whose settings say something else, in a folder a run can write.
+        let b = version("bbb", "[core]\n\tsshCommand = ./run-me\n");
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+
+        let why = git_unlent(&found).unwrap();
+        assert!(why.contains(&link.display().to_string()), "{why}");
+        assert!(!why.contains("versions/"), "{why}");
+    }
+
+    #[test]
     fn a_relinked_git_config_with_another_hard_link_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
