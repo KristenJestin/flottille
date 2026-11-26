@@ -98,6 +98,14 @@ impl Serving {
     ) {
         let gone = stream.gone();
         tokio::pin!(gone);
+        // A list not made yet says nothing of what left it: waited for. None comes while this
+        // machine is no runner, which lists no session.
+        while lists.borrow_and_update().is_none() {
+            tokio::select! {
+                _ = &mut gone => return,
+                changed = lists.changed() => if changed.is_err() { return },
+            }
+        }
         let listed = ids_of(&lists.borrow_and_update());
         // A ghost of a session that left the list while that machine was away goes now.
         let left: Vec<String> = self
@@ -129,6 +137,10 @@ impl Serving {
                 changed = lists.changed() => {
                     if changed.is_err() {
                         return;
+                    }
+                    // No list any more (no runner now) is no session gone.
+                    if lists.borrow_and_update().is_none() {
+                        continue;
                     }
                     let listed = ids_of(&lists.borrow_and_update());
                     if !self.list(stream, listed).await {

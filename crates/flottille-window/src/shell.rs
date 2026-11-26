@@ -3551,8 +3551,17 @@ impl Shell {
                     | Outcome::Tunnel(_)
             )
         );
-        // Its link's own words (cut, waiting) are no answer of that machine.
-        let link_s = matches!(&update, Update::Disconnected(..) | Update::NotAnswering(_));
+        // Its link's own words (cut, waiting), and what this machine keeps of its sessions, are
+        // no answer of that machine.
+        let link_s = matches!(
+            &update,
+            Update::Disconnected(..)
+                | Update::NotAnswering(_)
+                | Update::Session {
+                    update: crate::session_link::SessionUpdate::Ghost(_),
+                    ..
+                }
+        );
         if !here && !link_s && self.front.as_deref() == Some(machine.as_str()) {
             self.heard(cx);
         }

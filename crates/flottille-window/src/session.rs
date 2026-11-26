@@ -1630,6 +1630,11 @@ impl SessionPage {
             return;
         }
         match update {
+            SessionUpdate::Ghost(updates) => {
+                for update in updates {
+                    self.apply(token, update, cx);
+                }
+            }
             SessionUpdate::Tree(tree) => self.set_tree(tree, cx),
             SessionUpdate::History { events, earlier } => {
                 self.histories += 1;

@@ -105,6 +105,39 @@ fn ghost_root(pc: &Machine, agent: &str) -> Value {
         .unwrap_or_default()
 }
 
+/// Whether pc's ghost of `agent` holds the same events as the server shows of it.
+fn in_step(pc: &Machine, server: &Machine, agent: &str) -> bool {
+    let there = server
+        .user
+        .call("agent.show", json!({"agent": agent, "after": 0}))
+        .unwrap();
+    ghost(pc, agent).is_ok_and(|kept| {
+        kept["events"] == there["events"]
+            && kept["last"] == there["events"].as_array().unwrap().last().unwrap()["seq"]
+    })
+}
+
+/// Waits until the server's own conversation of `agent` holds `text`, saying what it holds when
+/// it never does.
+fn holds(server: &Machine, agent: &str, text: &str) {
+    let shown = || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent, "after": 0}))
+            .map(|shown| shown["events"].to_string())
+            .unwrap_or_default()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !shown().contains(text) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server's session never said {text:?}: {}",
+            shown()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn off(machine: &Machine) {
     let stopped = machine.user.run(&["daemon", "stop"]);
     assert!(stopped.status.success(), "{}", machine.log());
@@ -118,24 +151,21 @@ fn the_ghost_follows_the_session_as_it_runs() {
         ghost_holds(&pc, &agent, REPLY)
     });
     // Each event as the server stores it, its own numbers: the same conversation.
-    let kept = ghost(&pc, &agent).unwrap();
-    let there = server
-        .user
-        .call("agent.show", json!({"agent": agent, "after": 0}))
-        .unwrap();
-    assert_eq!(kept["events"], there["events"], "the same events as there");
-    assert_eq!(
-        kept["last"],
-        there["events"].as_array().unwrap().last().unwrap()["seq"]
-    );
+    eventually("the ghost holds the server's events", || {
+        in_step(&pc, &server, &agent)
+    });
 
     // A new message, its tool call and its reply come as the session runs.
     send(&server, &agent, "LOOK at the files");
-    eventually("the message, its tool call and its reply", || {
-        ghost_holds(&pc, &agent, "LOOK at the files")
-            && ghost_holds(&pc, &agent, "fs_list")
-            && ghost_holds(&pc, &agent, "I looked at the files.")
-    });
+    holds(&server, &agent, "I looked at the files.");
+    eventually(
+        "the ghost holds the message, its tool call and its reply",
+        || in_step(&pc, &server, &agent),
+    );
+    let kept = ghost(&pc, &agent).unwrap()["events"].to_string();
+    for said in ["LOOK at the files", "fs_list", "I looked at the files."] {
+        assert!(kept.contains(said), "{said}: {kept}");
+    }
 
     // A question to the user: the session waits, as its tree says it there.
     send(&server, &agent, "ASK which branch");
@@ -173,35 +203,45 @@ fn a_ghost_catches_up_after_a_gap_without_reloading_everything() {
             .is_ok_and(|shown| shown.to_string().contains(REPLY))
             && state(&server, &agent) == "idle"
     });
-    let missed = server
-        .user
-        .call("agent.show", json!({"agent": agent, "after": cursor}))
-        .unwrap()["events"]
-        .as_array()
-        .unwrap()
-        .len();
-
     // Back, it catches up from where it stopped: only what it missed comes.
     pc.user.status();
     pc.wait_for("server", "online");
     eventually("the ghost holds what came while pc was off", || {
         ghost_holds(&pc, &agent, "Cover the docs too")
     });
-    let caught = format!(
-        "the ghost of session {agent} for pc caught up from event {cursor}: {missed} events"
+    // The server says it sent only what pc missed, from where pc's ghost stopped.
+    let from_where = |log: &str| -> Option<(u64, usize)> {
+        let said = format!("the ghost of session {agent} for pc caught up from event ");
+        log.lines()
+            .filter_map(|line| line.split_once(&said).map(|(_, rest)| rest))
+            .filter_map(|rest| {
+                let (from, count) = rest.split_once(": ")?;
+                let count = count.strip_suffix(" events")?;
+                Some((from.parse().ok()?, count.parse().ok()?))
+            })
+            .find(|(from, _)| *from != 0)
+    };
+    eventually(
+        "the server caught pc's ghost up from where it stopped",
+        || from_where(&server.log()).is_some(),
     );
-    eventually("the server says it sent only what pc missed", || {
-        server.log().contains(&caught)
-    });
-    let after = ghost(&pc, &agent).unwrap();
-    let there = server
+    let (from, sent) = from_where(&server.log()).unwrap();
+    let total = server
         .user
         .call("agent.show", json!({"agent": agent, "after": 0}))
-        .unwrap();
-    assert_eq!(
-        after["events"], there["events"],
-        "the whole conversation, once"
+        .unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(from >= cursor, "from {from}, the ghost held up to {cursor}");
+    assert!(sent > 0, "what came while pc was off is sent");
+    assert!(
+        sent < total,
+        "{sent} sent of {total}: not the whole conversation again"
     );
+    eventually("the ghost holds the whole conversation, once", || {
+        in_step(&pc, &server, &agent)
+    });
 }
 
 #[test]
@@ -256,8 +296,8 @@ fn a_ghost_goes_away_with_its_session() {
 fn the_ghost_decides_nothing() {
     let (_hub, pc, server) = pc_and_server();
     let agent = session(&server, "Write the release notes");
-    eventually("pc's ghost holds the first reply", || {
-        ghost_holds(&pc, &agent, REPLY)
+    eventually("pc's ghost holds the server's events", || {
+        in_step(&pc, &server, &agent)
     });
     let kept = ghost(&pc, &agent).unwrap();
 

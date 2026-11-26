@@ -439,6 +439,9 @@ pub enum RepositoryFacts {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionUpdate {
+    /// What this machine keeps of a session of another machine, its ghost, as that machine last
+    /// showed it: no word of that machine now.
+    Ghost(Vec<SessionUpdate>),
     Tree(Vec<TreeAgent>),
     /// The last pages of the shown agent's stored conversation, oldest first, once per link;
     /// `earlier` when older events were left out.
@@ -982,13 +985,15 @@ impl Link {
             .flatten()
             .filter_map(|event| serde_json::from_value(event.clone()).ok())
             .collect();
+        let mut shown = Vec::new();
         if !tree.is_empty() {
-            self.send(SessionUpdate::Tree(tree));
+            shown.push(SessionUpdate::Tree(tree));
         }
-        self.send(SessionUpdate::Requests(requests));
-        self.send(SessionUpdate::VaultAsks(asks));
+        shown.push(SessionUpdate::Requests(requests));
+        shown.push(SessionUpdate::VaultAsks(asks));
         let earlier = kept["more"] == true;
-        if self.send(SessionUpdate::History { events, earlier }) {
+        shown.push(SessionUpdate::History { events, earlier });
+        if self.send(SessionUpdate::Ghost(shown)) {
             resume.last = Some(last);
             resume.read = true;
         }
