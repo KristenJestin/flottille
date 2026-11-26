@@ -227,6 +227,8 @@ fn the_rules_saved_on_all_machines_reach_every_machine(cx: &mut TestAppContext) 
     until(&shell, cx, "the Save unfolds", |cx| {
         present(cx, "all-rules-save")
     });
+    // Unfolded whole before it is clicked.
+    settle(&shell, cx);
     click(&shell, "all-rules-save", cx);
 
     eventually("the server follows the rules of all machines", || {
