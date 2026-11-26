@@ -812,6 +812,41 @@ fn a_copy_of_the_same_time_replaces_the_kept_one_only_when_it_adds_machines() {
     assert_eq!(hub.shared()[0].recipients().count(), 2);
 }
 
+/// While two machines see different member lists, each seals the same value for the machines it
+/// knows: a copy of the same time replaces the kept one only when it is sealed for every machine
+/// the kept one is, so that the copy does not swing between them.
+#[test]
+fn an_equal_time_copy_that_drops_a_recipient_replaces_nothing() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    let (server, laptop) = (machine_key(dir.path(), "s"), machine_key(dir.path(), "l"));
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |to: &[flottille_link::PublicKey]| {
+        Sealed::seal("about.name", START_MS, b"Sam", to, &machine).unwrap()
+    };
+    assert!(
+        hub.share(seal(&[machine.public(), server.public()]))
+            .unwrap()
+    );
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    // A machine more, but one less: neither kept nor written.
+    assert!(
+        !hub.share(seal(&[machine.public(), laptop.public()]))
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    let kept: Vec<_> = hub.shared()[0].recipients().copied().collect();
+    assert_eq!(kept, [machine.public(), server.public()]);
+    // Every machine of the kept copy and one more: kept.
+    let all = [machine.public(), server.public(), laptop.public()];
+    assert!(hub.share(seal(&all)).unwrap());
+    assert_eq!(hub.shared()[0].recipients().count(), 3);
+}
+
 #[test]
 fn a_value_later_than_the_hub_s_clock_is_refused() {
     let (dir, folder) = folder();
