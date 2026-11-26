@@ -157,8 +157,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
         "appearance.set" => {
             let asked: Own = serde_json::from_value(params)?;
             let invalid = |e| Failure::new("invalid-config", e);
-            let before = read(paths).map_err(invalid)?;
-            let mut own = own(paths).map_err(invalid)?;
+            // A file that cannot be read is written again from the choice, as nothing chosen.
+            let before = read(paths).unwrap_or_default();
+            let mut own = own(paths).unwrap_or_default();
             if asked.theme.is_some() {
                 own.theme = asked.theme;
             }
