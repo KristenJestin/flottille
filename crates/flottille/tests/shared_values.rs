@@ -640,3 +640,158 @@ fn without_a_hub_each_setting_is_as_today() {
         .unwrap_err();
     assert!(!refused.is_empty());
 }
+
+/// #1462 (point 3 of #1525's review): a shade chosen here stays this machine's own, even the same
+/// as all machines', and all machines' next shade passes it by.
+#[test]
+fn a_shade_chosen_here_stays_its_own_even_the_same_as_all_machines() {
+    let (_hub, pc, server) = machines();
+    share(&pc, "pc", "appearance.shade", "light");
+    eventually("the server is light", || {
+        call(&server, "appearance.show", json!({}))["shade"] == "light"
+    });
+
+    call(&server, "appearance.set", json!({"shade": "light"}));
+    share(&pc, "pc", "appearance.shade", "dark");
+
+    eventually("all machines are dark", || {
+        call(&pc, "appearance.show", json!({}))["shade"] == "dark"
+            && shared(&server)["all"]["appearance.shade"] == "dark"
+    });
+    assert_eq!(
+        call(&server, "appearance.show", json!({}))["shade"],
+        "light"
+    );
+    let own = shared(&server)["own"].clone();
+    assert!(
+        own.as_array().unwrap().contains(&json!("appearance.shade")),
+        "the server's shade is marked as its own: {own}"
+    );
+}
+
+/// Point 4 of #1525's review: "no rules" chosen here (an empty text) is this machine's own, as
+/// its agents follow it, and marked so; Use all machines' value gives the shared rules back.
+#[test]
+fn no_rules_chosen_here_are_its_own_and_marked() {
+    let (_hub, pc, server) = machines();
+    share(&pc, "pc", "rules", "Shared rules.");
+    eventually("the server follows the rules of all machines", || {
+        call(&server, "rules.show", json!({}))["source"] == "all"
+    });
+
+    let shown = call(&server, "rules.set", json!({"text": ""}));
+
+    assert_eq!(shown["text"], "", "{shown}");
+    assert_eq!(shown["source"], "global", "{shown}");
+    let own = shared(&server)["own"].clone();
+    assert!(own.as_array().unwrap().contains(&json!("rules")), "{own}");
+    call(&server, "settings.use_all", json!({"names": ["rules"]}));
+    assert_eq!(
+        call(&server, "rules.show", json!({}))["text"],
+        "Shared rules."
+    );
+}
+
+/// Point 5 of #1525's review: the values a section saves are checked together before any is
+/// shared, as `settings.share` checks each.
+#[test]
+fn a_check_refuses_the_values_before_any_is_shared() {
+    let (hub, pc, _server) = machines();
+    let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+    let values = json!({
+        "judge.guidance": "Let a read through.",
+        "compaction.guidance": format!("Keep {token} for later."),
+    });
+
+    let (_, refused) = pc
+        .user
+        .call("settings.check", json!({"values": values}))
+        .unwrap_err();
+
+    assert!(
+        refused.contains("compaction.guidance holds a secret"),
+        "{refused}"
+    );
+    assert!(!hub_copy(&hub).contains("judge.guidance"));
+    let fine = call(
+        &pc,
+        "settings.check",
+        json!({"values": {"judge.guidance": "Let a read through."}}),
+    );
+    assert_eq!(fine, json!({}));
+    let (_, unknown) = pc
+        .user
+        .call("settings.check", json!({"values": {"vault.tracker": "x"}}))
+        .unwrap_err();
+    assert!(unknown.contains("no value of all machines"), "{unknown}");
+}
+
+/// Point 6 of #1525's review: a text the sender's vault lets through, holding a value of the
+/// receiving machine's vault, is refused there: it never reaches its agents nor its copy.
+#[test]
+fn a_copy_holding_a_secret_of_the_receiving_machine_is_refused_there() {
+    let (hub, pc, server) = machines();
+    call(
+        &server,
+        "vault.set",
+        json!({"name": "tracker", "secret": SECRET}),
+    );
+    let leaked = format!("Sign with {SECRET} before pushing.");
+
+    share(&pc, "pc", "rules", &leaked);
+    eventually("the hub keeps the rules", || {
+        hub_copy(&hub).contains("\"rules\"")
+    });
+    // A later value, which the hub sends with the rules: once the server has it, it has seen both.
+    share(&pc, "pc", "judge.guidance", "Let a read through.");
+    eventually("the server follows the judge's guidance", || {
+        call(&server, "judge.show", json!({}))["source"] == "all"
+    });
+
+    let rules = call(&server, "rules.show", json!({}));
+    assert_ne!(rules["source"], "all", "{rules}");
+    assert!(!rules.to_string().contains(SECRET));
+    assert!(shared(&server)["all"].get("rules").is_none());
+    let kept = std::fs::read_to_string(server.folder().join("shared.json")).unwrap_or_default();
+    assert!(!kept.contains(SECRET), "the server's copy holds it");
+    assert!(!kept.contains("\"rules\""), "{kept}");
+}
+
+/// Point 10 of #1525's review: a `tool-results.toml` or `appearance.toml` this machine cannot
+/// read fails no answer of `settings.shared`: the value it holds is said ignored here, with why.
+#[test]
+fn a_file_that_cannot_be_read_is_said_in_its_row_alone() {
+    let (_hub, pc, server) = machines();
+    share(&pc, "pc", "tool_results.limit", "6000");
+    share(&pc, "pc", "appearance.shade", "light");
+    share(&pc, "pc", "rules", "Shared rules.");
+    eventually("the server has all machines' values", || {
+        let all = &shared(&server)["all"];
+        all["tool_results.limit"] == "6000" && all["appearance.shade"] == "light"
+    });
+    let config = server.user.path("config/flottille");
+    std::fs::write(config.join("tool-results.toml"), "limit = [\n").unwrap();
+    std::fs::write(config.join("appearance.toml"), "colour = \"blue\"\n").unwrap();
+
+    let shown = shared(&server);
+
+    assert_eq!(shown["all"]["rules"], "Shared rules.", "{shown}");
+    for (name, file) in [
+        ("tool_results.limit", "tool-results.toml"),
+        ("appearance.shade", "appearance.toml"),
+    ] {
+        let why = shown["ignored"][name].as_str().unwrap_or_default();
+        assert!(why.contains(file), "{name}: {shown}");
+    }
+}
+
+/// Point 10 of #1525's review: a check's guidance shared is said as Review's change of that part.
+#[test]
+fn a_check_s_guidance_shared_says_its_part() {
+    let (_hub, pc, server) = machines();
+    let watch = server.user.watch(&["--after", "0"]);
+
+    share(&pc, "pc", "review.guidance.bugs", "Hunt the off-by-one.");
+
+    watch.until(|event| event["name"] == "review.changed" && event["data"]["part"] == "bugs");
+}
