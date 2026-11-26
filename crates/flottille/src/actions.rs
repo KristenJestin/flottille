@@ -2566,6 +2566,7 @@ fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String
     let (rules, cuts) = crate::rules::resolved(paths, project);
     let global = match rules.source {
         crate::rules::Source::Global => "the user's rules for all projects",
+        crate::rules::Source::All => "the user's rules for all projects, on all their machines",
         crate::rules::Source::Default => "Flottille's default rules",
     };
     let has_own = !rules.own.trim().is_empty();

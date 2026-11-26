@@ -1,14 +1,19 @@
-//! The settings of all machines a machine often overrides (`docs/remote.md`, "Settings for all
-//! machines"): new sessions' provider, model and effort, the judge's, compactor's and review's
+//! The settings of all machines (`docs/remote.md`, "Settings for all machines"): those a machine
+//! often overrides (new sessions' provider, model and effort, the judge's, compactor's and review's
 //! models, Sessions, the workspaces folder when it is a `~/…` template, the check for updates and
-//! the `https://` connections. Each is a value of all machines as About you is (`crate::shared`),
+//! the `https://` connections), then the guidance and the rest of "Shared, personal" (the rules
+//! for every project, the judge's, the compaction's and Review's guidance, long tool results,
+//! Specs' language and mode, the automatic subscriptions, Review's passes and the shade). Each is a
+//! value of all machines as About you is (`crate::shared`),
 //! text under its name, changed by `settings.share`, which the user's device signs, and read by
 //! the setting's own loader while this machine chose none. `settings.shared` says what all
 //! machines hold, what this machine overrides and what it lacks; `settings.use_all` drops its own.
 //!
 //! No secret is a value: nothing here takes a vault value, a token, a key or a project's
 //! `[variables]`, and a connection that names a vault entry, runs a program or is reached in
-//! clear is not shared. Each machine signs in to a shared connection for itself.
+//! clear is not shared. Each machine signs in to a shared connection for itself. A guidance is
+//! free text: one that holds a secret (what masking would change) is refused when it is shared and
+//! when a machine receives it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -20,7 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::daemon::Daemon;
 use crate::extensions;
 use crate::projects::Failure;
-use crate::{compaction, inactive, providers, updates};
+use crate::{appearance, compaction, inactive, judge, providers, results, rules, updates};
 
 /// The method whose signed request changes these values for all machines.
 pub const SHARE: &str = "settings.share";
@@ -30,9 +35,32 @@ const PASSES: [&str; 5] = ["spec", "bugs", "standards", "security", "verifier"];
 
 const CONNECTIONS: &str = extensions::SHARED_CONNECTIONS;
 
+/// The guidance texts among these values, free text each: none may hold a secret.
+const TEXTS: [&str; 8] = [
+    rules::SHARED,
+    judge::SHARED,
+    compaction::SHARED_GUIDANCE,
+    "review.guidance",
+    "review.guidance.spec",
+    "review.guidance.bugs",
+    "review.guidance.standards",
+    "review.guidance.security",
+];
+
+/// The settings of an extension among these values, `<extension>.<key>`, each the JSON text of
+/// what `extension.set` takes.
+const EXTENSION_SETTINGS: [&str; 6] = [
+    "specs.language",
+    "specs.mode",
+    "autosubscriptions.created_pull",
+    "autosubscriptions.branch_pull",
+    "autosubscriptions.ticket",
+    "review.passes",
+];
+
 /// The names of these values: each is also in `flottille_link::SHARED_NAMES`, which the hub keeps
 /// to.
-pub const NAMES: [&str; 13] = [
+pub const NAMES: [&str; 30] = [
     provider::NEW_SESSION,
     provider::JUDGE,
     compaction::SHARED,
@@ -46,7 +74,44 @@ pub const NAMES: [&str; 13] = [
     flottille_core::place::SHARED,
     updates::SHARED,
     CONNECTIONS,
+    rules::SHARED,
+    judge::SHARED,
+    compaction::SHARED_GUIDANCE,
+    "review.guidance",
+    "review.guidance.spec",
+    "review.guidance.bugs",
+    "review.guidance.standards",
+    "review.guidance.security",
+    results::SHARED_LIMIT,
+    results::SHARED_UNCHANGED,
+    appearance::SHARED_SHADE,
+    "specs.language",
+    "specs.mode",
+    "autosubscriptions.created_pull",
+    "autosubscriptions.branch_pull",
+    "autosubscriptions.ticket",
+    "review.passes",
 ];
+
+/// The guidance of an extension's (Review's) the value `name` is, and its part.
+fn guidance_of(name: &str) -> Option<(&str, Option<&str>)> {
+    let (extension, rest) = name.split_once(".guidance")?;
+    match rest.strip_prefix('.') {
+        Some(part) => Some((extension, Some(part))),
+        None if rest.is_empty() => Some((extension, None)),
+        None => None,
+    }
+}
+
+/// Why a text holds a secret, if it does: what masking would change, a vault value or a token.
+fn holds_a_secret(name: &str, value: &str) -> Result<(), String> {
+    match flottille_core::secrets::mask(value, &Default::default()) == value {
+        true => Ok(()),
+        false => Err(format!(
+            "{name} holds a secret: keep secrets in the vault and name the entry instead"
+        )),
+    }
+}
 
 /// Why `value` cannot be the value `name`. The empty text clears a value, and is always taken.
 /// Only what is true on every machine is checked here: what one machine lacks (a model, a
@@ -58,7 +123,24 @@ fn check(name: &str, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Ok(());
     }
+    if TEXTS.contains(&name) {
+        holds_a_secret(name, value)?;
+    }
     match name {
+        rules::SHARED => rules::check(value),
+        judge::SHARED => judge::check(value),
+        compaction::SHARED_GUIDANCE => compaction::check_guidance(value),
+        results::SHARED_LIMIT => results::shared_limit(value).map(drop),
+        results::SHARED_UNCHANGED => results::shared_unchanged(value).map(drop),
+        appearance::SHARED_SHADE => appearance::shared_shade(value),
+        name if TEXTS.contains(&name) => {
+            let (extension, _) = guidance_of(name).expect("a guidance's name");
+            extensions::guidance::check(extension, value)
+        }
+        name if EXTENSION_SETTINGS.contains(&name) => {
+            let (extension, key) = name.split_once('.').expect("<extension>.<key>");
+            extensions::shared_value(extension, key, value).map(drop)
+        }
         provider::NEW_SESSION => provider::shared_new_session(value).map(drop),
         provider::JUDGE => provider::shared_judge(value).map(drop),
         compaction::SHARED => compaction::shared_compactor(value).map(drop),
@@ -83,9 +165,54 @@ fn check(name: &str, value: &str) -> Result<(), String> {
 }
 
 /// The value `name` as a machine keeps it from another: none when `settings.share` would refuse
-/// it.
+/// it, a guidance holding a secret among them.
 pub(crate) fn received(name: &str, value: &str) -> Option<String> {
     check(name, value).ok().map(|()| value.to_owned())
+}
+
+/// All machines' text of the guidance `name` this machine follows while it has none of its own:
+/// none without a hub, while none is shared, or when it holds a secret (a vault entry added since
+/// it was checked).
+pub fn text(paths: &flottille_core::paths::Paths, name: &str) -> Option<String> {
+    if !TEXTS.contains(&name) {
+        return None;
+    }
+    flottille_core::all_machines::value(paths, name)
+        .filter(|text| !text.trim().is_empty() && holds_a_secret(name, text).is_ok())
+}
+
+/// Flottille's default of each value of the guidance and the rest, as its value says it: what All
+/// machines shows while no value of all machines is there.
+fn defaults() -> Map<String, Value> {
+    let mut defaults = Map::new();
+    defaults.insert(rules::SHARED.into(), json!(rules::DEFAULT));
+    defaults.insert(judge::SHARED.into(), json!(judge::DEFAULT));
+    defaults.insert(
+        compaction::SHARED_GUIDANCE.into(),
+        json!(compaction::DEFAULT),
+    );
+    for name in TEXTS {
+        if let Some((extension, part)) = guidance_of(name) {
+            let default = match part {
+                Some(_) => String::new(),
+                None => extensions::guidance::default_of(extension).unwrap_or_default(),
+            };
+            defaults.insert(name.into(), json!(default));
+        }
+    }
+    defaults.insert(
+        results::SHARED_LIMIT.into(),
+        json!(results::DEFAULT_LIMIT.to_string()),
+    );
+    defaults.insert(results::SHARED_UNCHANGED.into(), json!("false"));
+    defaults.insert(appearance::SHARED_SHADE.into(), json!("dark"));
+    for name in EXTENSION_SETTINGS {
+        let (extension, key) = name.split_once('.').expect("<extension>.<key>");
+        if let Some(default) = extensions::default_value(extension, key) {
+            defaults.insert(name.into(), json!(default));
+        }
+    }
+    defaults
 }
 
 /// All machines' values of these settings, by name; none without a hub.
@@ -126,6 +253,18 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
                 flottille_core::place::says_a_place(&paths.workspaces_place())
             }
             updates::SHARED => updates::own_check(paths).map_err(invalid)?.is_some(),
+            rules::SHARED => rules::global(paths)
+                .map_err(|failure| invalid(failure.message))?
+                .is_some_and(|text| !text.trim().is_empty()),
+            judge::SHARED => written(&paths.judge()),
+            compaction::SHARED_GUIDANCE => written(&compaction::guidance_file(paths)),
+            results::SHARED_LIMIT => results::own_keys(paths).map_err(invalid)?.0,
+            results::SHARED_UNCHANGED => results::own_keys(paths).map_err(invalid)?.1,
+            appearance::SHARED_SHADE => appearance::own_shade(paths).map_err(invalid)?,
+            name if TEXTS.contains(&name) => {
+                let (extension, part) = guidance_of(name).expect("a guidance's name");
+                written(&extensions::guidance::file_of(paths, extension, part))
+            }
             CONNECTIONS => {
                 own.extend(
                     extensions::overridden_connections(paths)
@@ -144,6 +283,11 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
         }
     }
     Ok(own)
+}
+
+/// Whether a guidance file holds a text: one blank is no guidance.
+fn written(file: &std::path::Path) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|text| !text.trim().is_empty())
 }
 
 /// The provider and the model a value names, when it names any.
@@ -174,11 +318,13 @@ fn named(name: &str, value: &str) -> Option<(String, Option<String>)> {
     }
 }
 
-/// `{"all", "own", "ignored"}`: all machines' values (`null` without a hub), the names this
-/// machine holds itself, and why each value this machine cannot follow is ignored here.
+/// `{"all", "own", "ignored", "defaults"}`: all machines' values (`null` without a hub), the
+/// names this machine holds itself, why each value this machine cannot follow is ignored here, and
+/// Flottille's default of the guidance and the rest, which All machines shows while none is
+/// shared.
 fn shown(daemon: &Daemon) -> Result<Value, Failure> {
     let Some(all) = all(daemon) else {
-        return Ok(json!({"all": null, "own": [], "ignored": {}}));
+        return Ok(json!({"all": null, "own": [], "ignored": {}, "defaults": defaults()}));
     };
     let own = own(daemon, &all)?;
     let ignored: Map<String, Value> = all
@@ -190,7 +336,7 @@ fn shown(daemon: &Daemon) -> Result<Value, Failure> {
             Some((name.clone(), json!(format!("{why}: it is ignored here"))))
         })
         .collect();
-    Ok(json!({"all": all, "own": own, "ignored": ignored}))
+    Ok(json!({"all": all, "own": own, "ignored": ignored, "defaults": defaults()}))
 }
 
 /// Why `settings.share` is refused unless the user's device signed it here.
@@ -298,10 +444,32 @@ fn use_all(daemon: &Arc<Daemon>, name: &str) -> Result<(), Failure> {
             _ => Ok(()),
         },
         updates::SHARED => updates::forget_check(paths).map_err(unavailable),
+        rules::SHARED => removed(&paths.rules()),
+        judge::SHARED => removed(&paths.judge()),
+        compaction::SHARED_GUIDANCE => removed(&compaction::guidance_file(paths)),
+        results::SHARED_LIMIT | results::SHARED_UNCHANGED => {
+            results::forget(paths, name).map_err(unavailable)
+        }
+        appearance::SHARED_SHADE => appearance::forget_shade(paths).map_err(unavailable),
+        name if TEXTS.contains(&name) => {
+            let (extension, part) = guidance_of(name).expect("a guidance's name");
+            removed(&extensions::guidance::file_of(paths, extension, part))
+        }
         review => match review.split_once('.') {
             Some((extension, key)) => extensions::forget_setting(daemon, extension, key),
             None => Ok(()),
         },
+    }
+}
+
+/// Removes a guidance file this machine holds: all machines' text applies again.
+fn removed(file: &std::path::Path) -> Result<(), Failure> {
+    match std::fs::remove_file(file) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Failure::new(
+            "unavailable",
+            format!("{}: {error}", file.display()),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -327,6 +495,16 @@ pub fn applied(daemon: &Arc<Daemon>, names: &[String]) {
             flottille_core::place::SHARED => "workspaces_folder.changed",
             updates::SHARED => "update",
             CONNECTIONS => "connections",
+            rules::SHARED => "rules.changed",
+            judge::SHARED => "judge.changed",
+            compaction::SHARED_GUIDANCE => "compaction",
+            results::SHARED_LIMIT | results::SHARED_UNCHANGED => "tool_results.changed",
+            appearance::SHARED_SHADE => "appearance.changed",
+            name if TEXTS.contains(&name) => "review.changed",
+            "specs.language" | "specs.mode" => "extension.specs",
+            "autosubscriptions.created_pull"
+            | "autosubscriptions.branch_pull"
+            | "autosubscriptions.ticket" => "extension.autosubscriptions",
             name if name.starts_with("review.") => "extension.changed",
             name if name.starts_with("about.") => "about.changed",
             _ => continue,
@@ -371,6 +549,13 @@ fn say(daemon: &Arc<Daemon>, event: &str) -> Result<(), Failure> {
             Ok(())
         }
         "extension.changed" => emit(event, json!({"name": "review", "project": null})),
+        "extension.specs" | "extension.autosubscriptions" => {
+            let name = event.trim_start_matches("extension.");
+            emit("extension.changed", json!({"name": name, "project": null}))
+        }
+        "rules.changed" => emit(event, json!({"project": null})),
+        "tool_results.changed" => results::announce(daemon).map_err(invalid),
+        "appearance.changed" => appearance::announce(daemon).map_err(invalid),
         event => emit(event, json!({})),
     }
 }
@@ -378,6 +563,24 @@ fn say(daemon: &Arc<Daemon>, event: &str) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guidance_holding_a_token_is_refused_and_never_received() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let leaked = format!("Push with {token}.");
+        for name in TEXTS {
+            let refused = check(name, &leaked).unwrap_err();
+            assert!(
+                refused.contains("holds a secret: keep secrets in the vault"),
+                "{name}: {refused}"
+            );
+            assert!(received(name, &leaked).is_none(), "{name}");
+            assert!(
+                received(name, "Push with the vault's entry.").is_some(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn the_hub_keeps_every_name_of_these_values() {

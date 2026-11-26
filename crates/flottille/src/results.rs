@@ -43,7 +43,16 @@ fn config(paths: &Paths) -> PathBuf {
     paths.config.join("tool-results.toml")
 }
 
-/// What `tool-results.toml` says.
+/// The names of the two settings as values of all machines (`crate::all_settings`).
+pub const SHARED_LIMIT: &str = "tool_results.limit";
+pub const SHARED_UNCHANGED: &str = "tool_results.unchanged";
+
+/// The first line of a `tool-results.toml` this version writes: what it holds is what the user
+/// chose here. A file of before held the limit whatever the user chose, so its default there is
+/// no choice, and all machines' value applies over it.
+const OWN_MARK: &str = "# This machine's own choices: a key left out follows all machines.\n";
+
+/// What results are held to.
 struct Settings {
     /// `Some(limit)`, `None` when results are returned whole.
     limit: Option<usize>,
@@ -51,12 +60,83 @@ struct Settings {
     unchanged: bool,
 }
 
-/// What `tool-results.toml` says; the defaults when there is no file.
+/// What `tool-results.toml` says this machine chose: a key it leaves out is none.
+#[derive(Default)]
+struct Own {
+    limit: Option<Option<usize>>,
+    unchanged: Option<bool>,
+}
+
+/// All machines' limit as its value says it: a number of characters, or `off`.
+pub fn shared_limit(value: &str) -> Result<Option<usize>, String> {
+    match value {
+        "off" => Ok(None),
+        number => number
+            .parse::<usize>()
+            .ok()
+            .filter(|limit| (MIN_LIMIT..=MAX_LIMIT).contains(limit))
+            .map(Some)
+            .ok_or_else(|| {
+                format!("a number of characters from {MIN_LIMIT} to {MAX_LIMIT}, or off")
+            }),
+    }
+}
+
+/// All machines' choice of an unchanged page: `true` or `false`.
+pub fn shared_unchanged(value: &str) -> Result<bool, String> {
+    value.parse().map_err(|_| "true or false".to_owned())
+}
+
+/// What results are held to: this machine's choice, else all machines', else the default.
 fn read(paths: &Paths) -> Result<Settings, String> {
-    let mut settings = Settings {
-        limit: Some(DEFAULT_LIMIT),
-        unchanged: false,
-    };
+    let own = own(paths)?;
+    let all = |name| flottille_core::all_machines::value(paths, name);
+    Ok(Settings {
+        limit: own
+            .limit
+            .or_else(|| all(SHARED_LIMIT).and_then(|value| shared_limit(&value).ok()))
+            .unwrap_or(Some(DEFAULT_LIMIT)),
+        unchanged: own
+            .unchanged
+            .or_else(|| all(SHARED_UNCHANGED).and_then(|value| shared_unchanged(&value).ok()))
+            .unwrap_or(false),
+    })
+}
+
+/// Which of the two this machine chose itself: the limit, whether a page is said unchanged.
+pub fn own_keys(paths: &Paths) -> Result<(bool, bool), String> {
+    let own = own(paths)?;
+    Ok((own.limit.is_some(), own.unchanged.is_some()))
+}
+
+/// Drops this machine's choice of the value `name`: all machines' applies again.
+pub fn forget(paths: &Paths, name: &str) -> Result<(), String> {
+    let mut own = own(paths)?;
+    match name {
+        SHARED_LIMIT => own.limit = None,
+        _ => own.unchanged = None,
+    }
+    write(paths, &own)
+}
+
+fn write(paths: &Paths, own: &Own) -> Result<(), String> {
+    std::fs::create_dir_all(&paths.config)
+        .map_err(|e| format!("{}: {e}", paths.config.display()))?;
+    let mut text = OWN_MARK.to_owned();
+    match own.limit {
+        Some(Some(limit)) => text.push_str(&format!("limit = {limit}\n")),
+        Some(None) => text.push_str("limit = \"off\"\n"),
+        None => {}
+    }
+    if let Some(unchanged) = own.unchanged {
+        text.push_str(&format!("unchanged = {unchanged}\n"));
+    }
+    providers::write_in_place(&config(paths), &text).map_err(|e| format!("tool-results.toml: {e}"))
+}
+
+/// What `tool-results.toml` says this machine chose; nothing when there is no file.
+fn own(paths: &Paths) -> Result<Own, String> {
+    let mut settings = Own::default();
     let text = match std::fs::read_to_string(config(paths)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(settings),
@@ -71,7 +151,7 @@ fn read(paths: &Paths) -> Result<Settings, String> {
         }
     }
     if let Some(item) = document.get("limit") {
-        settings.limit = match item.as_integer() {
+        settings.limit = Some(match item.as_integer() {
             _ if item.as_str() == Some("off") => None,
             Some(limit) if (MIN_LIMIT as i64..=MAX_LIMIT as i64).contains(&limit) => {
                 Some(limit as usize)
@@ -82,12 +162,21 @@ fn read(paths: &Paths) -> Result<Settings, String> {
                      {MAX_LIMIT}, or \"off\""
                 ));
             }
-        };
+        });
     }
     if let Some(item) = document.get("unchanged") {
-        settings.unchanged = item
-            .as_bool()
-            .ok_or("tool-results.toml: unchanged is true or false")?;
+        settings.unchanged = Some(
+            item.as_bool()
+                .ok_or("tool-results.toml: unchanged is true or false")?,
+        );
+    }
+    if !text.starts_with(OWN_MARK) {
+        if settings.limit == Some(Some(DEFAULT_LIMIT)) {
+            settings.limit = None;
+        }
+        if settings.unchanged == Some(false) {
+            settings.unchanged = None;
+        }
     }
     Ok(settings)
 }
@@ -117,10 +206,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     let answer = match method {
         "tool_results.show" => said(&read(paths).map_err(|e| Failure::new("invalid-config", e))?),
         "tool_results.set" => {
-            let mut wanted = read(paths).unwrap_or(Settings {
-                limit: Some(DEFAULT_LIMIT),
-                unchanged: false,
-            });
+            // Only what is given is this machine's choice: the rest stays as it was.
+            let mut wanted = own(paths).unwrap_or_default();
             let (limit, unchanged) = (params.get("limit"), params.get("unchanged"));
             if limit.is_none() && unchanged.is_none() {
                 return Err(Failure::new(
@@ -130,12 +217,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             }
             match limit {
                 None => {}
-                Some(Value::String(word)) if word == "off" => wanted.limit = None,
+                Some(Value::String(word)) if word == "off" => wanted.limit = Some(None),
                 Some(Value::Number(n))
                     if n.as_u64()
                         .is_some_and(|n| (MIN_LIMIT as u64..=MAX_LIMIT as u64).contains(&n)) =>
                 {
-                    wanted.limit = n.as_u64().map(|n| n as usize)
+                    wanted.limit = Some(n.as_u64().map(|n| n as usize))
                 }
                 _ => {
                     return Err(Failure::new(
@@ -149,24 +236,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             }
             match unchanged {
                 None => {}
-                Some(Value::Bool(on)) => wanted.unchanged = *on,
+                Some(Value::Bool(on)) => wanted.unchanged = Some(*on),
                 _ => {
                     return Err(Failure::new("invalid-params", "unchanged is true or false"));
                 }
             }
-            std::fs::create_dir_all(&paths.config).map_err(|e| {
-                Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
-            })?;
-            let mut text = match wanted.limit {
-                Some(limit) => format!("limit = {limit}\n"),
-                None => "limit = \"off\"\n".to_owned(),
-            };
-            if wanted.unchanged {
-                text.push_str("unchanged = true\n");
-            }
-            providers::write_in_place(&config(paths), &text)
-                .map_err(|e| Failure::new("unavailable", format!("tool-results.toml: {e}")))?;
-            let answer = said(&wanted);
+            write(paths, &wanted).map_err(|e| Failure::new("unavailable", e))?;
+            let answer = said(&read(paths).map_err(|e| Failure::new("invalid-config", e))?);
             daemon
                 .emit("tool_results.changed", answer.clone())
                 .map_err(|error| Failure::new("unavailable", error.to_string()))?;
@@ -180,6 +256,15 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
         }
     };
     Ok(answer)
+}
+
+/// Says the settings as they are now, `tool_results.changed`: after a change of all machines.
+pub fn announce(daemon: &Daemon) -> Result<(), String> {
+    let answer = said(&read(&daemon.paths)?);
+    daemon
+        .emit("tool_results.changed", answer)
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 /// The settings as the protocol says them: the limit is a number of characters, or `"off"`.

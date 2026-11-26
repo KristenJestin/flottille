@@ -18,11 +18,36 @@ use crate::projects::Failure;
 static WRITING: Mutex<()> = Mutex::new(());
 
 fn file(daemon: &Daemon, extension: &Extension, part: Option<&str>) -> std::path::PathBuf {
+    file_of(&daemon.paths, extension.name, part)
+}
+
+/// The file of the guidance of the extension `name` (or of its part), in the configuration
+/// folder.
+pub fn file_of(
+    paths: &flottille_core::paths::Paths,
+    name: &str,
+    part: Option<&str>,
+) -> std::path::PathBuf {
     let name = match part {
-        Some(part) => format!("{}-{part}.md", extension.name),
-        None => format!("{}.md", extension.name),
+        Some(part) => format!("{name}-{part}.md"),
+        None => format!("{name}.md"),
     };
-    daemon.paths.config.join(name)
+    paths.config.join(name)
+}
+
+/// The name of the guidance (or of its part) as a value of all machines: `<name>.guidance`,
+/// `<name>.guidance.<part>` (`crate::all_settings`, which knows Review's alone).
+pub fn shared_name(name: &str, part: Option<&str>) -> String {
+    match part {
+        Some(part) => format!("{name}.guidance.{part}"),
+        None => format!("{name}.guidance"),
+    }
+}
+
+/// All machines' guidance of the extension (or of its part): none without a hub, or when the
+/// extension shares none.
+fn of_all(daemon: &Daemon, extension: &Extension, part: Option<&str>) -> Option<String> {
+    crate::all_settings::text(&daemon.paths, &shared_name(extension.name, part))
 }
 
 /// The user's guidance: none while the default holds; `Err((what could be read, why))` when it
@@ -87,19 +112,20 @@ fn own(
     Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
-/// The guidance the next use follows: the user's, else the default; why not when the user's
-/// cannot be followed.
+/// The guidance the next use follows: the user's on this machine, else all machines', else the
+/// default; why not when the user's cannot be followed.
 pub fn text(daemon: &Daemon, extension: &Extension) -> Result<String, String> {
     let Some(guidance) = &extension.guidance else {
         return Ok(String::new());
     };
     Ok(own(daemon, extension, guidance, None)
         .map_err(|(_, why)| why)?
+        .or_else(|| of_all(daemon, extension, None))
         .unwrap_or_else(|| guidance.default.to_owned()))
 }
 
-/// The user's text of the part `part` the next use follows, none while it is empty; why not when
-/// it cannot be followed as written.
+/// The user's text of the part `part` the next use follows (this machine's, else all machines'),
+/// none while it is empty; why not when it cannot be followed as written.
 pub fn part_text(
     daemon: &Daemon,
     extension: &Extension,
@@ -108,7 +134,39 @@ pub fn part_text(
     let Some(guidance) = &extension.guidance else {
         return Ok(None);
     };
-    own(daemon, extension, guidance, Some(part)).map_err(|(_, why)| why)
+    Ok(own(daemon, extension, guidance, Some(part))
+        .map_err(|(_, why)| why)?
+        .or_else(|| of_all(daemon, extension, Some(part))))
+}
+
+/// What is wrong with a text offered as the guidance of the extension `name`: too long.
+pub fn check(name: &str, text: &str) -> Result<(), String> {
+    let guidance = super::ALL
+        .iter()
+        .find(|extension| extension.name == name)
+        .and_then(|extension| extension.guidance.as_ref())
+        .ok_or_else(|| format!("{name} has no guidance"))?;
+    too_long(guidance, text)
+}
+
+/// Flottille's guidance of the extension `name`, if it has one.
+pub fn default_of(name: &str) -> Option<String> {
+    super::ALL
+        .iter()
+        .find(|extension| extension.name == name)
+        .and_then(|extension| extension.guidance.as_ref())
+        .map(|guidance| guidance.default.to_owned())
+}
+
+fn too_long(guidance: &Guidance, text: &str) -> Result<(), String> {
+    let count = text.chars().count();
+    match count > guidance.limit {
+        true => Err(format!(
+            "{} is {count} characters long and may hold {}: keep what matters",
+            guidance.named, guidance.limit
+        )),
+        false => Ok(()),
+    }
 }
 
 /// Whether the method is a guidance's of an extension that has one.
@@ -135,7 +193,8 @@ struct Of {
 
 /// `<name>.show {part?}`, `<name>.set {part?, text}` (an empty text resets it) and
 /// `<name>.reset {part?}`: each answers `{"text", "source", "error", "default"}`, the shape of
-/// `judge.show`; a part's default is empty.
+/// `judge.show` (`source`: `global` the user's on this machine, `all` all machines', `default`);
+/// a part's default is empty.
 pub fn call(
     daemon: &Daemon,
     extension: &Extension,
@@ -165,13 +224,7 @@ pub fn call(
     if verb != "show" {
         let text = match text {
             Some(text) => {
-                let count = text.chars().count();
-                if count > guidance.limit {
-                    return Err(Failure::refused(format!(
-                        "{} is {count} characters long and may hold {}: keep what matters",
-                        guidance.named, guidance.limit
-                    )));
-                }
+                too_long(guidance, &text).map_err(Failure::refused)?;
                 Some(text).filter(|text| !text.trim().is_empty())
             }
             None => None,
@@ -208,7 +261,10 @@ pub fn call(
     };
     let (text, source, error) = match own(daemon, extension, guidance, part) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (default.to_owned(), "default", None),
+        Ok(None) => match of_all(daemon, extension, part) {
+            Some(text) => (text, "all", None),
+            None => (default.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
     Ok(json!({"text": text, "source": source, "error": error, "default": default}))

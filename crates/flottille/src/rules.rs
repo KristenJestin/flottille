@@ -20,12 +20,18 @@ pub const DEFAULT: &str = include_str!("../roles/rules.md");
 /// The longest rules, in characters: they ride in every session's instructions.
 pub const LIMIT: usize = 8_000;
 
+/// The name of the rules for every project as a value of all machines (`crate::all_settings`).
+pub const SHARED: &str = "rules";
+
 /// Where the global rules come from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Source {
     #[default]
     Default,
     Global,
+    /// The rules of all machines, while this machine has none of its own (`docs/remote.md`,
+    /// "Settings for all machines").
+    All,
 }
 
 impl Source {
@@ -33,6 +39,7 @@ impl Source {
         match self {
             Source::Default => "default",
             Source::Global => "global",
+            Source::All => "all",
         }
     }
 }
@@ -144,7 +151,8 @@ fn plain(text: &str) -> String {
         .join("\n")
 }
 
-/// The rules a project without its own follows: the user's, else the default.
+/// The rules a project without its own follows: the user's on this machine, else all machines',
+/// else the default.
 fn users(paths: &Paths) -> (String, Source, Option<String>) {
     match global(paths) {
         Ok(Some(text)) => {
@@ -154,7 +162,13 @@ fn users(paths: &Paths) -> (String, Source, Option<String>) {
             );
             (text, Source::Global, cut)
         }
-        Ok(None) => (DEFAULT.to_owned(), Source::Default, None),
+        Ok(None) => match crate::all_settings::text(paths, SHARED) {
+            Some(text) => {
+                let (text, cut) = limited(&text, "the rules of all machines");
+                (text, Source::All, cut)
+            }
+            None => (DEFAULT.to_owned(), Source::Default, None),
+        },
         Err(failure) => {
             eprintln!("flottille daemon: rules: {}", failure.message);
             (DEFAULT.to_owned(), Source::Default, None)

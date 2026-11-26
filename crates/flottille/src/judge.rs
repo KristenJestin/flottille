@@ -43,6 +43,9 @@ pub const DEFAULT: &str = include_str!("../roles/judge.md");
 /// The longest guidance, in characters: it rides in every judgement, on a small model.
 pub const LIMIT: usize = 4_000;
 
+/// The name of the guidance as a value of all machines (`crate::all_settings`).
+pub const SHARED: &str = "judge.guidance";
+
 /// The judge's instructions with that guidance: the fixed text before it and after it, the
 /// guidance in between as it is. The guidance only says how to weigh a call: what reaches the
 /// judge is the gate's to decide (base never does), and its answer is read as `allow` or `ask`
@@ -133,8 +136,10 @@ fn own(paths: &flottille_core::paths::Paths) -> Result<Option<String>, (String, 
 /// The judge's instructions now: read at each judgement, so that an edit reaches the next one.
 /// Why not, when the user's guidance cannot be followed as they wrote it.
 pub fn instructions(paths: &flottille_core::paths::Paths) -> Result<String, String> {
+    // The user's own on this machine, else all machines', else the default.
     let guidance = own(paths)
         .map_err(|(_, why)| why)?
+        .or_else(|| crate::all_settings::text(paths, SHARED))
         .unwrap_or_else(|| DEFAULT.to_owned());
     Ok(instructions_with(&guidance))
 }
@@ -212,14 +217,17 @@ fn announce(daemon: &Daemon) -> Result<(), Failure> {
 }
 
 /// `{"text", "source", "error", "default"}`: the guidance the next judgement follows, whether it
-/// is the user's (`global`) or Flottille's (`default`), why the judge cannot follow the user's
+/// is the user's on this machine (`global`), all machines' (`all`) or Flottille's (`default`), why the judge cannot follow the user's
 /// (`null` when it can: then every judgement fails, and asks, with that reason; `text` is what of
 /// it could be read), and Flottille's default. The shape of `rules.show`, which the window's
 /// editor reads.
 fn show(daemon: &Daemon) -> Result<Value, Failure> {
     let (text, source, error) = match own(&daemon.paths) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (DEFAULT.to_owned(), "default", None),
+        Ok(None) => match crate::all_settings::text(&daemon.paths, SHARED) {
+            Some(text) => (text, "all", None),
+            None => (DEFAULT.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
     Ok(json!({"text": text, "source": source, "error": error, "default": DEFAULT}))
