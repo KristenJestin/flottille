@@ -1192,7 +1192,7 @@ pub fn start_options(
     browser: &crate::browsers::Folder,
     headed: bool,
 ) -> Result<Vec<String>, String> {
-    let program = std::env::current_exe()
+    let program = crate::program::own(crate::program::Started::ByAnother)
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
         "name": PLUGIN,

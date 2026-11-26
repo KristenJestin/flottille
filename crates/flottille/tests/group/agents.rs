@@ -49,6 +49,8 @@ mod quota;
 mod real_programs;
 #[path = "../reload_tools.rs"]
 mod reload_tools;
+#[path = "../replaced_binary.rs"]
+mod replaced_binary;
 #[path = "../rules.rs"]
 mod rules;
 #[path = "../sign_in.rs"]

@@ -5033,6 +5033,31 @@ fn agent_browser_logs_in_with_a_vault_entry() {
 }
 
 #[test]
+fn the_vault_plugin_starts_after_the_binary_was_replaced() {
+    // An update replaced Flottille's file while the daemon runs (#1577): the browser's network
+    // holder and the vault's plugin, both Flottille's own program, still start.
+    let user = user();
+    let _installed = user.daemon_from_replaced_binary();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("shop-test"), "{said}");
+    // The plugin answered: the secret reached the page's form.
+    let filled = form(&user).expect("the form was filled");
+    assert_eq!(filled["password"], PASSWORD);
+    // In the browser's network, which the holder keeps.
+    let ours = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self/ns/net").unwrap().ino()
+    };
+    let login = logged(&user, "browser", "login");
+    assert_ne!(login[0]["netns"].as_u64(), Some(ours), "{login:?}");
+}
+
+#[test]
 fn without_isolation_the_login_refuses_to_fill() {
     // No pasta: the browser's network would be the runs', whose DevTools any run reaches. The
     // login refuses before it opens anything, and says what to install; the rest of the
