@@ -1097,3 +1097,22 @@ fn a_provider_whose_models_asked_for_a_sign_in_says_it_on_its_row(cx: &mut TestA
             .is_some_and(|said| said.contains("sign in again (run codex login)"))
     });
 }
+
+#[gpui_kit::test]
+fn settings_still_say_the_version_drift_of_a_provider(cx: &mut TestAppContext) {
+    let user = User::with_fake_codex();
+    user.write_providers(
+        "[claude]\nenabled = false\n[codex]\nenabled = true\nallow_unqualified_version = true\n",
+    );
+    user.codex_of_version("0.163.0");
+    std::fs::create_dir_all(user.path("home/.codex")).unwrap();
+    std::fs::write(user.path("home/.codex/auth.json"), "{}").unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+
+    until(&shell, cx, "the version drift is said", |cx| {
+        label(cx, "provider-warning-codex")
+            .is_some_and(|said| said.contains("0.163.0") && said.contains("was checked against"))
+    });
+}

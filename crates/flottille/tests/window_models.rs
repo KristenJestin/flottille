@@ -323,3 +323,60 @@ fn the_picker_says_its_provider_needs_signing_in(cx: &mut TestAppContext) {
     assert!(said(cx).contains("Codex"), "{}", said(cx));
     assert!(provider_warning(cx).unwrap().contains("run codex login"));
 }
+
+/// A user whose Codex is of a version other than the one checked, which they allow, with the
+/// project `atlas` in a throwaway repository. Its sign-in file is there unless `signed_out`.
+fn drifted_codex(signed_out: bool) -> User {
+    let user = User::with_fake_codex().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.write_providers(
+        "[claude]\nenabled = false\n[codex]\nenabled = true\nallow_unqualified_version = true\n",
+    );
+    user.codex_of_version("0.163.0");
+    if signed_out {
+        user.codex_script(json!({"account": serde_json::Value::Null}));
+    } else {
+        std::fs::create_dir_all(user.path("home/.codex")).unwrap();
+        std::fs::write(user.path("home/.codex/auth.json"), "{}").unwrap();
+    }
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/atlas");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "atlas\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "atlas"}))
+        .unwrap();
+    user
+}
+
+#[gpui_kit::test]
+fn the_composer_never_says_a_version_other_than_the_one_checked(cx: &mut TestAppContext) {
+    let user = drifted_codex(false);
+    // The daemon does say it: the drift is a warning of the provider.
+    let listed = user.call("provider.list", serde_json::Value::Null).unwrap();
+    assert!(listed.to_string().contains("0.163.0"), "{listed}");
+
+    let (shell, cx) = atlas(&user, cx);
+    until(&shell, cx, "the provider is picked", |cx| {
+        said(cx).contains("Codex")
+    });
+    settle(cx);
+    assert_eq!(provider_warning(cx), None);
+}
+
+#[gpui_kit::test]
+fn the_composer_still_says_to_sign_in_when_the_models_were_refused_for_no_login(
+    cx: &mut TestAppContext,
+) {
+    // The version drift is among the warnings too: only the sign-in line is said.
+    let user = drifted_codex(true);
+    let (shell, cx) = atlas(&user, cx);
+    until(&shell, cx, "the sign-in line is said", |cx| {
+        provider_warning(cx)
+            .is_some_and(|said| said.contains("Codex's login expired: sign in again"))
+    });
+    settle(cx);
+    let said = provider_warning(cx).unwrap();
+    assert!(said.contains("run codex login"), "{said}");
+    assert!(!said.contains("0.163.0"), "{said}");
+}

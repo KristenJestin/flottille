@@ -558,6 +558,25 @@ impl User {
             .with_env("FLOTTILLE_FAKE_CODEX_DIR", dir.to_str().unwrap())
     }
 
+    /// This user's `codex` says `--version` is `version`, and is the fake `codex` otherwise: a
+    /// Codex of a version other than the one Flottille was checked against, which the user allows
+    /// (`allow_unqualified_version`), so that its version is a warning and not a refusal.
+    pub fn codex_of_version(&self, version: &str) {
+        let bin = self.path("bin/codex");
+        std::fs::remove_file(&bin).unwrap();
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'codex-cli {version}'; exit 0; }}\n\
+                 exec '{}' \"$@\"\n",
+                fake_codex().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+
     /// The fake `codex`'s script.
     pub fn codex_script(&self, script: Value) {
         std::fs::write(self.path("codex/script.json"), script.to_string()).unwrap();
