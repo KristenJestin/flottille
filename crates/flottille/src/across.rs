@@ -284,16 +284,30 @@ pub(crate) fn launcher_here(daemon: &Daemon, stand_in: &str) -> Option<String> {
         .map(|launch| launch.caller)
 }
 
-/// How long a call of another machine waits for the launches sent there to be recorded here.
+/// How long a call of another machine waits for a launch sent there to be recorded here: one
+/// round trip, the workspace made there.
 const RECORDING_WAIT: Duration = Duration::from_secs(30);
 
-/// Waits while a launch this machine sent to the machine of key `machine` (named `name`) does not
-/// name the session it started there yet (`launches::placing`), unless a launch names the caller
-/// stood in for as `stand_in` already: that session may write to its launcher in its first turn,
-/// before the answer naming it is recorded here (the answer and the call come apart), and is then
-/// judged as the session its launcher started (`launcher_here`). At most [`RECORDING_WAIT`].
-async fn launches_recorded(daemon: &Daemon, stand_in: &str, machine: &str, name: &str) {
-    let waits = || crate::launches::placing(machine) && launcher_here(daemon, stand_in).is_none();
+/// Waits while `call` of the machine of key `machine` (named `name`), stood in for as
+/// `stand_in`, may be the first call of a session a launch of this machine starts there and whose
+/// answer naming it is not recorded here yet (`launches::Placings::holds`): that session may write
+/// to its launcher in its first turn, the answer and the call coming apart, and is then judged as
+/// the session its launcher started (`launcher_here`). Any other call goes on at once. At most
+/// [`RECORDING_WAIT`].
+async fn launches_recorded(
+    daemon: &Daemon,
+    call: &Call,
+    stand_in: &str,
+    machine: &str,
+    name: &str,
+) {
+    let Ok(remote) = crate::link::remote_of(daemon) else {
+        return;
+    };
+    let waits = || {
+        remote.placing.holds(machine, &call.caller, &call.agent)
+            && launcher_here(daemon, stand_in).is_none()
+    };
     if !waits() {
         return;
     }
@@ -2862,7 +2876,7 @@ async fn session_call(
     }
     let mode = crate::launches::mode_taken(&call.mode, member.role);
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
-    launches_recorded(daemon, &agent.id, &machine, &name).await;
+    launches_recorded(daemon, &call, &agent.id, &machine, &name).await;
     let (grant, key, came) = match removes {
         Some(launch) => {
             let grant =
