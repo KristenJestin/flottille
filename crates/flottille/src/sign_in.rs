@@ -1209,6 +1209,26 @@ mod tests {
     }
 
     #[test]
+    fn a_token_said_after_its_name_is_masked_however_it_is_spaced() {
+        for (said, masked) in [
+            (
+                "bad access_token: abc123def456",
+                "bad access_token: [masked]",
+            ),
+            ("bad token:  abc123def456 x", "bad token:  [masked] x"),
+            ("bad token:abc123def456 x", "bad token:[masked] x"),
+            // A plain word, a number, a name that is no token's: kept.
+            ("an invalid token: expired.", "an invalid token: expired."),
+            ("an invalid token:  expired.", "an invalid token:  expired."),
+            ("max token:100 left", "max token:100 left"),
+            ("the tokens: abc123def456", "the tokens: abc123def456"),
+            ("at 12:30 abc123def456", "at 12:30 abc123def456"),
+        ] {
+            assert_eq!(named_tokens_masked(said), masked, "{said}");
+        }
+    }
+
+    #[test]
     fn gh_says_the_code_after_a_colon_and_the_address_on_the_next_line() {
         assert_eq!(
             read(&[
