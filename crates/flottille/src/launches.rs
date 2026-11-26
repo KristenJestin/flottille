@@ -527,6 +527,8 @@ pub(crate) async fn serve(
 /// Who the launch's sender is, and this machine's name, by the checked member list.
 struct Names {
     from: String,
+    /// The sender's role, as the member list says it: the mode its launch is taken in hangs on it.
+    role: Role,
     here: String,
     members: flottille_link::Members,
 }
@@ -546,6 +548,7 @@ fn names(remote: &Remote, from: &PublicKey) -> Result<Names, String> {
     flottille_link::runs_agents(&members, &here, "agent.start").map_err(|why| why.to_string())?;
     Ok(Names {
         from: member.name.clone(),
+        role: member.role,
         here,
         members,
     })
@@ -565,6 +568,7 @@ async fn judged(
     };
     let Names {
         from: sender,
+        role,
         here,
         members,
     } = &names;
@@ -700,7 +704,7 @@ async fn judged(
         ),
         _ => None,
     };
-    let mode = mode_taken(&asked.mode, Role::Runner);
+    let mode = mode_taken(&asked.mode, *role);
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
     let mut classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
