@@ -1001,15 +1001,23 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   id twice or whose pilots make a cycle is refused. There is no rate limit on `sessions` (a
   follow-up).
 
-  **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): each machine keeps a
-  local ghost of every session of another machine it shows (its conversation, its texts, its state,
-  kept current from that machine's events): opening it is instant, as a local one; writing,
-  answering and closing go to its machine. Kept until the code follows.
-
-  Reading, writing, answering, Allow/Deny and Stop work in any session through its machine: opening
-  a session of another machine shows its page, read on that machine's own connection, every request
-  signed for it and carried by this machine's daemon, its conversation watched live as a request carried
-  is ("Requests from another machine's clients").
+  **The ghost of a session of another machine** (#1527, [Machines are one](#machines-are-one)).
+  Each machine keeps, in its store, a local ghost of every session another machine lists: its
+  conversation (its last 2000 events, as that machine's `agent.show` gives them), its tree and its
+  waits (as its `agent.tree`, `approval.list` and `vault.asks` answer), what that machine shows
+  and nothing more, its secrets masked there as they are for its own window. Once a link to a
+  runner is made, this machine asks it for them (`ghost`, "What a machine may send"), each from
+  after the last event it holds: a gap is caught up from where it stopped, not read whole again.
+  Then that machine sends each new event of its listed sessions as it stores it, their tree and
+  waits again when they move. Opening such a session reads its ghost from this machine's daemon
+  (`remote.ghost`, `docs/protocol.md`): its conversation, tree and waits show at once, and the page
+  then follows that machine live from the ghost's last event, on that machine's own connection,
+  reading there what the ghost does not hold (the commands, the place, the subscriptions, an earlier
+  page). A ghost goes when its session leaves that machine's list (it ended, its project is not
+  shown there) or with that machine's list (removed from the members). It only reflects: no method
+  writes it, and reading, writing, answering, Allow/Deny and Stop go to the session's machine, every
+  request signed for it and carried by this machine's daemon ("Requests from another machine's
+  clients"), which alone decides; the ghost shows the result when its event comes back.
 - **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a session an agent
   launched is in its launcher's Agents panel, on any machine, never under its launcher's row in the
   sidebar; the look follows the prototype validated in its own issue. Kept until the code follows.
@@ -1036,14 +1044,13 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   would close it, and any row it still finds in no walk from a root it draws as a root, so a lying
   `pilots` never hides, moves or duplicates a row. A row whose line gains its machine's mark, once
   its pilot's list comes, fades from one line to the other.
-- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): a local ghost keeps each
-  shown session's conversation, texts and state, not a light copy without its conversation; what the
-  user sends while its machine is off waits as "What stays" says. Kept until the code follows.
-
-  **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
-  hollow ring saying `server · offline since 22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
-  machine's list for this: each live root session's title, project, state and last exchange, never
-  its conversation, the copy replaced whenever that machine lists again, kept across a restart.
+- **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
+  hollow ring saying `server · offline since 22:14`, and open from their ghost (#1527): what this
+  machine last knew of each, the page saying `server offline since 22:14` and taking no change until
+  that machine is back, as any page of a machine that is off. Each machine keeps, in its store, a
+  light copy of each other machine's list for this: each live root session's title, project, state
+  and last exchange, the copy replaced whenever that machine lists again, kept across a restart, the
+  ghosts beside it.
   A machine lists only the sessions of the projects it knows (the window of that machine shows
   those and no other): a session of a project whose file is gone, or whose file cannot be used (a
   typo), is not sent until the file is back, since the machine would answer that it has no such
@@ -1088,6 +1095,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
 | `pilots` | The pilots of another machine of a runner's led sessions: for each session of its `sessions` led by an agent of another machine, that machine's name and the agent's id there; 500 at most, each session once, every id 1 to 64 letters, digits, dashes or underscores. Sent after the sessions and again when they change, kept by the receiver beside them ("One list of every machine"). A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link. |
 | `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
+| `ghost` | Asks the receiver, a runner, for the ghosts of the sessions it lists, each from after the last event the sender holds of it, once a link (#1527, [Machines are one](#machines-are-one)): answered `{}`, then, on the same stream for as long as the link lasts, a frame per change of one session (`{"session", "events", "reset", "earlier", "view", "gone"}`): what each ghost missed (its last 2000 events in place of what it held, `reset`, when it missed more or held none), each new event of its conversation as `agent.show` gives it, its tree and its waits again when they move (`view`: the answers of `agent.tree`, `approval.list` and its tree's `vault.asks` there), and `gone` when it leaves the list. Kept by the sender of the message, a ghost of 500 sessions a machine at most. A machine of before refuses it as a kind it does not know: no ghost of its sessions, which are read there. |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
 Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -3399,6 +3407,16 @@ row of a session led from another machine.
 - **A renamed session's row on the phone gains a line for its key** (#1488): the phone's row has a
   second line only for a pilot or an ended session, not the window's two, so a renamed session that
   has a key is one line higher than the others, and that line unfolds.
+
+- **What a ghost holds** (#1527): a session's last 2000 events, its tree and its waits; the
+  page of a session of another machine still starts its live link there when it opens, in the
+  background, and reads there what the ghost does not hold (the commands, the place, the
+  subscriptions, the leaves, an earlier page). A sub-agent chosen in the rail is read there, as
+  before. Nothing waits for that link to show the conversation.
+- **A ghost goes with its session by that machine's word** (#1527): a session that leaves a
+  machine's list is said `gone` on the ghosts' stream (again at the next link for one that left
+  while this machine was away); a list received is not used to drop ghosts, the two coming on
+  streams with no order between them.
 
 ## Open questions
 
