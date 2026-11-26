@@ -209,6 +209,11 @@ pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
 }
 
+/// The element id of a project's foot row, `N blocked by others`.
+pub fn project_blocked_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-blocked-{name}").into())
+}
+
 /// The element id of the "Blocked by others" group, above "Ended".
 pub fn blocked_id() -> ElementId {
     ElementId::Name("blocked".into())
@@ -1556,6 +1561,16 @@ impl ProjectNode {
     /// Its sessions' rows in the order drawn: the one that moved last first.
     pub fn sessions(&self, cx: &App) -> Vec<Entity<SessionRow>> {
         self.sessions.read(cx).rows.clone()
+    }
+
+    /// The rows of its foot, `N blocked by others`.
+    pub fn blocked(&self, _cx: &App) -> Vec<Entity<SessionRow>> {
+        Vec::new()
+    }
+
+    /// Whether its foot is unfolded.
+    pub fn blocked_open(&self) -> bool {
+        false
     }
 
     /// Whether it holds these sessions and this mark already.
