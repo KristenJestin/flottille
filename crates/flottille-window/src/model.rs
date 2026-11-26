@@ -499,8 +499,12 @@ pub struct Blocked {
 /// What a blocked session waits on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaitOn {
-    /// The review of a pull request, by its number.
-    PullRequest(u64),
+    /// The review of a pull request: its number, and its repository's path in the project (#12
+    /// of another repository is not it); none from a daemon of before, then the number alone.
+    PullRequest {
+        repository: Option<String>,
+        number: u64,
+    },
     /// A ticket assigned to someone else, by its key as the tracker says it (`#5`, `SHOP-12`).
     Ticket(String),
 }
@@ -517,7 +521,14 @@ impl Blocked {
             by,
             why: value["why"].as_str().unwrap_or_default().to_owned(),
             on: match value["on"]["kind"].as_str() {
-                Some("pull_request") => value["on"]["number"].as_u64().map(WaitOn::PullRequest),
+                Some("pull_request") => {
+                    value["on"]["number"]
+                        .as_u64()
+                        .map(|number| WaitOn::PullRequest {
+                            repository: value["on"]["repository"].as_str().map(str::to_owned),
+                            number,
+                        })
+                }
                 Some("ticket") => value["on"]["key"]
                     .as_str()
                     .map(|key| WaitOn::Ticket(key.to_owned())),
@@ -2091,6 +2102,30 @@ pub fn ago(now_ms: u64, then_ms: u64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_wait_on_a_pull_request_reads_its_repository() {
+        let said = |on: Value| {
+            Blocked::of(&json!({"by": ["Maya"], "why": "review of #12", "on": on, "since": 1}))
+                .unwrap()
+                .on
+        };
+        assert_eq!(
+            said(json!({"kind": "pull_request", "repository": "web", "number": 12})),
+            Some(WaitOn::PullRequest {
+                repository: Some("web".into()),
+                number: 12
+            })
+        );
+        // From a daemon of before: the number alone.
+        assert_eq!(
+            said(json!({"kind": "pull_request", "number": 12})),
+            Some(WaitOn::PullRequest {
+                repository: None,
+                number: 12
+            })
+        );
+    }
 
     fn agent(id: &str, parent: Option<&str>, state: &str, workspace: Option<&str>) -> Value {
         json!({"id": id, "parent": parent, "state": state, "project": "app",

@@ -1153,6 +1153,11 @@ impl SessionPage {
         }
     }
 
+    /// The Workspace section's facts, as the daemon says them now.
+    pub fn set_place(&mut self, place: Option<PlaceFacts>, cx: &mut Context<Self>) {
+        self.rail.update(cx, |rail, cx| rail.set_place(place, cx));
+    }
+
     /// The Agents row of the root is the person while the session waits on someone else.
     fn state_shown(&self, agent: &TreeAgent) -> AgentState {
         match state_of(agent) {
@@ -9148,7 +9153,7 @@ impl Render for SessionRail {
             .or(waited.as_ref())
             .and_then(|blocked| blocked.on.clone());
         let wait_on_pull = match &wait_on {
-            Some(crate::model::WaitOn::PullRequest(number)) => Some(*number),
+            Some(crate::model::WaitOn::PullRequest { number, .. }) => Some(*number),
             _ => None,
         };
         // Under the line of the ticket it waits on, when the section says that ticket just above.
