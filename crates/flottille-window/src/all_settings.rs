@@ -8,15 +8,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gpui_design_system::color::mix;
 use gpui_design_system::follow_theme;
+use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
     Button, Chosen, EmptyLine, Field, Icon, Item, Listing, ModelChoice, ModelEntry, Section,
-    Segmented, SetHere, Switch, Toast, palette, presence, presence_of, space, toast,
+    Segmented, SetHere, Switch, Toast, fade, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    AnyElement, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription,
     TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Map, Value, json};
@@ -775,9 +777,13 @@ impl AllSettings {
         for (name, field) in &fields.texts {
             let text = self.field_shows(name);
             field.update(cx, |field, cx| field.set_value(text, window, cx));
+            // Its edge follows the focus.
             self._subscriptions
                 .push(cx.subscribe(field, |_, _, event, cx| {
-                    if matches!(event, InputEvent::Change) {
+                    if matches!(
+                        event,
+                        InputEvent::Change | InputEvent::Focus | InputEvent::Blur
+                    ) {
                         cx.notify();
                     }
                 }));
@@ -811,11 +817,29 @@ impl AllSettings {
         .into_any_element()
     }
 
-    /// The guidance text `name` in its field, with the line that says it is the default.
-    fn text_block(&self, name: &'static str, fields: &Fields, cx: &gpui_kit::App) -> AnyElement {
+    /// The guidance text `name` in its field, with the line that says it is the default. Its edge
+    /// moves to the focus colour over `HOVER` as the field takes the focus, and back. The kit has
+    /// no text area of its own (a candidate for it).
+    fn text_block(
+        &self,
+        name: &'static str,
+        fields: &Fields,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) -> AnyElement {
         let p = palette(cx);
         let id = name.replace('.', "-");
         let field = fields.texts.get(name).cloned();
+        let focused = field
+            .as_ref()
+            .is_some_and(|field| field.focus_handle(cx).contains_focused(window, cx));
+        let focus = fade(
+            ElementId::Name(format!("all-{id}-focus").into()),
+            focused,
+            HOVER,
+            window,
+            cx,
+        );
         div()
             .flex()
             .flex_col()
@@ -830,7 +854,7 @@ impl AllSettings {
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
-                    .border_color(p.line2)
+                    .border_color(mix(p.line2, p.focus_line, focus))
                     .text_size(px(12.5))
                     .children(field)
                     .test_support(),
@@ -1127,7 +1151,7 @@ impl AllSettings {
                     "Rules",
                     "How every agent works, on each machine that wrote none of its own.",
                     card()
-                        .child(self.text_block("rules", &fields, cx))
+                        .child(self.text_block("rules", &fields, window, cx))
                         .into_any_element(),
                 )
             }
@@ -1138,8 +1162,8 @@ impl AllSettings {
                     "What the Auto judge and the compaction model follow, on each machine that \
                      wrote none of its own.",
                     card()
-                        .child(self.text_block("judge.guidance", &fields, cx))
-                        .child(self.text_block("compaction.guidance", &fields, cx))
+                        .child(self.text_block("judge.guidance", &fields, window, cx))
+                        .child(self.text_block("compaction.guidance", &fields, window, cx))
                         .into_any_element(),
                 )
             }
@@ -1153,7 +1177,7 @@ impl AllSettings {
                     "review.guidance.standards",
                     "review.guidance.security",
                 ] {
-                    body = body.child(self.text_block(name, &fields, cx));
+                    body = body.child(self.text_block(name, &fields, window, cx));
                 }
                 (
                     "Review",
