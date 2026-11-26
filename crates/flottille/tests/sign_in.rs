@@ -802,6 +802,31 @@ fn a_failed_sign_in_masks_an_email_address_as_an_account_is() {
 }
 
 #[test]
+fn a_failed_sign_in_masks_a_token_said_after_its_name() {
+    let user = User::new().with_sign_in_programs(&["acli"]);
+    // Invented, of no known shape: only its place says it is a token.
+    let said = "Error: login refused, access_token: example-opaque-0000 and more\n\
+                Error: the server said token=example-other-0000 too\n\
+                Error: an invalid token: expired";
+    user.sign_in_script(
+        "acli",
+        json!({"signed_in": false, "sign_in": {"fail": said}}),
+    );
+
+    user.call("signin.start", json!({"program": "acli"}))
+        .unwrap();
+
+    eventually("acli's sign-in failed", || {
+        changed_to(&user, "acli", "failed").is_some()
+    });
+    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(!why.contains("example-"), "{failed}");
+    assert!(why.contains("access_token: [masked] and more"), "{failed}");
+    assert!(why.contains("an invalid token: expired"), "{failed}");
+}
+
+#[test]
 fn a_failed_sign_in_says_only_the_last_lines_it_said() {
     let user = User::new().with_sign_in_programs(&["gh"]);
     let lines: Vec<String> = (1..=8).map(|n| format!("line {n} of the error")).collect();
