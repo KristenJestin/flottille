@@ -869,18 +869,26 @@ impl Remote {
     }
 
     /// This machine's live root sessions, light, as `listed` says its member: none unless it is
-    /// a runner. It reads the store: called on a blocking thread.
+    /// a runner, and an error when the store cannot be read (what is listed then stays as it was).
+    /// It reads the store: called on a blocking thread.
     fn sessions_here(
         &self,
         listed: Option<&(flottille_link::Members, String)>,
-    ) -> Option<flottille_link::SessionList> {
-        let (members, name) = listed?;
+    ) -> flottille_core::Result<Option<flottille_link::SessionList>> {
+        let Some((members, name)) = listed else {
+            return Ok(None);
+        };
         let runner = members
             .members()
             .iter()
             .any(|member| member.name == *name && member.role == Role::Runner);
-        let daemon = self.daemon.get().and_then(std::sync::Weak::upgrade)?;
-        runner.then(|| sessions_of(&daemon))
+        let Some(daemon) = self.daemon.get().and_then(std::sync::Weak::upgrade) else {
+            return Ok(None);
+        };
+        if !runner {
+            return Ok(None);
+        }
+        try_sessions_of(&daemon).map(Some)
     }
 
     /// This machine's projects, as `sessions_here` says its sessions. It runs git for each
@@ -913,11 +921,21 @@ impl Remote {
         let remote = self.clone();
         let (offers, sessions, projects, pilots) = tokio::task::spawn_blocking(move || {
             let listed = remote.listed().ok();
-            let sessions = remote.sessions_here(listed.as_ref());
-            let pilots = sessions
-                .as_ref()
-                .zip(remote.daemon())
-                .map(|(sessions, daemon)| pilots_of(&daemon, sessions));
+            // A store that cannot be read says nothing this round: the sessions and their pilots
+            // stay as last said, never an empty list that makes every machine forget them.
+            let sessions = match remote.sessions_here(listed.as_ref()) {
+                Ok(sessions) => Some(sessions),
+                Err(error) => {
+                    eprintln!("flottille daemon: the sessions could not be listed: {error}");
+                    None
+                }
+            };
+            let pilots = sessions.as_ref().map(|sessions| {
+                sessions
+                    .as_ref()
+                    .zip(remote.daemon())
+                    .map(|(sessions, daemon)| pilots_of(&daemon, sessions))
+            });
             (
                 remote.offers_here(listed.as_ref()),
                 sessions,
@@ -932,21 +950,25 @@ impl Remote {
             *current = offers;
             changed
         });
-        self.sessions.send_if_modified(|current| {
-            let changed = *current != sessions;
-            *current = sessions;
-            changed
-        });
+        if let Some(sessions) = sessions {
+            self.sessions.send_if_modified(|current| {
+                let changed = *current != sessions;
+                *current = sessions;
+                changed
+            });
+        }
         self.projects.send_if_modified(|current| {
             let changed = *current != projects;
             *current = projects;
             changed
         });
-        self.pilots.send_if_modified(|current| {
-            let changed = *current != pilots;
-            *current = pilots;
-            changed
-        });
+        if let Some(pilots) = pilots {
+            self.pilots.send_if_modified(|current| {
+                let changed = *current != pilots;
+                *current = pilots;
+                changed
+            });
+        }
     }
 
     /// What the machine of `key` offers, said over its link of `generation`: kept when its member
@@ -1139,8 +1161,16 @@ pub(crate) fn offered(daemon: &Daemon) -> Capabilities {
 /// leads it here; never its conversation. Those of the latest exchange when there are more than
 /// a list holds.
 pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
+    try_sessions_of(daemon).unwrap_or_default()
+}
+
+/// `sessions_of`, or why the agents could not be read: an empty list is no answer of a store that
+/// failed, since the machines that follow this list would drop every session they keep of it.
+pub(crate) fn try_sessions_of(
+    daemon: &Daemon,
+) -> flottille_core::Result<flottille_link::SessionList> {
     use flottille_core::agent::AgentState;
-    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let agents = daemon.read(|store| store.agents())?;
     let parents: HashMap<&str, Option<&str>> = agents
         .iter()
         .map(|agent| (agent.id.as_str(), agent.parent.as_deref()))
@@ -1231,7 +1261,7 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .collect();
     sessions.sort_by(|a, b| b.exchanged_at.cmp(&a.exchanged_at).then(a.id.cmp(&b.id)));
     sessions.truncate(flottille_link::MOST_SESSIONS);
-    flottille_link::SessionList { sessions }
+    Ok(flottille_link::SessionList { sessions })
 }
 
 /// The pilots of another machine of the led sessions of `list`, this machine's: each session led by
