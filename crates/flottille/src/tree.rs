@@ -1200,15 +1200,22 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     // A following ties a session to the one that started it; two sessions a leave joins have none.
     // Told by who started whom, not by the relation: across projects the first message of a pair
     // is performed once the user allowed it, before the leave is kept, as `NoLeave`, and it counts.
+    // A session of another machine its launcher here started writes as its stand-in
+    // `<session>@<machine>`: the following is the launcher's of that session, as across.
     let following = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
-        Some((caller.id.as_str(), &session))
+        Some((caller.id.as_str(), session.id.as_str()))
     } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
-        Some((session.id.as_str(), caller))
+        Some((session.id.as_str(), caller.id.as_str()))
+    } else if crate::across::launcher_here(daemon, &caller.id).as_deref()
+        == Some(session.id.as_str())
+    {
+        let (stood_in, _) = caller.id.split_once('@').unwrap_or((&caller.id, ""));
+        Some((session.id.as_str(), stood_in))
     } else {
         None
     };
     if let Some((starter, followed)) = following
-        && crate::subscriptions::paused(daemon, starter, &followed.id)
+        && crate::subscriptions::paused(daemon, starter, followed)
     {
         return Err(refused(crate::subscriptions::PAUSED));
     }
@@ -1223,7 +1230,7 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     );
     if let Some((starter, followed)) = following {
         let answered = relation == Relation::StartedYou;
-        crate::subscriptions::exchanged(daemon, starter, &followed.id, answered);
+        crate::subscriptions::exchanged(daemon, starter, followed, answered);
     }
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn. An answer comes \
