@@ -363,14 +363,17 @@ fn a_message_sent_from_another_device_appears_live(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_session_of_a_machine_that_is_off_is_greyed_and_cannot_be_opened(cx: &mut TestAppContext) {
+fn a_ghost_of_an_off_machine_still_opens_and_says_since_when(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let there = session(&server, "app", "Ship the server part");
     let row = elsewhere_id("server", &there);
-    eventually("pc keeps server's list", || {
+    eventually("pc keeps server's session and its ghost", || {
         pc.user
-            .call("remote.sessions", json!({}))
-            .is_ok_and(|lists| lists.to_string().contains(&there))
+            .call(
+                "remote.ghost",
+                json!({"machine": "server", "session": there}),
+            )
+            .is_ok_and(|kept| kept["events"].to_string().contains("Ship the server part"))
     });
     off(&server);
     pc.wait_for("server", "offline");
@@ -384,15 +387,38 @@ fn a_session_of_a_machine_that_is_off_is_greyed_and_cannot_be_opened(cx: &mut Te
     });
     assert!(greyed, "its row is greyed");
 
+    // Opened, it shows what this machine last knew of it, and says the machine is off since when.
     cx.update(|window, cx| window.click(session_id(&row), cx));
-    settle(&shell, cx);
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-    assert!(
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_none()),
-        "nothing opened"
+    until(&shell, cx, "the session opens from its ghost", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|page| {
+                let page = page.read(cx);
+                page.id() == there
+                    && page.conversation().read(cx).blocks().iter().any(|block| {
+                        matches!(block, Block::Message { text, .. } if text == "Ship the server part")
+                    })
+            })
+        })
+    });
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.machine_shown()),
+        Some("server".to_owned())
+    );
+    until(
+        &shell,
+        cx,
+        "the page says since when the server is off",
+        |cx| {
+            cx.update(|window, _| {
+                window
+                    .try_find("page-held")
+                    .and_then(|found| found.label().map(str::to_owned))
+            })
+            .is_some_and(|said| said.starts_with("server offline since "))
+        },
     );
 
-    // Back, it can be opened again, its ink back.
+    // Back, its ink comes back.
     on(&server);
     pc.wait_for("server", "online");
     until(&shell, cx, "the row is no longer greyed", |cx| {
