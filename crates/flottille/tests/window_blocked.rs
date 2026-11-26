@@ -929,9 +929,10 @@ fn the_wait_leaves_workspace_when_it_ends(cx: &mut TestAppContext) {
     eventually("the session no longer blocked", || {
         line(&user, &id)["blocked"].is_null()
     });
-    until(&shell, cx, "the wait folding away", |cx| {
-        drawn_height(cx, "rail-wait-block") < full
+    until(&shell, cx, "the wait over", |cx| {
+        blocked(&shell, cx).is_empty()
     });
+    after(cx, Duration::from_millis(70));
     let folding = drawn_height(cx, "rail-wait-block");
     assert!(
         folding > 0. && folding < full,
@@ -1048,9 +1049,14 @@ fn the_ticket_line_folds_away_in_workspace_as_the_session_becomes_free(cx: &mut 
     user.gh_script(script);
     a_round(&user);
     eventually("free", || line(&user, &id)["subject"]["kind"] == "free");
-    until(&shell, cx, "the line folding away", |cx| {
-        drawn_height(cx, "rail-about-block") < full
+    // The row is no longer about it: the page's line folds away from there.
+    until(&shell, cx, "its row about nothing", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.session(&id)
+                .is_some_and(|row| row.read(cx).first_line().as_ref() != "The docs are missing")
+        })
     });
+    after(cx, Duration::from_millis(70));
     let going = drawn_height(cx, "rail-about-block");
     assert!(
         going > 0. && going < full,
