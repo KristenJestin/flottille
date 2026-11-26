@@ -59,7 +59,7 @@ pub struct Shown {
     pub own: Vec<String>,
     /// The values of all machines (name, how to refer to the user, notes), with a hub.
     pub all: Option<(String, String, String)>,
-    /// Where a change of all machines went (`about.share`): `given` to the hub, `later` with the
+    /// Where a change of all machines went (`about.share`): `sent` to the hub, `later` with the
     /// hub out of reach, `old-hub` to a hub that keeps none.
     pub hub: Option<String>,
 }

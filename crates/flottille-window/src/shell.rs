@@ -540,6 +540,7 @@ fn of_this_machine_s_pages(update: &Update) -> bool {
             | Update::VaultChanged
             | Update::ProgramSignIn { .. }
             | Update::SignIn { .. }
+            | Update::ShareRefused { .. }
             | Update::WorkspacesFolderChanged { .. }
             | Update::Extensions
             | Update::ServicesChanged
@@ -3653,6 +3654,13 @@ impl Shell {
                     section.sign_in_said(&said, &name, why, cx)
                 });
             }
+            Update::ShareRefused { name, why } => gpui_design_system::toast(
+                Toast::failure(format!("{name} was not shared with all machines")).detail(format!(
+                    "The hub refused it: {why}. It stays on this machine, sent again at the next \
+                     session to the hub."
+                )),
+                cx,
+            ),
             Update::ServicesChanged => {
                 if self.pages_shown() && self.main.read(cx).services_page().is_some() {
                     self.actions.send(Command::Services);

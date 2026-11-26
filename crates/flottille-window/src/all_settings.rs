@@ -128,7 +128,7 @@ pub struct Shown {
     pub own: Vec<String>,
     /// Why a value is ignored on the machine, by name.
     pub ignored: BTreeMap<String, String>,
-    /// Where a change of all machines went: `given`, `later` or `old-hub`.
+    /// Where a change of all machines went: `sent`, `later` or `old-hub`.
     pub hub: Option<String>,
     pub connections: Vec<Shareable>,
 }
