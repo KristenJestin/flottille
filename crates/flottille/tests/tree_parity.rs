@@ -1058,7 +1058,21 @@ fn a_handed_session_writes_to_its_launcher_before_its_launch_is_recorded() {
 #[test]
 fn an_unrelated_call_from_that_machine_does_not_wait_for_a_launch_in_flight() {
     let play = Play::new(Topology::Across, "auto", json!([]));
+    let folder = play.server.folder();
+    play.server.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    play.server.git(&folder, &["add", "."]);
+    play.server
+        .git(&folder, &["commit", "--quiet", "-m", "start"]);
     let (_night, night) = play.server.root("full");
+    eventually("pc's root listed on server", || {
+        play.server
+            .user
+            .call("remote.sessions", json!({}))
+            .unwrap()
+            .to_string()
+            .contains(&play.root)
+    });
     let slow = play.pc.user.path("slow-call");
     std::fs::write(&slow, "").unwrap();
     std::thread::scope(|scope| {
