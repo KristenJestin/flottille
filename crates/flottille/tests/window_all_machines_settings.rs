@@ -22,7 +22,7 @@ use flottille_window::all_settings::{AllSettings, DEFAULT_SAID, Shown};
 use flottille_window::link::Sign;
 use gpui_kit::base::input::TextareaState;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 const RULES: &str = "Small commits, tests first.";
@@ -129,6 +129,8 @@ fn choose(shell: &Entity<Shell>, key: &str, cx: &mut VisualTestContext) {
 
 /// All machines, once its values are read.
 fn all_machines(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    // Tall enough for every section of All machines to be on screen, its last ones clicked.
+    cx.simulate_resize(size(px(1280.), px(9000.)));
     settings(shell, "general", cx);
     choose(shell, "all", cx);
     until(shell, cx, "All machines' sections are shown", |cx| {
@@ -196,11 +198,11 @@ fn all_machines_offers_the_guidance_and_the_rest(cx: &mut TestAppContext) {
         assert!(!present(cx, &format!("{section}-save")), "{section}");
     }
     for control in [
-        "all-rules",
-        "all-judge-guidance",
-        "all-compaction-guidance",
-        "all-review-guidance",
-        "all-review-guidance-bugs",
+        "all-rules-box",
+        "all-judge-guidance-box",
+        "all-compaction-guidance-box",
+        "all-review-guidance-box",
+        "all-review-guidance-bugs-box",
         "all-review-passes-security",
         "all-tool-results-limit-box",
         "all-tool_results-unchanged-true",
