@@ -353,3 +353,34 @@ fn the_ghost_decides_nothing() {
         ghost_holds(&pc, &agent, "Cover the docs too")
     });
 }
+
+#[test]
+fn a_machine_no_longer_a_runner_writes_no_ghost() {
+    let (hub, pc, server) = pc_and_server();
+    let agent = session(&server, "Write the release notes");
+    eventually("pc's ghost holds the server's events", || {
+        in_step(&pc, &server, &agent)
+    });
+    let kept = ghost(&pc, &agent).unwrap();
+
+    // The hub's host makes the server a viewer: its link stays up, but a viewer lists no session
+    // and says nothing that is kept, as `took_sessions` and `took_offers` already refuse it.
+    hub.make_viewer("server");
+    pc.wait_until("pc sees the server a viewer", |seen| {
+        seen["machines"].as_array().is_some_and(|machines| {
+            machines
+                .iter()
+                .any(|machine| machine["name"] == "server" && machine["role"] == "viewer")
+        })
+    });
+    send(&server, &agent, "Cover the docs too");
+    holds(&server, &agent, "Cover the docs too");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    assert_eq!(
+        ghost(&pc, &agent).unwrap(),
+        kept,
+        "what a viewer says is written in no ghost\n{}",
+        pc.log()
+    );
+}
