@@ -498,16 +498,19 @@ pending requests.
   back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
-  A call its client gives up (its turn cancelled to take a delivery that was not taken in time,
-  a message sent at once, the user's Stop on the turn) leaves its run going, as the timeout does:
-  its end is delivered. **A run goes on to its end unless someone stops it**: the agent
-  (`run_status` with `action: stop`), the user, its session ending, or the daemon stopping; no
-  one else.
+  A call its client gives up because Flottille cancelled its turn (to take a delivery that was
+  not taken in time, a message sent at once, a compaction) leaves its run going, as the timeout
+  does: its end is delivered, also when it ends as the call is given up. **The user's Stop on the
+  turn stops the runs its calls wait on**, as the user's (`was stopped by the user`), and their
+  ends are not delivered: that would start again the turn the user stopped. **A run goes on to
+  its end unless someone stops it**: the agent (`run_status` with `action: stop`), the user, its
+  session ending, the removal of its workspace by an agent of its tree, or the daemon stopping;
+  no one else.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
   `was killed by signal N (SIGKILL) from outside Flottille: the system's out-of-memory killer, or
   a kill`, `was killed by signal N from outside Flottille`, `was stopped by the agent that started
-  it`, `was stopped by the user`, `was stopped because its session ended`, `was interrupted:
-  Flottille stopped while it ran`): who stopped it, never only that it stopped (`was stopped`
+  it`, `was stopped by the user`, `was stopped because its session ended`, `was stopped because
+  its workspace was removed`, `was interrupted: Flottille stopped while it ran`): who stopped it, never only that it stopped (`was stopped`
   alone is a run stopped before who stopped it was kept), then, while it runs, `it keeps
   going: read it with run_status {"run": "<id>"}, stop it with run_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
@@ -711,7 +714,9 @@ pending requests.
   pinned as a note on the next tool result): the line, how it ended (`exited with code N`, `was
   killed by signal N`, or `was stopped by the user`), how long it ran and the last 20 lines of its
   output, masked. A command whose call saw it end, one the agent stopped with `run_status`,
-  and those that stop with their agent or the daemon deliver nothing. No timer is involved. A
+  those that stop with their agent or the daemon, those the user's Stop on the turn stopped, and
+  those of the agent that removed their workspace deliver nothing (another agent of its tree is
+  told `was stopped because its workspace was removed`). No timer is involved. A
   command that ends at the very moment its call answers can give both: the call's answer (the end
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
   nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops

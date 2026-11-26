@@ -2690,6 +2690,7 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
   "state": "running",
   "exit_code": null,
   "signal": null,
+  "stopped_by": null,
   "started_at": 1792843730808,
   "ended_at": null,
   "ready": "starting",
@@ -2702,7 +2703,9 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
 task the user ran; `project` is always the project's; `workspace` is its agent's, or for a task the
 user ran, the one it runs in (`null` in the project folder). `state` is `running`,
-`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
+`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"), and `stopped_by`
+who stopped one stopped or interrupted, as that event says it (`null` for any other end, and for a
+run stopped before it was kept). `ready` is
 `null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
 (`docs/projects.md`, "Tasks"). `last_line` is the

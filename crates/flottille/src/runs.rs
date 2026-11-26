@@ -127,6 +127,9 @@ struct Going {
     /// The user stopped it to start it again (`run.restart`), which tells the agent once, with
     /// the new run's id, and not by its end.
     restarted: AtomicBool,
+    /// Its end is not delivered: its turn was stopped by the user with it, or the agent it would
+    /// be told to is the one that stopped it (#1548).
+    untold: AtomicBool,
     /// Whether it is ready, for a task that says when (`docs/projects.md`, "Tasks").
     readiness: Mutex<Option<Readiness>>,
     /// The text a line of its output holds once it is ready, when that is what its task says.
@@ -197,10 +200,12 @@ struct End {
 enum StoppedBy {
     /// The agent that started it (`run_status` with `action: stop`).
     Agent,
-    /// The user (`run.stop`, a restart, a removal).
+    /// The user (`run.stop`, a restart, a removal, the Stop on the turn that waits on it).
     User,
     /// Its session ended.
     Session,
+    /// Its workspace was removed by an agent of its tree (`workspace` `remove`).
+    Workspace,
     /// The daemon stopped: marked interrupted.
     Daemon,
 }
@@ -211,6 +216,7 @@ impl StoppedBy {
             StoppedBy::Agent => "agent",
             StoppedBy::User => "user",
             StoppedBy::Session => "session",
+            StoppedBy::Workspace => "workspace",
             StoppedBy::Daemon => "daemon",
         }
     }
@@ -220,6 +226,7 @@ impl StoppedBy {
             StoppedBy::Agent,
             StoppedBy::User,
             StoppedBy::Session,
+            StoppedBy::Workspace,
             StoppedBy::Daemon,
         ]
         .into_iter()
@@ -732,13 +739,24 @@ pub async fn run(
         let described = describe(daemon, &id, None, None, true);
         return Outcome::Done(format!("{services_said}{described}"));
     }
+    // Held now: once ended, the run is no longer among those going on.
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(&id).cloned();
     let ended = wait_for_end(daemon, &id);
-    // A call given up (its turn cancelled to take a delivery, the user's Stop on the turn) leaves
-    // its run going, as its timeout does: its end is delivered (#1548).
+    // A call given up (its turn cancelled to take a delivery, a message sent at once) leaves its
+    // run going, as its timeout does: its end is delivered (#1548). One given up as its run ended
+    // has no one to answer: that end is delivered too.
     tokio::select! {
-        () = ended => {}
+        () = ended => {
+            if cancelled.is_cancelled() && let Some(going) = &going {
+                tell_given_up(daemon, going).await;
+            }
+        }
         () = tokio::time::sleep(Duration::from_secs(wait)) => detach(daemon, &id),
-        () = cancelled.cancelled() => detach(daemon, &id),
+        () = cancelled.cancelled() => {
+            if let Some(going) = &going && !detach_going(going) {
+                tell_given_up(daemon, going).await;
+            }
+        }
     }
     let described = describe(daemon, &id, None, None, true);
     Outcome::Done(format!("{services_said}{described}"))
@@ -856,11 +874,29 @@ fn user_place(
 fn detach(daemon: &Daemon, id: &str) {
     let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
     if let Some(going) = going {
-        let mut phase = going.phase.lock().unwrap();
-        if *phase == Phase::Waited {
-            *phase = Phase::Detached;
-        }
+        detach_going(&going);
     }
+}
+
+/// `detach`, of a run held: false when it ended first, its end left to its call to say.
+fn detach_going(going: &Going) -> bool {
+    let mut phase = going.phase.lock().unwrap();
+    if *phase == Phase::Waited {
+        *phase = Phase::Detached;
+    }
+    *phase == Phase::Detached
+}
+
+/// The end of a run whose call was given up as it ended: no one reads that answer, so the end is
+/// delivered as a detached run's is.
+async fn tell_given_up(daemon: &Arc<Daemon>, going: &Going) {
+    let mut end = going.end.subscribe();
+    let Ok(end) = end.wait_for(Option::is_some).await.map(|end| *end) else {
+        return;
+    };
+    let Some(end) = end else { return };
+    let missed = *going.readiness.lock().unwrap() == Some(Readiness::Missed);
+    tell_end(daemon, going, end, &masked_output(going), missed);
 }
 
 /// Ends when the run has ended.
@@ -1306,6 +1342,7 @@ fn start(
         pid,
         phase: Mutex::new(phase),
         restarted: AtomicBool::new(false),
+        untold: AtomicBool::new(false),
         readiness: Mutex::new(run_ready),
         ready_line: match &readying.probe {
             Some(Probe::Line(text)) => Some(text.clone()),
@@ -1682,22 +1719,33 @@ async fn follow(
     }
     let detached =
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
-    // The user stopped it (`run.stop`), which the agent is told.
-    let by_user = end.by == Some(StoppedBy::User);
-    // Told to the agent only when no call was left to answer, and only for an end that is news
-    // to it: not its own stop, nor the daemon's or its own end, nor a restart, which says more.
+    // Told to the agent only when no call was left to answer.
+    if detached {
+        tell_end(&daemon, &going, end, &output, missed);
+    }
+    going.end.send_replace(Some(end));
+}
+
+/// Delivers the end of a run no call answers with, when it is news to its agent: not its own
+/// stop, nor the daemon's or its session's end, nor a restart, which says more, nor an end
+/// `untold`. The user's stop and a removal of its workspace are said.
+fn tell_end(daemon: &Arc<Daemon>, going: &Going, end: End, output: &str, missed: bool) {
     let told = match end.state {
         RunState::Exited => true,
-        RunState::Stopped => by_user && !going.restarted.load(Ordering::SeqCst),
+        RunState::Stopped => {
+            matches!(end.by, Some(StoppedBy::User | StoppedBy::Workspace))
+                && !going.restarted.load(Ordering::SeqCst)
+        }
         RunState::Running | RunState::Interrupted => false,
     };
-    if detached
-        && told
+    let run = &going.run;
+    if told
+        && !going.untold.load(Ordering::SeqCst)
         && let Some(agent) = &run.agent
     {
-        let body = ended_text(&going, end, &output, missed);
+        let body = ended_text(going, end, output, missed);
         deliveries::deliver(
-            &daemon,
+            daemon,
             agent,
             "command-ended",
             Some(format!("command-ended-{}", run.id)),
@@ -1705,7 +1753,6 @@ async fn follow(
             approval::URGENT,
         );
     }
-    going.end.send_replace(Some(end));
 }
 
 /// What the agent is told of a run that ended after its call: how it ended, how long it ran and
@@ -1782,6 +1829,9 @@ fn state_text(end: Option<End>) -> String {
         (RunState::Stopped, _, _, Some(StoppedBy::Session)) => {
             "was stopped because its session ended".to_owned()
         }
+        (RunState::Stopped, _, _, Some(StoppedBy::Workspace)) => {
+            "was stopped because its workspace was removed".to_owned()
+        }
         // A run stopped before who stopped it was kept.
         (RunState::Stopped, _, _, _) => "was stopped".to_owned(),
         (RunState::Interrupted, _, _, _) => {
@@ -1856,6 +1906,51 @@ pub fn view(daemon: &Daemon, id: &str) -> Option<View> {
 /// it was the user once it ended.
 pub async fn stop_by_user(daemon: &Daemon, id: &str) {
     stop(daemon, id, StoppedBy::User).await;
+}
+
+/// The user's Stop on the agent's turn: the runs its calls wait on stop with it, as the user's,
+/// and their ends are not delivered, which would start again the turn the user just stopped
+/// (#1548). Flottille's own cancels of a turn (a delivery, a message sent at once, a compaction)
+/// leave them going. Not waited for: the Stop answers at once.
+pub fn stop_with_turn(daemon: &Daemon, agent: &str) {
+    let going: Vec<Arc<Going>> = daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.run.agent.as_deref() == Some(agent))
+        .cloned()
+        .collect();
+    for going in going {
+        if *going.phase.lock().unwrap() != Phase::Waited {
+            continue;
+        }
+        going.untold.store(true, Ordering::SeqCst);
+        *going.stopped_as.lock().unwrap() = Some(StoppedBy::User);
+        going.stop.notify_one();
+    }
+}
+
+/// A run stopped as an agent of its tree removes its workspace: its result says so, and the
+/// agent that removed it is not told of its own act.
+pub async fn stop_by_removal(daemon: &Daemon, id: &str, remover: &str) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    if let Some(going) = going
+        && going.run.agent.as_deref() == Some(remover)
+    {
+        going.untold.store(true, Ordering::SeqCst);
+    }
+    stop(daemon, id, StoppedBy::Workspace).await;
+}
+
+/// Who stopped a run that ended stopped or interrupted, as the clients read it (`stopped_by`).
+pub fn stopped_by(daemon: &Daemon, run: &Run) -> Option<&'static str> {
+    if run.state == RunState::Running {
+        return None;
+    }
+    stored_end(daemon, run).by.map(StoppedBy::as_str)
 }
 
 /// A run being restarted (`run.restart`), until the guard is dropped.
