@@ -1012,6 +1012,46 @@ fn a_handed_session_writes_to_its_launcher() {
     parity(writes_to_its_launcher("handed"));
 }
 
+/// A session handed over at its start writes to its launcher in its first turn, before the
+/// launcher's machine recorded which session the launch started (pc records it once its file
+/// `slow-call` is gone): it still writes as the session the launcher started, with no leave, as
+/// on one machine.
+#[test]
+fn a_handed_session_writes_to_its_launcher_before_its_launch_is_recorded() {
+    let play = Play::new(Topology::Across, "auto", json!([]));
+    script(
+        play.there(),
+        first_turn(json!([{"mcp": {"tool": "session_send", "arguments": {
+            "session": play.root, "text": "The export is half done."}}}])),
+    );
+    let slow = play.pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    std::thread::scope(|scope| {
+        let launching = scope.spawn(|| play.launch("handed", TITLE, BRIEF));
+        play.titled(TITLE);
+        eventually("the write back come to pc", || {
+            !play.pc.requests().is_empty() || play.pc.log().contains("waits for its launches")
+        });
+        std::fs::remove_file(&slow).unwrap();
+        let launched = launching.join().unwrap();
+        assert!(!launched.error, "{}", launched.text);
+    });
+    soon(|| !play.tool_answers().is_empty());
+    let answers = play.tool_answers();
+    assert!(
+        answers
+            .first()
+            .is_some_and(|answer| answer.contains("Sent to agent")),
+        "{answers:#?}"
+    );
+    soon(|| {
+        play.root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."))
+    });
+    assert_eq!(play.pc.requests().len(), 0, "{:#}", play.pc.log());
+}
+
 /// A led session whose launcher paused their following (fifty messages without the user, the
 /// last asking it to write back) writes to its launcher with `session_send`: refused as paused,
 /// and nothing reaches the launcher, on one machine as on two.
