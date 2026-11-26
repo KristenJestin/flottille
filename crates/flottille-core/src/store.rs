@@ -2088,7 +2088,7 @@ impl Store {
 
     /// The latest sign of activity of these agents, from what is recorded: their events (but
     /// those the daemon says on its own, `agent.tools_outdated`, `agent.tools_reload`,
-    /// `agent.released` and `agent.requests_said`), their
+    /// `agent.released`, `agent.requests_said` and `agent.questions_said`), their
     /// deliveries made and sent, their runs started and ended, their requests asked and decided,
     /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
     pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
@@ -2100,7 +2100,7 @@ impl Store {
                UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
                  WHERE a.agent IN tree \
                  AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', \
-                   'agent.released', 'agent.requests_said') \
+                   'agent.released', 'agent.requests_said', 'agent.questions_said') \
                UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
                  WHERE agent IN tree \
                UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \

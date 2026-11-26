@@ -1928,12 +1928,13 @@ id), says why (`it asked you a question with ask`, `it reported`, `the turn fail
 plain turn, or, for the end of the session, `ended: <why>` or `failed: <why>`), says when the turn
 followed the user's own message to the session, and holds the session's last message, masked and
 cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
-The questions it asked its pilot in that turn that still wait come before that last message
+The questions it asked its pilot that still wait and no wake said yet come before that last message
 (`Its question to you (#12):`, the number of its `agent.asked` event), masked and cut the same way,
 4,000 characters of them at most in all, those past it counted (`[2 more questions; session_read
 reads them]`). A question asked in the
 middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says it
-at once.
+at once. A turn that ends without a wake (one cancelled to take a delivery) does not lose one: the
+next wake says it, `agent.questions_said` marking how far they were said (#1540).
 **Every request that waits for the user** comes after them, each once, in the first wake after it
 reached the user (#1305, #1470): a call held for their approval (`request #31, a call held for approval: fs_read:
 <its reasons>`), a connection's write asked (`request #32, a connection asked: Add the connection
@@ -2133,9 +2134,12 @@ project `project` names), a session that ended and an empty text.
   that Resume (`subscription.resume`), starts the count again and resumes it
   (`session.following_resumed`); no agent can. A session that is not followed has nothing to
   pause.
-- **One wake a turn**: a turn of the session that wrote to its pilot with `session_send` does not
-  wake it again at its end; the wake of a turn carries that turn's last message only (`(no message
-  this turn)` when it said nothing), and says it asked only when it did in that turn.
+- **One wake a turn**: a turn of the session whose last call wrote to its pilot with
+  `session_send`, and that neither asked, reported nor made a request for the user, does not wake
+  it again at its end: that message woke it. A turn that went on after its message (more calls, a
+  question, a report) wakes it at its end as any other (#1540); the wake of a turn carries that turn's last message only (`(no message
+  this turn)` when it said nothing), and says it asked when it did in that turn, or when a question
+  of an earlier turn, cancelled to take a delivery, was not said yet.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.

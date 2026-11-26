@@ -29,6 +29,8 @@ mod led_sessions;
 mod new_session;
 #[path = "../pilot.rs"]
 mod pilot;
+#[path = "../pilot_wakes.rs"]
+mod pilot_wakes;
 #[path = "../questions.rs"]
 mod questions;
 #[path = "../restart.rs"]
