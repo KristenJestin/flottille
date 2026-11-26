@@ -284,6 +284,26 @@ pub(crate) fn launcher_here(daemon: &Daemon, stand_in: &str) -> Option<String> {
         .map(|launch| launch.caller)
 }
 
+/// How long a call of another machine waits for the launches sent there to be recorded here.
+const RECORDING_WAIT: Duration = Duration::from_secs(30);
+
+/// Waits while a launch this machine sent to the machine of key `machine` (named `name`) does not
+/// name the session it started there yet (`launches::placing`), unless a launch names the caller
+/// stood in for as `stand_in` already: that session may write to its launcher in its first turn,
+/// before the answer naming it is recorded here (the answer and the call come apart), and is then
+/// judged as the session its launcher started (`launcher_here`). At most [`RECORDING_WAIT`].
+async fn launches_recorded(daemon: &Daemon, stand_in: &str, machine: &str, name: &str) {
+    let waits = || crate::launches::placing(machine) && launcher_here(daemon, stand_in).is_none();
+    if !waits() {
+        return;
+    }
+    eprintln!("flottille daemon: a call of {name} waits for its launches there to be recorded");
+    let until = std::time::Instant::now() + RECORDING_WAIT;
+    while waits() && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// This machine's name among the user's, as the member list says it.
 pub(crate) fn own_name(daemon: &Daemon) -> Option<String> {
     let remote = crate::link::remote_of(daemon).ok()?;
@@ -2842,6 +2862,7 @@ async fn session_call(
     }
     let mode = crate::launches::mode_taken(&call.mode, member.role);
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
+    launches_recorded(daemon, &agent.id, &machine, &name).await;
     let (grant, key, came) = match removes {
         Some(launch) => {
             let grant =

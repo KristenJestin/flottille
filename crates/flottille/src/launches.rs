@@ -247,6 +247,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         at: now_ms(),
     };
     // Kept before the code goes, so that a child counts in the cap here from now on.
+    let placing = Placing::new(&record.machine, &launch);
     write(daemon, &record).map_err(refused)?;
     drop(_slot);
     let sent = crate::travel::send(
@@ -284,6 +285,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
+    drop(placing);
     // The user there may have answered between the two writes: their answer, come first, was
     // kept (`Store::decide_launch`), and the caller is never told it waits for it. Read before
     // `recorded`, which ends a launch whose caller is gone.
@@ -444,6 +446,44 @@ fn answer_to_caller(
              to it with session_send. {back}"
         ),
     }
+}
+
+/// The launches sent to another machine whose session there is not recorded yet, each its
+/// machine's key and its name: from the record before its code goes to the one that names it.
+static PLACING: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// One launch of [`PLACING`], for as long as it lives, however its launch ends.
+struct Placing((String, String));
+
+impl Placing {
+    fn new(machine: &str, launch: &str) -> Placing {
+        let placing = (machine.to_owned(), launch.to_owned());
+        PLACING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(placing.clone());
+        Placing(placing)
+    }
+}
+
+impl Drop for Placing {
+    fn drop(&mut self) {
+        let mut placing = PLACING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = placing.iter().position(|one| *one == self.0) {
+            placing.remove(at);
+        }
+    }
+}
+
+/// Whether a launch sent to the machine of key `machine` does not name its session here yet.
+pub(crate) fn placing(machine: &str) -> bool {
+    PLACING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(to, _)| to == machine)
 }
 
 fn write(daemon: &Daemon, launch: &Launch) -> Result<(), String> {
