@@ -115,9 +115,11 @@ const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it t
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
 
-/// The ticket a session is about, as the Workspace section says it.
+/// What a session is about, as the Workspace section says it: a ticket or a pull request.
 #[derive(Clone, Debug, PartialEq)]
 struct About {
+    /// A pull request (`#12`); else a ticket.
+    pull: bool,
     key: SharedString,
     title: Option<String>,
     url: Option<String>,
@@ -127,7 +129,51 @@ struct About {
 
 /// Whether two keys say the same ticket, however they are spelt: `#5` and `5`, `abc-1` and `ABC-1`.
 fn same_ticket(a: &str, b: &str) -> bool {
-    a == b
+    let plain = |key: &str| key.trim().trim_start_matches('#').to_uppercase();
+    plain(a) == plain(b)
+}
+
+/// The number of a pull request's key (`#12`).
+fn pull_number(key: &str) -> Option<u64> {
+    key.trim().trim_start_matches('#').parse().ok()
+}
+
+/// What a subject is about, as the Workspace section says it; none when it is free.
+fn about_of(subject: &crate::model::Subject) -> Option<About> {
+    let pull = match subject.kind.as_str() {
+        "ticket" => false,
+        "pull_request" => true,
+        _ => return None,
+    };
+    let key = subject.key.clone()?;
+    // A pull request's page is the one its subject carries beside it.
+    let url = subject.url.clone().or_else(|| {
+        subject
+            .pull
+            .as_ref()
+            .filter(|_| pull)
+            .map(|pull| pull.url.clone())
+            .filter(|url| !url.is_empty())
+    });
+    Some(About {
+        pull,
+        key: SharedString::from(key),
+        title: subject.title.clone(),
+        url,
+        from: subject.from.clone(),
+    })
+}
+
+/// What the Workspace section says of a session's subject now, and what it said last (a line
+/// stays drawn while it folds away).
+#[derive(Default)]
+struct AboutNow {
+    /// It is about a ticket or a pull request now.
+    present: bool,
+    about: Option<About>,
+    /// It is free and says what it last held now.
+    held_present: bool,
+    held: Option<String>,
 }
 
 /// The key of the ticket a subject is about, said in the Workspace section; none for another kind.
@@ -275,12 +321,16 @@ pub fn said_at_offset(ms: u64, offset: i64) -> String {
 
 /// What the Workspace section's line of a session blocked by someone else says: `Waits for Maya ·
 /// since 14:02`, the day said too when it is not today.
-pub fn blocked_line(blocked: &crate::model::Blocked) -> String {
-    format!(
-        "Waits for {} · since {}",
-        blocked.who(),
-        since_at_offset(blocked.since, now_ms(), local_offset(blocked.since))
-    )
+pub fn blocked_line(blocked: &crate::model::Blocked, what: bool) -> String {
+    let since = since_at_offset(blocked.since, now_ms(), local_offset(blocked.since));
+    match what {
+        true => format!(
+            "Waits for {}: {} · since {since}",
+            blocked.who(),
+            blocked.why
+        ),
+        false => format!("Waits for {} · since {since}", blocked.who()),
+    }
 }
 
 /// The line's tooltip: it needs nothing of the user.
@@ -292,7 +342,7 @@ pub fn blocked_tip(blocked: &crate::model::Blocked) -> String {
     format!("It comes back by itself when {answers}.")
 }
 
-/// When `ms` was, as a banner says it at `now`, `offset` seconds east of UTC: its time of day
+/// When `ms` was, as a wait says it at `now`, `offset` seconds east of UTC: its time of day
 /// when it is the same day, else its date too (`31 Oct 2026, 14:05`).
 pub fn since_at_offset(ms: u64, now: u64, offset: i64) -> String {
     let said = said_at_offset(ms, offset);
@@ -353,14 +403,16 @@ pub struct SessionPage {
     opened: Opened,
     /// What the session is about, as the daemon derives it: the Workspace section says its ticket.
     subject: Option<crate::model::Subject>,
-    /// The last ticket it was about, which stays drawn while its line folds away.
+    /// The last ticket or pull request it was about, which stays drawn while its line folds away.
     about: Option<About>,
+    /// What it last held, said once it is free, which stays drawn while its line folds away.
+    held: Option<String>,
     /// The last wait it had, which stays drawn while its line folds away.
     blocked_last: Option<crate::model::Blocked>,
     follow: Follow,
     layout: Layout,
-    /// It waits on a person, at rest (`blocked`): the banner above its composer says who, what
-    /// and since when.
+    /// It waits on a person, at rest (`blocked`): the Workspace section says who, what and since
+    /// when.
     blocked: Option<crate::model::Blocked>,
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
@@ -583,6 +635,7 @@ impl SessionPage {
             blocked: None,
             subject: None,
             about: None,
+            held: None,
             blocked_last: None,
         };
         page.relink();
@@ -1123,10 +1176,17 @@ impl SessionPage {
         }
     }
 
-    /// The ticket it is about now, and the last one it was about.
-    fn about_now(&self) -> (bool, Option<About>) {
-        let present = self.subject.as_ref().and_then(ticket_key).is_some();
-        (present, self.about.clone())
+    /// What it is about now, and what it was about last.
+    fn about_now(&self) -> AboutNow {
+        AboutNow {
+            present: self.subject.as_ref().and_then(about_of).is_some(),
+            about: self.about.clone(),
+            held_present: self
+                .subject
+                .as_ref()
+                .is_some_and(|subject| subject.kind == "free" && subject.last.is_some()),
+            held: self.held.clone(),
+        }
     }
 
     /// The wait it has now, and the last one it had.
@@ -1144,15 +1204,13 @@ impl SessionPage {
 
     pub fn set_subject(&mut self, subject: Option<crate::model::Subject>, cx: &mut Context<Self>) {
         if self.subject != subject {
-            if let Some(subject) = &subject
-                && let Some(key) = ticket_key(subject)
-            {
-                self.about = Some(About {
-                    key,
-                    title: subject.title.clone(),
-                    url: subject.url.clone(),
-                    from: subject.from.clone(),
-                });
+            if let Some(subject) = &subject {
+                if let Some(about) = about_of(subject) {
+                    self.about = Some(about);
+                }
+                if let Some(last) = &subject.last {
+                    self.held = Some(last.clone());
+                }
             }
             self.subject = subject;
             cx.notify();
@@ -8939,104 +8997,187 @@ impl Render for SessionRail {
             .collect();
         let several = repositories.len() > 1;
         let forge_pending = self.place.as_ref().is_some_and(|place| place.forge_pending);
-        // The ticket the session is about, when the workspace does not link it: its key, its title
-        // and a button that opens it. The one the workspace links has its own line above.
-        let (about_present, about_last) = self
+        // What the session is about, when the section does not say it already: a ticket or a pull
+        // request, its key, its title and a button that opens it. The ticket the workspace links
+        // and a pull request that has its own line say it above.
+        let about_now = self
             .page
             .upgrade()
             .map(|page| page.read(cx).about_now())
             .unwrap_or_default();
+        let about_last = about_now.about.clone();
         let linked_reference = self
             .place
             .as_ref()
             .and_then(|place| place.ticket.as_ref())
             .map(|ticket| ticket.reference.clone());
-        let about_shown = about_present
-            && about_last
-                .as_ref()
-                .is_some_and(|about| linked_reference.as_deref() != Some(about.key.as_ref()));
-        let about_content =
-            match about_last {
-                Some(about) => {
-                    let said = SharedString::from(match &about.title {
-                        Some(title) => format!("{} {title}", about.key),
-                        None => about.key.to_string(),
-                    });
-                    let key = about.key.clone();
-                    let open = about.url.clone().map(|url| {
-                        let page = self.page.clone();
-                        Button::icon("rail-about-open", Icon::OpenInEditor, format!("Open {key}"))
-                            .on_click(move |_, _, cx| {
-                                page.update(cx, |page, _| page.open_link(&url)).ok();
+        let said_above = |about: &About| match about.pull {
+            true => pull_number(&about.key).is_some_and(|number| {
+                self.place
+                    .iter()
+                    .flat_map(|place| place.pulls.iter())
+                    .any(|pull| pull.number == number)
+            }),
+            false => linked_reference
+                .as_deref()
+                .is_some_and(|linked| same_ticket(linked, &about.key)),
+        };
+        let about_shown =
+            about_now.present && about_last.as_ref().is_some_and(|about| !said_above(about));
+        let about_content = match about_last {
+            Some(about) => {
+                let said = SharedString::from(match &about.title {
+                    Some(title) => format!("{} {title}", about.key),
+                    None => about.key.to_string(),
+                });
+                let key = about.key.clone();
+                let open = about.url.clone().map(|url| {
+                    let page = self.page.clone();
+                    Button::icon("rail-about-open", Icon::OpenInEditor, format!("Open {key}"))
+                        .on_click(move |_, _, cx| {
+                            page.update(cx, |page, _| page.open_link(&url)).ok();
+                        })
+                });
+                let row = div()
+                    .id("rail-about-line")
+                    .px(space::XS)
+                    .min_h(px(24.))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .text_size(px(FACT_LABEL_SIZE))
+                    .child(
+                        div().w(px(FACT_ICON)).flex_none().child(
+                            icon(match about.pull {
+                                true => glyphs::PULL_REQUEST,
+                                false => glyphs::TICKET,
                             })
-                    });
-                    let row =
+                            .size(px(FACT_ICON))
+                            .text_color(p.faint),
+                        ),
+                    )
+                    .child(
                         div()
-                            .id("rail-about-line")
-                            .px(space::XS)
-                            .min_h(px(24.))
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_center()
-                            .gap(space::SM)
-                            .text_size(px(FACT_LABEL_SIZE))
-                            .child(div().w(px(FACT_ICON)).flex_none().child(
-                                icon(glyphs::TICKET).size(px(FACT_ICON)).text_color(p.faint),
-                            ))
-                            .child(
+                            .gap(space::XS)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .mono(FACT_SIZE)
+                            .child(div().flex_none().child(key))
+                            .children(about.title.clone().map(|title| {
                                 div()
-                                    .flex_1()
                                     .min_w_0()
-                                    .flex()
-                                    .gap(space::XS)
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .mono(FACT_SIZE)
-                                    .child(div().flex_none().child(key))
-                                    .children(about.title.clone().map(|title| {
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .child(SharedString::from(title))
-                                    })),
-                            )
-                            .children(open);
-                    div()
-                        .id("rail-about-ticket")
-                        .aria_label(said)
-                        .child(tipped(
-                            row,
-                            format!("What it is about, from {}.", about.from),
-                            24.,
-                            window,
-                            cx,
-                        ))
-                        .test_support()
-                        .into_any_element()
-                }
-                None => div().into_any_element(),
-            };
+                                    .text_ellipsis()
+                                    .child(SharedString::from(title))
+                            })),
+                    )
+                    .children(open);
+                div()
+                    .id(match about.pull {
+                        true => "rail-about-pull",
+                        false => "rail-about-ticket",
+                    })
+                    .aria_label(said)
+                    .child(tipped(
+                        row,
+                        format!("What it is about, from {}.", about.from),
+                        24.,
+                        window,
+                        cx,
+                    ))
+                    .test_support()
+                    .into_any_element()
+            }
+            None => div().into_any_element(),
+        };
         let about_line = presence("rail-about-block", about_shown, about_content);
+        // What a free session last held, under the line of what it was about.
+        let held_content = match &about_now.held {
+            Some(held) => {
+                let said = SharedString::from(held.clone());
+                let row = div()
+                    .id("rail-about-last-row")
+                    .px(space::XS)
+                    .min_h(px(24.))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .text_size(px(FACT_LABEL_SIZE))
+                    .child(div().w(px(FACT_ICON)).flex_none())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .mono(FACT_SIZE)
+                            .text_color(p.faint)
+                            .child(said.clone()),
+                    );
+                div()
+                    .id("rail-about-last")
+                    .aria_label(said)
+                    .child(tipped(
+                        row,
+                        "What it is about, from what it last held.",
+                        24.,
+                        window,
+                        cx,
+                    ))
+                    .test_support()
+                    .into_any_element()
+            }
+            None => div().into_any_element(),
+        };
+        let held_line = presence(
+            "rail-about-last-block",
+            about_now.held_present,
+            held_content,
+        );
         // What it waits on, said under the line of what it waits on: the ticket's, or the pull
-        // request's. It comes back by itself when they answer.
+        // request's. It comes back by itself when they answer; anywhere else it says what for.
         let (waiting, waited) = self
             .page
             .upgrade()
             .map(|page| page.read(cx).wait_now())
             .unwrap_or_default();
-        let wait_on = waiting.as_ref().or(waited.as_ref()).and_then(|blocked| {
-            blocked
-                .why
-                .strip_prefix("review of #")
-                .and_then(|number| number.parse::<u64>().ok())
-        });
+        let wait_on = waiting
+            .as_ref()
+            .or(waited.as_ref())
+            .and_then(|blocked| blocked.on.clone());
+        let wait_on_pull = match &wait_on {
+            Some(crate::model::WaitOn::PullRequest(number)) => Some(*number),
+            _ => None,
+        };
+        // Under the line of the ticket it waits on, when the section says that ticket just above.
+        let under_ticket = match &wait_on {
+            Some(crate::model::WaitOn::Ticket(key)) => {
+                linked_reference
+                    .as_deref()
+                    .is_some_and(|linked| same_ticket(linked, key))
+                    || (about_shown
+                        && about_last
+                            .as_ref()
+                            .is_some_and(|about| !about.pull && same_ticket(&about.key, key)))
+            }
+            _ => false,
+        };
+        // One instance of the line each place it can be in: it folds away where it was and
+        // unfolds where it comes, never jumping from one to the other.
         let make_wait = {
             let present = waiting.is_some();
             let shown = waiting.clone().or(waited.clone());
-            move |window: &mut Window, cx: &mut App| -> AnyElement {
+            move |window: &mut Window,
+                  cx: &mut App,
+                  block: &'static str,
+                  here: bool,
+                  what: bool|
+                  -> AnyElement {
                 let content = match &shown {
                     Some(blocked) => {
-                        let said = SharedString::from(blocked_line(blocked));
+                        let said = SharedString::from(blocked_line(blocked, what));
                         let row =
                             div()
                                 .id("rail-wait-line")
@@ -9066,11 +9207,11 @@ impl Render for SessionRail {
                     }
                     None => div().into_any_element(),
                 };
-                presence("rail-wait-block", present, content).into_any_element()
+                presence(block, present && here, content).into_any_element()
             }
         };
         // Under the pull request's line when it waits on a review of one the section shows.
-        let wait_under_pull = wait_on.filter(|number| {
+        let wait_under_pull = wait_on_pull.filter(|number| {
             self.place
                 .iter()
                 .flat_map(|place| place.pulls.iter())
@@ -9286,15 +9427,18 @@ impl Render for SessionRail {
                 false => lines.extend(pull_line),
             }
             if wait_under_pull.is_some() && wait_under_pull == pull_number {
-                lines.push(make_wait(window, cx));
+                lines.push(make_wait(window, cx, "rail-wait-pull-block", true, false));
             }
         }
         // On top, under the ticket's line, when it waits on a ticket or on a pull request the
         // section does not show.
-        let wait_top = match wait_under_pull {
-            None => make_wait(window, cx),
-            Some(_) => div().into_any_element(),
-        };
+        let wait_top = make_wait(
+            window,
+            cx,
+            "rail-wait-block",
+            wait_under_pull.is_none(),
+            !under_ticket,
+        );
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
         // The forge is the project's setting, not a line of the workspace: the section only says
         // which repositories have none, once, since their pull requests cannot show.
@@ -9514,6 +9658,7 @@ impl Render for SessionRail {
                     ))
                     .child(ticket_line)
                     .child(about_line)
+                    .child(held_line)
                     .child(wait_top)
                     .child(spec_line)
                     .children(lines)
@@ -11680,8 +11825,14 @@ mod tests {
             on: None,
             since: 0,
         };
-        let line = blocked_line(&blocked(&["Maya"]));
+        let line = blocked_line(&blocked(&["Maya"]), false);
         assert!(line.starts_with("Waits for Maya · since "), "{line}");
+        // Away from the line of what it waits on, it says what for.
+        let line = blocked_line(&blocked(&["Maya"]), true);
+        assert!(
+            line.starts_with("Waits for Maya: ticket ATL-48 · since "),
+            "{line}"
+        );
         assert_eq!(
             blocked_tip(&blocked(&["Maya"])),
             "It comes back by itself when Maya answers."

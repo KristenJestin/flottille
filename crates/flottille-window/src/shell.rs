@@ -6095,7 +6095,7 @@ impl Shell {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
         }
-        // A session blocked by someone else, or no longer: its open page's banner says it.
+        // A session blocked by someone else, or no longer: its open page's Workspace section says it.
         if let Some(page) = self.session_page.clone()
             && let Some(found) = self.snapshot.session(page.read(cx).id())
             && page.read(cx).blocked() != found.blocked.as_ref()
