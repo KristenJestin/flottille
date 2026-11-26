@@ -1881,6 +1881,8 @@ fn install_sh_takes_the_most_recent_build_and_an_exact_version() {
     let programs = tempfile::tempdir().unwrap();
     three_channels(&releases, programs.path());
     betas(&releases, programs.path(), &STRAY);
+    // The stable is below these betas: the channel takes the highest of the two, by version.
+    stable_at(&releases, programs.path(), "0.1.0");
 
     // The latest published of the beta channel, not the highest version.
     let home = tempfile::tempdir().unwrap();
@@ -1964,6 +1966,167 @@ fn the_beta_channel_never_takes_a_next_or_rc_release() {
     assert_eq!(
         String::from_utf8_lossy(&said.stdout).trim(),
         "flottille 0.4.0-beta.3 (test, 000000000000)"
+    );
+}
+
+/// `flottille update --channel beta` through a fresh binary, which says the version it is then.
+fn updated_to_beta(user: &User, args: &[&str]) -> (Output, String) {
+    let binary = installed();
+    let output = user.command_through(&binary, args).output().unwrap();
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    (
+        output,
+        String::from_utf8_lossy(&said.stdout).trim().to_owned(),
+    )
+}
+
+#[test]
+fn the_beta_channel_takes_a_stable_newer_than_its_latest_beta() {
+    // v0.4.4 came out after the last beta of that version: a beta machine is not left behind.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[("0.4.4-beta.36", "2026-11-04T09:00:00Z")],
+    );
+    stable_at(&releases, programs.path(), "0.4.4");
+
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.4 (test, 000000000000)"
+    );
+
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let (output, version) = updated_to_beta(&user, &["update", "--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(version, "flottille 0.4.4 (test, 000000000000)");
+}
+
+#[test]
+fn the_beta_channel_takes_a_beta_newer_than_the_latest_stable() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.4.5-beta.1", "2026-11-04T10:00:00Z"),
+            ("0.4.4-beta.36", "2026-11-04T09:00:00Z"),
+        ],
+    );
+    stable_at(&releases, programs.path(), "0.4.4");
+
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let (output, version) = updated_to_beta(&user, &["update", "--channel", "beta"]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(version, "flottille 0.4.5-beta.1 (test, 000000000000)");
+}
+
+#[test]
+fn a_beta_machine_that_took_a_stable_stays_on_the_beta_channel() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[("0.4.4-beta.36", "2026-11-04T09:00:00Z")],
+    );
+    stable_at(&releases, programs.path(), "0.4.4");
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let (output, version) = updated_to_beta(&user, &["update", "--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(version, "flottille 0.4.4 (test, 000000000000)");
+
+    // The channel is the user's choice: the stable was only what it gave.
+    let kept = user.path("state/flottille/update-channel.json");
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(kept).unwrap()).unwrap();
+    assert_eq!(kept["channel"], "beta");
+
+    // And a later beta above the stable is taken by a plain update, with no new choice.
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.4.5-beta.1", "2026-11-04T11:00:00Z"),
+            ("0.4.4-beta.36", "2026-11-04T09:00:00Z"),
+        ],
+    );
+    let (output, version) = updated_to_beta(&user, &["update"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Following the channel last chosen: beta"),
+        "{output:?}"
+    );
+    assert_eq!(version, "flottille 0.4.5-beta.1 (test, 000000000000)");
+}
+
+#[test]
+fn a_stable_below_the_running_version_is_never_offered() {
+    // This build is 0.1.0: the stable and the beta are both below it, the stable the higher.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[("0.0.4-beta.2", "2026-11-04T09:00:00Z")],
+    );
+    stable_at(&releases, programs.path(), "0.0.5");
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let before = sha256(&binary);
+
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("0.0.5 is the latest of beta"), "{said}");
+    assert!(said.contains("--force"), "{said}");
+    assert_eq!(sha256(&binary), before);
+}
+
+#[test]
+fn install_sh_beta_takes_a_newer_stable() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.4.4-beta.36", "2026-11-04T09:00:00Z"),
+            ("0.4.4-beta.35", "2026-11-04T08:00:00Z"),
+        ],
+    );
+    stable_at(&releases, programs.path(), "0.4.4");
+    let home = tempfile::tempdir().unwrap();
+
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.4 (test, 000000000000)"
+    );
+
+    // A beta above the stable is the beta's, and a stable below the latest beta is not taken.
+    betas(
+        &releases,
+        programs.path(),
+        &[("0.4.5-beta.1", "2026-11-04T11:00:00Z")],
+    );
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.5-beta.1 (test, 000000000000)"
     );
 }
 
@@ -3847,8 +4010,13 @@ fn update_remembers_the_channel_last_chosen() {
     // Nothing chosen: the channel of the build, and a local build takes stable.
     assert_eq!(plain_update_reads(), ["/repos/o/r/releases/latest"]);
 
+    // The beta channel reads the betas, and the latest stable beside them (the highest is taken).
+    let beta_reads = [
+        "/repos/o/r/releases?per_page=100",
+        "/repos/o/r/releases/latest",
+    ];
     choose(&["update", "--channel", "beta"]);
-    assert_eq!(plain_update_reads(), ["/repos/o/r/releases?per_page=100"]);
+    assert_eq!(plain_update_reads(), beta_reads);
 
     choose(&[
         "update",
