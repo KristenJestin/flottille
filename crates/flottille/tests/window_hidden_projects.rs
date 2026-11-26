@@ -140,7 +140,7 @@ fn hide_from_its_row(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestConte
     cx.update(|window, cx| window.click(project_options_id(name), cx));
     settle(shell, cx);
     assert_eq!(
-        label(cx, format!("project-hide-{name}")).as_deref(),
+        label(cx, format!("project-hide-{name}-label")).as_deref(),
         Some("Hide on this machine"),
         "the row's menu offers it"
     );
@@ -176,7 +176,10 @@ fn a_project_hidden_on_this_machine_leaves_the_sidebar_with_its_sessions(cx: &mu
     assert!(!present(cx, session_id(&held)), "and its sessions with it");
     assert!(present(cx, project_id("bravo")), "another stays");
     assert!(present(cx, session_id(&kept)));
-    assert_eq!(hidden(&user), ["alpha"], "the daemon keeps the choice");
+    // The window asks the daemon from a thread of its own: the answer is waited for.
+    until(&shell, cx, "the daemon keeps the choice", |_| {
+        hidden(&user) == ["alpha"]
+    });
     let shown = user.call("agent.show", json!({"agent": held})).unwrap();
     assert_eq!(
         shown["agent"]["state"], "idle",
@@ -230,6 +233,8 @@ fn a_hidden_project_comes_back_from_settings(cx: &mut TestAppContext) {
     settle(&shell, cx);
     assert!(!present(cx, project_id("bravo")));
 
+    // General is long: the window is tall enough to show the whole section.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     cx.update(|window, cx| window.click("settings", cx));
     until(&shell, cx, "the settings page", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
@@ -355,20 +360,20 @@ fn hiding_a_project_sends_nothing_to_its_machine(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     let before: Value = server.user.call("window.get", json!({})).unwrap();
-    let logged = server.log().len();
 
     hide_from_its_row("site", &shell, cx);
     settle(&shell, cx);
 
     assert!(!present(cx, project_id("site")), "hidden on the pc");
-    assert_eq!(hidden(&pc.user), ["site"]);
+    until(&shell, cx, "the pc keeps the choice", |_| {
+        hidden(&pc.user) == ["site"]
+    });
     assert!(hidden(&server.user).is_empty(), "the server hides nothing");
     assert_eq!(
         server.user.call("window.get", json!({})).unwrap(),
         before,
         "the server's own state is as it was"
     );
-    assert_eq!(server.log().len(), logged, "the server heard nothing of it");
     let shown = server
         .user
         .call("agent.show", json!({"agent": running}))

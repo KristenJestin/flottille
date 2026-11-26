@@ -49,13 +49,6 @@ impl HiddenProjects {
             cx.notify();
         }
     }
-
-    fn show(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let name = name.to_owned();
-        self.shell
-            .update(cx, |shell, cx| shell.show_project(&name, window, cx))
-            .ok();
-    }
 }
 
 impl Render for HiddenProjects {
@@ -75,16 +68,20 @@ impl Render for HiddenProjects {
             .collect();
         let mut list = ListCard::new("hidden-projects-list");
         for (key, placement, name) in drawn {
+            // Not a `cx.listener`: showing the project updates this section (its list), which
+            // would be updated twice.
             let show = {
-                let name = name.clone();
+                let (shell, name) = (self.shell.clone(), name.clone());
                 Button::secondary(
                     ElementId::Name(format!("hidden-project-show-{key}").into()),
                     "Show",
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.show(&name, window, cx)
-                }))
+                .on_click(move |_, window, cx| {
+                    let name = name.clone();
+                    shell
+                        .update(cx, |shell, cx| shell.show_project(&name, window, cx))
+                        .ok();
+                })
             };
             let row = ListRow::new(
                 ElementId::Name(format!("hidden-project-row-{key}").into()),
