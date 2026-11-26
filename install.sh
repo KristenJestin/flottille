@@ -52,6 +52,24 @@ latest_published() {
     sort -k 1,1 -k 2,2V | tail -n 1 | cut -d ' ' -f 3
 }
 
+# The version of the release an archive's address is of, without its pre-release: `0.4.4` for
+# `…/flottille-0.4.4-beta.36-x86_64-linux.tar.gz`.
+core_of() {
+  name=${1##*/}
+  name=${name#flottille-}
+  printf '%s' "${name%%-*}"
+}
+
+# The beta channel's archive: the latest beta ($1), or the latest stable release ($2) when its
+# version is not below it (`0.4.4` is above `0.4.4-beta.36`, so a release is above its own
+# betas). Either may be empty. The channel is the user's choice, the version is what it gives.
+highest_of() {
+  if [ -z "$1" ]; then printf '%s' "$2"; return; fi
+  if [ -z "$2" ]; then printf '%s' "$1"; return; fi
+  top=$(printf '%s\n%s\n' "$(core_of "$1")" "$(core_of "$2")" | sort -V | tail -n 1)
+  if [ "$(core_of "$2")" = "$top" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi
+}
+
 # The archive of the highest version among the alphas of the branch whose slug is $2, in a list
 # of releases: `*-alpha.<slug>.<n>`, the slug whole (`feat-a` is not `feat-a-b`), each alpha being
 # a release of its own.
@@ -219,6 +237,12 @@ main() {
       beta)
         read_api "$api/releases?per_page=100" "$answer" || fail "cannot read the releases at $api"
         url=$(latest_published "$answer")
+        # Dev's betas fill the page of the list, so the stable is asked for apart.
+        stable=
+        if read_api "$api/releases/latest" "$work/stable.json"; then
+          stable=$(archives "$work/stable.json" | head -n 1)
+        fi
+        url=$(highest_of "$url" "$stable")
         ;;
       alpha)
         [ -n "$branch" ] || fail "the alpha channel needs --branch <name>"

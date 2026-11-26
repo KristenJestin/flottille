@@ -253,7 +253,8 @@ list says where it went.
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published
-last, not the highest version. `--channel stable`, `beta` or `alpha` moves to that channel, and with
+last, not the highest version (the beta channel's is the highest version of its latest beta and
+the latest stable release, which it takes while staying on the beta channel). `--channel stable`, `beta` or `alpha` moves to that channel, and with
 `--channel alpha`, `--branch <name>` names the branch (by default the one last chosen, else the
 one this build came from); the channel last chosen is remembered, so a plain `flottille update`
 stays on it (by default the channel this build is on; a local build takes stable). `--channel`

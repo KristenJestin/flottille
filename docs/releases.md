@@ -17,8 +17,8 @@ changed, so each build is its own release, an alpha's too.
 
 **Each line has a pre-release name of its own**: `-beta.N` is `dev`'s alone, `-rc.N` a stable
 line's (a release candidate), `-next.N` the next version's. The beta channel (`install.sh
---channel beta`, `flottille update --channel beta`) reads `-beta.` only, as it always did, so a
-line's build never takes it over; and two lines never publish the same version. There is no
+--channel beta`, `flottille update --channel beta`) reads `-beta.` releases and the latest stable
+release, nothing else (below), so a line's build never takes it over; and two lines never publish the same version. There is no
 channel for `-rc.` and `-next.` (none for now): each is installed by its version
 (`--version 0.5.0-next.7`). Their binaries say their own channel, `rc` or `next`, and
 `flottille update` with no flag stays on the line (see "Updating").
@@ -520,7 +520,8 @@ one each release's notes name, of its own commit.
 `install.sh` needs `curl`, `tar`, `sha256sum` and GNU `sort`, and no root. Its body is one
 function called on its last line, so a download cut short runs nothing. It reads the channel's
 release from GitHub's API (stable: the latest release; beta: the `-beta.` pre-release published
-last, not the highest version (below); alpha: the **highest version** among the branch's alphas,
+last, not the highest version (below), or the latest release when its version is above that beta's;
+alpha: the **highest version** among the branch's alphas,
 `*-alpha.<slug>.<n>` of the 100 newest releases, the slug whole so that `feat-a` never takes
 `feat-a-b`'s), downloads
 its archive and sum, checks the sum (a wrong one installs nothing),
@@ -579,7 +580,8 @@ entry and the icons: to remove Flottille by hand, delete `flottille` and `flot` 
 
 `flottille update [--channel stable|beta|alpha] [--branch <name>] [--version <X.Y.Z[-pre]>]
 [--force]` replaces the binary it runs from with the channel's latest build (the most recently
-published, see "Installing"; an alpha's, the highest version of its branch): by default the channel last chosen with `--channel` (and, for alpha,
+published, see "Installing"; an alpha's, the highest version of its branch; **the beta channel's
+is the highest version of its latest beta and the latest stable**): by default the channel last chosen with `--channel` (and, for alpha,
 its branch), else the one it was built on (a `local` build takes stable) and the branch it was
 built from. A build of a line stays on it: an `rc` build takes the next rc of its line, then that
 line's stable release, and later its next fix's rc; a `next` build takes the next `-next.N` of
@@ -604,6 +606,16 @@ is the old one or the new one, never half of one.
   remembered wins over the build's line, and `--channel` offers no rc and no next: to follow the
   line again, delete `$XDG_STATE_HOME/flottille/update-channel.json` (`~/.local/state/flottille/`
   when `XDG_STATE_HOME` is not set).
+- **The beta channel never lags behind stable.** It takes the highest version, by version (as the
+  comparison below does), of its latest beta and the latest stable release: `0.4.4` is above
+  `0.4.4-beta.36`, so a beta machine takes `0.4.4` once it is out, and a later `0.4.5-beta.1`,
+  above it, takes it back to the betas by itself. The user chose beta to get things sooner, never
+  later than stable. **The machine stays on the beta channel**: the channel remembered is the
+  user's choice, the version is only what it gives; "What's new" says the stable's notes when the
+  stable is taken. A stable below the running version is never offered (it is said as the latest
+  of the channel, see below), as for any channel. The window's Check now and the daemon's
+  automatic check say the same, as they read the channel through the same code; the alpha
+  channel is unchanged.
 - **`--version <X.Y.Z[-pre]>` installs that release exactly**, of any channel, as `install.sh
   --version` does, and goes without `--channel` and `--branch`. A version that does not exist is
   refused with the nearest published ones, and nothing is downloaded. It does not touch the

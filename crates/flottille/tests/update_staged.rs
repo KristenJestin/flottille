@@ -868,6 +868,104 @@ fn back_to_stable_keeps_a_newer_beta_until_a_stable_passes_it() {
     assert_eq!(shown["ahead_of"], Value::Null);
 }
 
+/// A beta machine: the beta `old` listed, then the stable `NEWER` (the latest), the user's channel
+/// set to beta through the window's way. Its daemon runs from `binary`, a copy of its own: what
+/// is downloaded is staged beside the binary the daemon runs from, never beside the shared one.
+fn beta_machine_with_a_newer_stable(
+    releases: &Releases,
+    programs: &Path,
+    old: &str,
+    binary: &Path,
+) -> User {
+    let beta = releases.release(&format!("v{old}"), old, &standing_for(programs, old), None);
+    let stable = releases.release(
+        &format!("v{NEWER}"),
+        NEWER,
+        &standing_for(programs, NEWER),
+        None,
+    );
+    releases.put(
+        "/repos/o/r/releases/latest",
+        stable.to_string().into_bytes(),
+    );
+    releases.list_as_github(&[&stable, &beta]);
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    runs_from(&start_through(&user, binary), binary);
+    user.call("update.set", json!({"channel": "beta"})).unwrap();
+    user
+}
+
+#[test]
+fn a_beta_machine_that_took_a_stable_stays_on_the_beta_channel() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let binary = installed();
+    let user =
+        beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3", &binary);
+
+    // The check, which the window's Check now is, offers the stable above the latest beta.
+    let shown = shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+    assert_eq!(shown["channel"], "beta");
+    user.call("update.download", json!({})).unwrap();
+    let shown = shown_until(&user, "the download", |shown| shown["staged"] == NEWER);
+
+    // The channel is the user's choice: the stable was only what it gave.
+    assert_eq!(shown["channel"], "beta");
+    assert_eq!(kept(&user)["channel"], "beta");
+}
+
+#[test]
+fn a_beta_machine_is_told_the_stable_s_notes_when_it_takes_the_stable() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let binary = installed();
+    let user =
+        beta_machine_with_a_newer_stable(&releases, programs.path(), "98.0.0-beta.3", &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+
+    user.call("update.download", json!({})).unwrap();
+
+    shown_until(&user, "the download", |shown| shown["staged"] == NEWER);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(staging(&binary).join("staged.json")).unwrap())
+            .unwrap();
+    // The stable's own notes, not a beta's of the line before it.
+    let notes = manifest["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{manifest}");
+    assert_eq!(notes[0]["version"], NEWER);
+}
+
+#[test]
+fn a_stable_below_the_running_version_is_never_offered_to_the_check() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let old = releases.release(
+        "v0.0.4-beta.2",
+        "0.0.4-beta.2",
+        &standing_for(programs.path(), "0.0.4-beta.2"),
+        None,
+    );
+    let stable = releases.release(
+        "v0.0.5",
+        "0.0.5",
+        &standing_for(programs.path(), "0.0.5"),
+        None,
+    );
+    releases.put(
+        "/repos/o/r/releases/latest",
+        stable.to_string().into_bytes(),
+    );
+    releases.list(&[&old]);
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+
+    user.call("update.set", json!({"channel": "beta"})).unwrap();
+
+    // The highest of the two is the stable, which is below this build: it is only said.
+    let shown = shown_until(&user, "the check", |shown| !shown["ahead_of"].is_null());
+    assert_eq!(shown["ahead_of"], "0.0.5");
+    assert_eq!(shown["latest"], Value::Null);
+}
+
 #[test]
 fn an_alpha_build_shows_its_branch_and_offers_stable_or_beta() {
     let releases = Releases::serve();
