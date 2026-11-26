@@ -1372,7 +1372,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   project of one repository); under it the composer that starts a session (place, agent, model,
   first message, and pictures taken as a session's composer does, which go with the first
   message; its place's menu ends with New workspace…; with no provider ready it says "No provider
-  is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
+  is ready. **Open Settings**", which opens Agents, Providers). The moment its first message is
+  sent, the session's page opens, with its place, the message and a skeleton of the answer under
+  it, standing in for the session until Flottille answers; the session started then takes that
+  page's place, the same page, and the stand-in fades out once the conversation shows the
+  message. A start refused says why there (and in a toast), the message kept in the composer,
+  with Try again and Edit message. No page change shows "No project yet." while projects are
+  listed: a page not known yet is a skeleton (#1579); then its tabs, **Work**, **Pull
   requests** and **Tickets**, **Specs** while Specs is on in the project, and **Progress** while
   the project declares a tracker (the fifth), the chosen one alone below them (`reference/gpui.md`,
   rule 13). **Progress** is a project's milestones and their tickets (`tickets.md`, "Progress"),

@@ -664,7 +664,13 @@ fn slash_review_in_the_composer_starts_a_review_and_sends_nothing(cx: &mut TestA
     settle(cx);
     cx.update(|window, cx| window.click(session_id(&session), cx));
     until(&shell, cx, "the session's page", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     settle(cx);
 

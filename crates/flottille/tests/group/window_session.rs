@@ -27,6 +27,8 @@ mod window_ended_section;
 mod window_message_checks;
 #[path = "../window_models.rs"]
 mod window_models;
+#[path = "../window_new_session_page.rs"]
+mod window_new_session_page;
 #[path = "../window_questions.rs"]
 mod window_questions;
 #[path = "../window_runs_on.rs"]

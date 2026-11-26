@@ -576,6 +576,14 @@ impl Composer {
         self.sending.is_some()
     }
 
+    /// Where the session being started was asked to start (`Some(None)`: the project's folder).
+    pub fn sending_place(&self) -> Option<crate::model::Place> {
+        self.sending.as_ref().map(|target| match target {
+            Target::Main => None,
+            Target::Workspace(name) => Some(name.clone()),
+        })
+    }
+
     pub fn field(&self) -> &Entity<TextareaState> {
         &self.field
     }
@@ -741,7 +749,6 @@ impl Composer {
 
     /// Starts a session with what the field holds, where the picker says.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
         // A picture that is not there yet would be left behind: the sender waits for it.
         if self.attached.is_scaling() {
             return toast(Toast::failure(NOT_STARTED).detail(STILL_SCALING), cx);
@@ -763,11 +770,28 @@ impl Composer {
             texts: self.attached.texts(cx),
             mode: self.mode.read(cx).chosen().map(str::to_owned),
         };
+        let place = match &target {
+            Target::Main => None,
+            Target::Workspace(name) => Some(name.clone()),
+        };
         self.sending = Some(target);
         self.sent = Some(self.pick.clone());
         self.error = None;
         self.menu = None;
         self.shell.perform(command, cx);
+        // The session's page opens now, not once the daemon answered (#1579).
+        let starting = crate::shell::Starting {
+            project: self.project.clone(),
+            place,
+            message: self.attached.message(cx).trim().to_owned(),
+            machine: self.shell.machine().map(str::to_owned),
+        };
+        let shell = (*self.shell).clone();
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| shell.starting(starting, window, cx))
+                .ok();
+        });
         cx.notify();
     }
 

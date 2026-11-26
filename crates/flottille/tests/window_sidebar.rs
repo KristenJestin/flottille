@@ -1122,7 +1122,12 @@ fn a_session_becoming_active_slides_to_the_top_and_stays_selected(cx: &mut TestA
         "the selection stays where the user put it"
     );
     assert!(
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()),
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some_and(
+            |p| !p
+                .read(cx)
+                .id()
+                .starts_with(flottille_window::shell::STARTING)
+        )),
         "and its page stays open"
     );
 }
