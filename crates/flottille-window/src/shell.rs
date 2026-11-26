@@ -3337,7 +3337,7 @@ impl Shell {
             false => self.hidden.retain(|hidden| hidden != name),
         }
         self.rearrange(window, cx);
-        self.hidden_changed(cx);
+        self.hidden_changed(window, cx);
         // This machine's own daemon keeps it, whichever machine's page is in front.
         self.perform_here(Command::HideProject {
             name: name.to_owned(),
@@ -3347,13 +3347,59 @@ impl Shell {
 
     /// What follows the list of hidden projects besides the sidebar: what the switcher finds, and
     /// Settings' list.
-    fn hidden_changed(&mut self, cx: &mut Context<Self>) {
+    fn hidden_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let read = self.snapshot.clone();
         let hidden = self.hidden.clone();
         self.switcher
             .update(cx, |switcher, cx| switcher.set_snapshot(&read, &hidden, cx));
         let section = self.settings.read(cx).hidden().clone();
         section.update(cx, |section, cx| section.set(hidden, cx));
+        self.leave_hidden_page(window, cx);
+    }
+
+    /// The page of a project this machine hides is not left in front, with no row in the sidebar:
+    /// the next shown project's page opens, or none when none is shown (as a removal does).
+    fn leave_hidden_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.pages_shown() || self.front.is_some() {
+            return;
+        }
+        let on = match &self.selected {
+            Some(
+                Selection::Project(name)
+                | Selection::ProjectSettings(name)
+                | Selection::Spec { project: name, .. },
+            ) => name.clone(),
+            _ => return,
+        };
+        if self.is_hidden(&on) {
+            let next = self.first_shown();
+            self.show_next(next, window, cx);
+        }
+    }
+
+    /// The first project of this machine's list that it does not hide.
+    fn first_shown(&self) -> Option<String> {
+        self.snapshot
+            .projects
+            .iter()
+            .find(|p| !self.is_hidden(&p.name))
+            .map(|p| p.name.clone())
+    }
+
+    /// The page of `next` opens, or an empty one when there is none.
+    fn show_next(&mut self, next: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        match next {
+            Some(next) => self.select(Selection::Project(next), window, cx),
+            None => {
+                self.selected = None;
+                self.project_settings = None;
+                self.spec_page = None;
+                self.main.update(cx, |main, cx| {
+                    main.set_spec_page(None);
+                    main.show(Page::Empty, None, None, None, cx)
+                });
+            }
+        }
     }
 
     /// The rows again from the snapshot held, as the projects are now to be shown.
@@ -3663,7 +3709,7 @@ impl Shell {
                 let moved = std::mem::replace(&mut self.arrangement, now) != self.arrangement;
                 if std::mem::replace(&mut self.by_machine, by_machine) != by_machine || hid {
                     self.rearrange(window, cx);
-                    self.hidden_changed(cx);
+                    self.hidden_changed(window, cx);
                 } else if moved {
                     self.show_arrangement(cx);
                 }
@@ -4020,7 +4066,7 @@ impl Shell {
                     if self.hidden != hidden {
                         self.hidden = hidden;
                         self.rearrange(window, cx);
-                        self.hidden_changed(cx);
+                        self.hidden_changed(window, cx);
                     }
                 }
                 Err(why) => {
@@ -4031,7 +4077,7 @@ impl Shell {
                         false => {}
                     }
                     self.rearrange(window, cx);
-                    self.hidden_changed(cx);
+                    self.hidden_changed(window, cx);
                     gpui_design_system::toast(
                         gpui_design_system::Toast::failure(match hide {
                             true => "Not hidden",
@@ -4046,7 +4092,7 @@ impl Shell {
                 if self.hidden != hidden {
                     self.hidden = hidden;
                     self.rearrange(window, cx);
-                    self.hidden_changed(cx);
+                    self.hidden_changed(window, cx);
                 }
             }
             Outcome::HiddenRead(None) => {}
@@ -4330,7 +4376,7 @@ impl Shell {
                     let next = match self.answering.clone() {
                         None => {
                             self.snapshot.projects.retain(|p| p.name != project);
-                            self.snapshot.projects.first().map(|p| p.name.clone())
+                            self.first_shown()
                         }
                         Some(machine) => self
                             .copies
@@ -4341,19 +4387,9 @@ impl Shell {
                                 read.projects.first().map(|p| p.name.clone())
                             }),
                     };
-                    match (self.pages_shown(), next) {
-                        (false, _) => {}
-                        // The machine in front's own project of that name.
-                        (true, Some(next)) => self.select(Selection::Project(next), window, cx),
-                        (true, None) => {
-                            self.selected = None;
-                            self.project_settings = None;
-                            self.spec_page = None;
-                            self.main.update(cx, |main, cx| {
-                                main.set_spec_page(None);
-                                main.show(Page::Empty, None, None, None, cx)
-                            });
-                        }
+                    // The machine in front's own project of that name.
+                    if self.pages_shown() {
+                        self.show_next(next, window, cx);
                     }
                 }
             }
@@ -5789,6 +5825,7 @@ impl Shell {
             // One section for each machine, each with the projects it has and its own sessions.
             for home in &snapshot.homes {
                 let mut nodes = Vec::new();
+                let mut hid = 0;
                 for project in snapshot
                     .projects
                     .iter()
@@ -5850,8 +5887,9 @@ impl Shell {
                             )
                         });
                     }
-                    if !hidden.contains(&project.name) {
-                        nodes.push(node.clone());
+                    match hidden.contains(&project.name) {
+                        true => hid += 1,
+                        false => nodes.push(node.clone()),
                     }
                     machine_projects.insert(key, node);
                 }
@@ -5867,6 +5905,7 @@ impl Shell {
                         gone.insert(key, node);
                     }
                 }
+                let nodes_empty = nodes.is_empty();
                 let section = self.sections.remove(&home.machine).unwrap_or_else(|| {
                     let this = this.clone();
                     let open = self
@@ -5881,7 +5920,10 @@ impl Shell {
                 if section.read(cx).home() != home || section.read(cx).projects(cx) != nodes {
                     section.update(cx, |section, cx| section.set(home.clone(), nodes, cx));
                 }
-                section_nodes.push(section.clone());
+                // A machine whose projects are all hidden has no section: it folds away with them.
+                if !(nodes_empty && hid > 0) {
+                    section_nodes.push(section.clone());
+                }
                 sections.insert(home.machine.clone(), section);
             }
         } else {
@@ -6115,13 +6157,8 @@ impl Shell {
     fn reshow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected.clone() {
             None => {
-                let first = self
-                    .snapshot
-                    .projects
-                    .iter()
-                    .find(|p| !self.is_hidden(&p.name));
-                if let Some(first) = first {
-                    self.select(Selection::Project(first.name.clone()), window, cx);
+                if let Some(first) = self.first_shown() {
+                    self.select(Selection::Project(first), window, cx);
                 }
             }
             Some(selection) => {
@@ -7131,14 +7168,10 @@ impl Shell {
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
             Some(Selection::Settings | Selection::Services | Selection::WhatsNew) | None => None,
         }
-        .or_else(|| {
-            let first = self
-                .snapshot
-                .projects
-                .iter()
-                .find(|p| !self.is_hidden(&p.name));
-            first.map(|p| p.name.clone())
-        });
+        // A hidden project's page can be open (a notification opens it), and no session starts
+        // there.
+        .filter(|project| !self.is_hidden(project))
+        .or_else(|| self.first_shown());
         if let Some(project) = project {
             self.open(Selection::Project(project.clone()), window, cx);
             if let Some(composer) = self.composer_of(&project).cloned() {

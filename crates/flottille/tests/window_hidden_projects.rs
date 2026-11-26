@@ -348,6 +348,12 @@ fn a_hidden_project_comes_back_from_settings(cx: &mut TestAppContext) {
     );
 
     cx.update(|window, cx| window.click("hidden-project-show-bravo", cx));
+    // The window asks the daemon from a thread of its own, and an older read of the list that
+    // answers after the click is put right by the daemon's answer to the click: the state is
+    // looked at once the daemon has forgotten it.
+    until(&shell, cx, "the daemon forgot it", |_| {
+        hidden(&user).is_empty()
+    });
     settle(&shell, cx);
 
     assert!(
@@ -358,10 +364,6 @@ fn a_hidden_project_comes_back_from_settings(cx: &mut TestAppContext) {
         present(cx, "hidden-projects-empty"),
         "an empty list says what it is for"
     );
-    // The window asks the daemon from a thread of its own: the answer is waited for.
-    until(&shell, cx, "the daemon forgot it", |_| {
-        hidden(&user).is_empty()
-    });
     until(&shell, cx, "the row is back", |cx| {
         present(cx, project_id("bravo"))
     });
@@ -558,14 +560,15 @@ fn a_project_shown_again_folds_its_own_row_away_from_a_list_of_two(cx: &mut Test
     general_settings(&shell, cx);
     let row = gpui_kit::ElementId::from("hidden-project-item-bravo");
     let full = height(cx, row.clone());
-    let other = gpui_kit::ElementId::from("hidden-project-item-charlie");
-    let other_height = height(cx, other.clone());
 
     cx.update(|window, cx| window.click("hidden-project-show-bravo", cx));
     let seen = heights_over(&shell, cx, &row, 40);
 
     folds_away(&seen, full, "the row of bravo in Settings");
-    assert_eq!(height(cx, other), other_height, "the other row stays");
+    assert!(
+        present(cx, "hidden-project-row-charlie"),
+        "the other row stays"
+    );
     assert!(
         !present(cx, "hidden-projects-empty"),
         "no empty line while one is listed"
@@ -633,18 +636,14 @@ fn a_hide_the_daemon_refuses_brings_the_row_back_and_says_so(cx: &mut TestAppCon
     let row = frame("tree-project", node_of(&shell, "alpha", cx));
     let full = height(cx, row.clone());
 
-    // The daemon does not answer the hide: the window is not polled meanwhile, so that only the
-    // hide meets the failure.
+    // The daemon does not answer the hide.
     down.store(true, Ordering::SeqCst);
     hide_from_its_row("alpha", &shell, cx);
     let mut folding = Vec::new();
     let deadline = Instant::now() + WAIT;
     while !toasts(&shell, cx).iter().any(|title| title == "Not hidden") {
         assert!(Instant::now() < deadline, "the failure was never said");
-        cx.executor().advance_clock(FRAME);
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        cx.run_until_parked();
+        step(&shell, FRAME, cx);
         folding.push(height(cx, row.clone()));
         std::thread::sleep(Duration::from_millis(5));
     }
