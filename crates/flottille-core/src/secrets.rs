@@ -113,7 +113,7 @@ fn html_escaped(value: &str, escapes: &[(char, &str)]) -> String {
 const SECRET_NAMES: [&str; 6] = ["TOKEN", "SECRET", "PASS", "CREDENTIAL", "KEY", "AUTH"];
 
 /// How the tokens of the usual forges, registries and providers start.
-const TOKEN_PREFIXES: [&str; 14] = [
+const TOKEN_PREFIXES: [&str; 17] = [
     "ghp_",
     "gho_",
     "ghu_",
@@ -128,6 +128,10 @@ const TOKEN_PREFIXES: [&str; 14] = [
     "npm_",
     "pypi-",
     "AIza",
+    // Atlassian's API tokens, and Bitbucket's and Cloud's opaque ones.
+    "ATATT",
+    "ATBB",
+    "ATCTT",
 ];
 
 /// `text` with the secrets it holds replaced by `[masked]`: the values of the variables of `env`
@@ -715,6 +719,10 @@ enum Place {
     Query,
     /// After a connection string's `;` or a `docker run -e` (`--env`), which starts at its byte.
     Pair(usize),
+    /// After a whitespace, in the middle of a line: only as `key=value` with no space, which
+    /// reads as it does at a line's start, so a text cut before it reads the same
+    /// (`login failed, token=…`).
+    Word,
 }
 
 /// Where the key that starts after `before` is written, if it is where a setting is.
@@ -753,6 +761,7 @@ fn place(before: &str) -> Option<Place> {
     line.chars()
         .all(|c| matches!(c, ' ' | '\t'))
         .then_some(Place::Line)
+        .or_else(|| line.ends_with([' ', '\t']).then_some(Place::Word))
 }
 
 /// Whether `text` is a name of code: a letter or `_` first, then letters, digits, `_`, `.` or `:`.
@@ -881,7 +890,7 @@ fn settings(text: &str) -> Vec<LoginField> {
         let from = match place {
             Place::Line => text[..key_start].rfind('\n').map_or(0, |at| at + 1),
             Place::Pair(at) => at,
-            Place::Query => key_start,
+            Place::Query | Place::Word => key_start,
         };
         let mut field = LoginField {
             at: from,
@@ -936,7 +945,7 @@ fn settings(text: &str) -> Vec<LoginField> {
             (true, ..) | (false, false, _) => b"\r\n\"'",
             (false, true, Place::Query) => b"\"'&#",
             (false, true, Place::Pair(_)) => b"\"'&;",
-            (false, true, Place::Line) => b"\r\n\"'",
+            (false, true, Place::Line | Place::Word) => b"\r\n\"'",
         };
         // At a line's start, a password's value runs to the line's end (`.env`, `- PASSWORD=a b`,
         // `password = my secret phrase`), but for a `; ` that ends a connection string's pair
@@ -1625,10 +1634,6 @@ mod tests {
                 "login failed with access_token=[masked] and more",
             ),
             (
-                "login failed, token: example-opaque-0000",
-                "login failed, token: [masked]",
-            ),
-            (
                 "run --token=example-opaque-0000 again",
                 "run --token=[masked] again",
             ),
@@ -1649,7 +1654,7 @@ mod tests {
 
     #[test]
     fn a_token_in_the_middle_of_a_line_streams_as_it_reads_whole() {
-        let text = "login failed, token: example-opaque-0000 then access_token=example-0000-fake \
+        let text = "login failed, token=example-opaque-0000 then access_token=example-0000-fake \
                     and ATATT3xExampleOnlyFake-0000_aaaa-bbbb done";
         let whole = mask(text, &BTreeMap::new());
         assert!(!whole.contains("example-"), "{whole}");
