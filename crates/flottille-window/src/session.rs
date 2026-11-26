@@ -8885,12 +8885,15 @@ impl Render for SessionRail {
                         .take(count)
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
-                                let agent = self.agents.iter().find(|a| a.id == id)?;
                                 last = id.clone();
-                                Some(
-                                    agent_row(agent, &lines_of(&id), None, window, cx)
-                                        .into_any_element(),
-                                )
+                                match self.agents.iter().find(|a| a.id == id) {
+                                    Some(agent) => Some(
+                                        agent_row(agent, &lines_of(&id), None, window, cx)
+                                            .into_any_element(),
+                                    ),
+                                    // An ended child of another machine, of the pilot.
+                                    None => ended_remote_row(&id, window, cx),
+                                }
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
