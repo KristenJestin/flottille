@@ -1772,6 +1772,20 @@ mod tests {
     use flottille_core::workspace::{Base, Workspace, Worktree};
 
     #[test]
+    fn a_runner_s_full_is_taken_and_no_other_role_s() {
+        // A runner is the user: the mode of its tree is taken as it is, Full included.
+        assert_eq!(mode_taken("full", Role::Runner), GateMode::Full);
+        assert_eq!(mode_taken("auto", Role::Runner), GateMode::Auto);
+        assert_eq!(mode_taken("ask", Role::Runner), GateMode::Ask);
+        // A device of another role stays bounded by it.
+        assert_eq!(mode_taken("full", Role::Controller), GateMode::Auto);
+        assert_eq!(mode_taken("full", Role::Viewer), GateMode::Auto);
+        assert_eq!(mode_taken("ask", Role::Controller), GateMode::Ask);
+        // A word no machine sends is no mode of its own.
+        assert_eq!(mode_taken("root", Role::Runner), GateMode::Auto);
+    }
+
+    #[test]
     fn a_refusal_before_waiting_is_never_answered_as_waiting() {
         // The user there answered between the caller's two writes: its answer came first.
         for (decided, said) in [
