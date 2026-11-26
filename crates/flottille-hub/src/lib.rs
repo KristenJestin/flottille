@@ -150,6 +150,12 @@ struct Stored {
     /// name, which the hub cannot read (`flottille_link::Sealed`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     shared: Vec<Sealed>,
+    /// The copies a machine found void and the hub dropped, a name and the copy's time, one per
+    /// name: a machine whose list is behind still counts the device inside and gives the copy
+    /// again, which the hub keeps no more, so that two machines do not drop and give it in turn.
+    /// A newer value of the name clears it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dropped: Vec<(String, u64)>,
 }
 
 pub struct Hub<C: Clock = SystemClock> {
@@ -539,8 +545,8 @@ impl<C: Clock> Hub<C> {
 
     /// A value of all machines sealed by a member's machine, kept when it is the latest of its
     /// name (a copy of the same time replaces it when it is sealed for a machine more: a machine
-    /// sealed it again for a machine added since), of a known name (`SHARED_NAMES`) and no later
-    /// than the hub's clock allows. The hub reads its name, its time and its signature, never the
+    /// sealed it again for a machine added since), newer than a copy of its name the hub dropped
+    /// (`unshare`), of a known name (`SHARED_NAMES`) and no later than the hub's clock allows. The hub reads its name, its time and its signature, never the
     /// value.
     pub fn share(&mut self, sealed: Sealed) -> Result<bool, HubError> {
         let members = self
@@ -559,6 +565,14 @@ impl<C: Clock> Hub<C> {
             return Err(refused(
                 "this value is dated later than the hub's clock allows",
             ));
+        }
+        let name = sealed.name.clone();
+        let dropped = &self.stored.dropped;
+        if dropped
+            .iter()
+            .any(|(kept, at)| *kept == name && *at >= sealed.at)
+        {
+            return Ok(false);
         }
         let shared = &mut self.stored.shared;
         match shared.iter().position(|kept| kept.name == sealed.name) {
@@ -586,6 +600,7 @@ impl<C: Clock> Hub<C> {
             }
             None => shared.push(sealed),
         }
+        self.stored.dropped.retain(|(kept, _)| *kept != name);
         self.stored.setup_code = None;
         write(&self.file, &self.stored)?;
         Ok(true)
@@ -594,7 +609,8 @@ impl<C: Clock> Hub<C> {
     /// The copy of `name` sealed at `at` dropped, as `machine` asks: it found it void, the device
     /// that signed the change inside having left the members or become a viewer. The hub, which
     /// cannot open it, takes a member's machine at its word, as it takes the copies it seals; a
-    /// viewer's is refused. Whether a copy was dropped: none when the hub keeps another by then.
+    /// viewer's is refused. The hub remembers the drop, and keeps that copy, or an older one, no
+    /// more. Whether a copy was dropped: none when the hub keeps another by then.
     pub fn unshare(&mut self, machine: &PublicKey, name: &str, at: u64) -> Result<bool, HubError> {
         let member = self
             .checked
@@ -612,6 +628,9 @@ impl<C: Clock> Hub<C> {
             return Ok(false);
         };
         shared.remove(kept);
+        let dropped = &mut self.stored.dropped;
+        dropped.retain(|(kept, _)| kept != name);
+        dropped.push((name.to_owned(), at));
         self.stored.setup_code = None;
         write(&self.file, &self.stored)?;
         Ok(true)
@@ -667,6 +686,7 @@ impl<C: Clock> Hub<C> {
                 .cloned()
                 .collect(),
             shared: self.stored.shared.clone(),
+            dropped: self.stored.dropped.clone(),
             members,
         };
         write(&self.file, &stored)?;

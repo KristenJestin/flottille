@@ -2145,7 +2145,11 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
   removed by its list, or a viewer) tells the hub to drop it (`{"ask": {"kind": "unshare", "name",
   "at"}}`, #1500), so that a value of another device's is given again and a machine paired since
   gets it; the hub, which cannot open the copy, takes a member's machine at its word, as it takes
-  the copies it seals, and refuses a viewer's. A hub of before says nothing of it in its welcome
+  the copies it seals, and refuses a viewer's. The hub remembers each copy it dropped (its name
+  and time, one per name, in its state file) and keeps that copy, or an older one, no more: a
+  machine whose list is behind still counts the device inside and gives it again, and the two
+  machines would otherwise drop and give it in turn. A newer value is kept as ever, and clears
+  it. A hub of before says nothing of it in its welcome
   (`unshare`), and is asked nothing: its copy stays, refused by every machine, until a newer one
   replaces it. A machine whose list does not know the device yet leaves the copy.
   Neither the request's five minutes nor its nonce is checked again: a machine off for a week takes
