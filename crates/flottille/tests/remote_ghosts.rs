@@ -365,7 +365,10 @@ fn a_machine_no_longer_a_runner_writes_no_ghost() {
 
     // The hub's host makes the server a viewer: its link stays up, but a viewer lists no session
     // and says nothing that is kept, as `took_sessions` and `took_offers` already refuse it.
-    hub.make_viewer("server");
+    hub.with_hub(|hub| {
+        hub.change_role("server", flottille_link::Role::Viewer)
+            .unwrap()
+    });
     pc.wait_until("pc sees the server a viewer", |seen| {
         seen["machines"].as_array().is_some_and(|machines| {
             machines
