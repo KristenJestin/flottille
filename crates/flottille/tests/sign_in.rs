@@ -724,6 +724,61 @@ fn a_failed_sign_in_says_what_the_program_said() {
 }
 
 #[test]
+fn a_failed_sign_in_never_says_an_address_or_a_code() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    // What a program prints for the dialog, on its error output too (gh does), then why it failed.
+    let said = "Open https://id.example.test/device?code=XYZW\n\
+                one-time code: ABCD-1234\n\
+                Error: the sign-in needs a terminal";
+    user.sign_in_script("gh", json!({"signed_in": false, "sign_in": {"fail": said}}));
+
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
+    });
+    let failed = changed_to(&user, "gh", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("Error: the sign-in needs a terminal"),
+        "{failed}"
+    );
+    for never in ["id.example.test", "XYZW", "ABCD-1234", "one-time code"] {
+        assert!(!why.contains(never), "{never}: {failed}");
+    }
+}
+
+#[test]
+fn a_failed_sign_in_never_repeats_the_code_the_user_pasted() {
+    const PASTED: &str = "pasted-code-of-a-test-0042";
+    let user = User::new().with_sign_in_programs(&["claude"]);
+    // The code is refused, and the program repeats it in its error, as some do.
+    user.sign_in_script(
+        "claude",
+        json!({"signed_in": false, "sign_in": {"accepts": "another-code", "echo_refused": true}}),
+    );
+    user.call("signin.start", json!({"program": "claude"}))
+        .unwrap();
+
+    user.call("signin.code", json!({"program": "claude", "code": PASTED}))
+        .unwrap();
+
+    eventually("claude's sign-in failed", || {
+        changed_to(&user, "claude", "failed").is_some()
+    });
+    let failed = changed_to(&user, "claude", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(why.contains("Error: the sign-in was refused"), "{failed}");
+    assert!(!why.contains(PASTED), "{failed}");
+    assert!(
+        !events(&user)
+            .iter()
+            .any(|event| event.to_string().contains(PASTED)),
+        "an event holds the pasted code"
+    );
+}
+
+#[test]
 fn a_failed_sign_in_says_only_the_last_lines_it_said() {
     let user = User::new().with_sign_in_programs(&["gh"]);
     let lines: Vec<String> = (1..=8).map(|n| format!("line {n} of the error")).collect();

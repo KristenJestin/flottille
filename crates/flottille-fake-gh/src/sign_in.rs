@@ -11,7 +11,7 @@
 //! - `approve` and `refuse`, written by the test: a sign-in that waits for the user's browser ends
 //!   signed in once `approve` is there, refused once `refuse` is (60 s at most).
 //!
-//! The script's `sign_in` shapes the flow: `{"address", "code", "asks_code", "accepts", "fail"}`.
+//! The script's `sign_in` shapes the flow: `{"address", "code", "asks_code", "accepts", "fail", "echo_refused"}`.
 //! With `fail`, the fake says that text on its error output and ends with 1 at once, as a program
 //! that cannot sign in without a terminal does (#1529). The
 //! address and the code are invented ones by default; with `asks_code: true` the fake reads the
@@ -75,9 +75,14 @@ pub fn login(dir: &Path, script: &Value, args: &[String], say: impl FnOnce(&str,
         if !rest.is_empty() {
             record(dir, json!({"after": rest}));
         }
-        flow["accepts"]
+        let accepted = flow["accepts"]
             .as_str()
-            .is_none_or(|accepts| accepts == pasted)
+            .is_none_or(|accepts| accepts == pasted);
+        if !accepted && flow["echo_refused"] == true {
+            // Some programs say the code they refused in their error.
+            eprintln!("Error: the code {pasted} is not valid\nError: the sign-in was refused");
+        }
+        accepted
     } else {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
