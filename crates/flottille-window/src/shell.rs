@@ -1063,22 +1063,30 @@ impl Shell {
                     })
             });
         }
-        if let Some(read) = self.machines.read(cx).machines() {
-            let launched = crate::model::remote_agents(read);
-            if cx
-                .try_global::<crate::model::RemoteAgents>()
-                .is_none_or(|now| now.0 != launched)
-            {
-                cx.set_global(crate::model::RemoteAgents(launched));
-                cx.refresh_windows();
-            }
-        }
+        self.share_remote_agents(cx);
         // The sessions on other machines, or their state, may have changed: their rows follow.
         if read && let Some(last) = self.read.clone() {
             let merged = self.with_elsewhere(last, cx);
             if merged != self.snapshot {
                 self.show(merged, window, cx);
             }
+        }
+    }
+
+    /// What the pages read of the launches on other machines, less those the user is closing: a
+    /// launch whose machine is off stays in the list until it is back, but leaves every row at once.
+    fn share_remote_agents(&self, cx: &mut Context<Self>) {
+        let Some(read) = self.machines.read(cx).machines() else {
+            return;
+        };
+        let mut launched = crate::model::remote_agents(read);
+        launched.retain(|remote| !self.closing.contains(&remote.key));
+        if cx
+            .try_global::<crate::model::RemoteAgents>()
+            .is_none_or(|now| now.0 != launched)
+        {
+            cx.set_global(crate::model::RemoteAgents(launched));
+            cx.refresh_windows();
         }
     }
 
@@ -1547,6 +1555,7 @@ impl Shell {
         };
         self.closing.insert(session);
         self.remote.close(there.machine, there.agent);
+        self.share_remote_agents(cx);
         if let Some(last) = self.read.clone() {
             let merged = self.with_elsewhere(last, cx);
             self.show(merged, window, cx);
@@ -1574,6 +1583,7 @@ impl Shell {
             (Some(why), _) => {
                 self.closing
                     .remove(&crate::model::elsewhere_id(&machine, &agent));
+                self.share_remote_agents(cx);
                 if let Some(last) = self.read.clone() {
                     let merged = self.with_elsewhere(last, cx);
                     self.show(merged, window, cx);
