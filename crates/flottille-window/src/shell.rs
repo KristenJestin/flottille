@@ -391,8 +391,8 @@ pub struct Shell {
     /// How many connections each other machine's bell links made, and how many reads of its
     /// ended sessions were started: what a test counts of what is asked there.
     asked_there: HashMap<String, (Arc<std::sync::atomic::AtomicUsize>, usize)>,
-    /// The pages of other machines' sessions last shown, one a machine, still following their
-    /// session: coming back shows it at once.
+    /// The pages of the sessions last shown, the one shown and the one left before it on each
+    /// machine, still following their session: coming back shows it at once.
     kept_pages: HashMap<String, Entity<SessionPage>>,
     /// Whether the machine of the page shown said anything since it was shown, and the wait past
     /// which its page says it does not answer.
@@ -2948,16 +2948,19 @@ impl Shell {
             page.set_subject(subject, cx);
             page.set_blocked(blocked, cx);
         });
+        let left = self.session_page.clone();
         self.chose_on(&page, id, cx);
         self.session_page = Some(page.clone());
-        // Another machine's, it enters staggered, as a page that shows up, and it is kept,
-        // following its session: one a machine.
+        // Another machine's, it enters staggered, as a page that shows up.
         if agent != *id {
             page.update(cx, |page, cx| page.arrive(cx));
-            self.kept_pages
-                .retain(|_, kept| kept.read(cx).machine() != machine.as_deref());
-            self.kept_pages.insert(id.clone(), page.clone());
         }
+        // It is kept, following its session, with the one left before it on the same machine,
+        // this one too: opened again, a session shows what its page holds at once.
+        self.kept_pages.retain(|_, kept| {
+            kept.read(cx).machine() != machine.as_deref() || left.as_ref() == Some(kept)
+        });
+        self.kept_pages.insert(id.clone(), page.clone());
         // The rail's Run a task lists the project's tasks.
         let project = page.read(cx).project().to_owned();
         self.actions.send(Command::Tasks { project });
