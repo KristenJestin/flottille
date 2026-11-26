@@ -1584,7 +1584,13 @@ fn the_machines_marks_keep_their_colour_whichever_machine_is_in_front(cx: &mut T
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
     until(&shell, cx, "the server's session is open", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     settle(&shell, cx);
     let after = colour_of(&icon);
@@ -1637,7 +1643,13 @@ fn opening_a_session_of_another_machine_leaves_the_sidebar_as_it_is(cx: &mut Tes
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
     until(&shell, cx, "the server's session is open", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     settle(&shell, cx);
     assert_eq!(sidebar_as_drawn(&shell, cx), before);
@@ -1660,7 +1672,13 @@ fn a_project_only_this_machine_has_stays_listed_while_another_machine_is_in_fron
     });
     cx.update(|window, cx| window.click(session_id(&row), cx));
     until(&shell, cx, "the server's session is open", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     settle(&shell, cx);
     assert!(present(cx, project_id("notes")));
@@ -1691,7 +1709,13 @@ fn no_skeleton_in_the_sidebar_when_a_machine_comes_in_front(cx: &mut TestAppCont
             "the sidebar said it loads"
         );
         assert!(present(cx, project_id("notes")));
-        if shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()) {
+        if shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        }) {
             break;
         }
         assert!(Instant::now() < deadline, "the page never came");

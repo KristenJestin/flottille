@@ -3,7 +3,7 @@
 //! again only the parts a change touches.
 
 use crate::glyphs;
-use crate::state::AgentState;
+use crate::state::{AgentState, Status};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +97,43 @@ impl Layout {
             Self::Narrow
         }
     }
+}
+
+/// A session the user asked from a project's composer: its page opens at once, standing in for
+/// it until the daemon answers (#1579).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Starting {
+    pub project: String,
+    pub place: Place,
+    pub message: String,
+    /// The machine whose project it is (`None`: this one).
+    pub machine: Option<String>,
+}
+
+/// The stand-in's id prefix: no agent of the daemon has it.
+pub const STARTING: &str = "starting:";
+
+/// The toast of a session the daemon did not start.
+pub const NOT_STARTED: &str = "The session did not start";
+
+/// The title of a session being started, as the daemon gives one before its agent names it: the
+/// first line of its message.
+fn title_of(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("New session")
+        .to_owned()
+}
+
+/// A session the daemon started that its list does not have yet.
+struct JustStarted {
+    row: String,
+    title: String,
+    project: String,
+    place: Place,
+    status: Entity<Status>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -424,6 +461,10 @@ pub struct Shell {
     /// The sessions started from another machine's project page, until that machine lists them:
     /// their rows, and so their pages, are there at once.
     started_there: Vec<(String, crate::machines::Listed)>,
+    /// How many pages of a session being started were made: each stand-in has its own id.
+    starts_made: u64,
+    /// The session the daemon just started, until the list has it: its page stays meanwhile.
+    just_started: Option<JustStarted>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -1013,6 +1054,8 @@ impl Shell {
             choosing: None,
             answering: None,
             started_there: Vec::new(),
+            starts_made: 0,
+            just_started: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -1130,17 +1173,15 @@ impl Shell {
         gone.sort();
         gone.dedup();
         for machine in gone {
-            // Its page shown: this machine's pages come in front, on no page.
+            // Its page shown: this machine's pages come in front, on its first project.
             if self.front.as_deref() == Some(machine.as_str()) {
                 self.bring(None, window, cx);
                 self.selected = None;
                 self.session_page = None;
                 self.project_settings = None;
                 self.spec_page = None;
-                self.main.update(cx, |main, cx| {
-                    main.set_spec_page(None);
-                    main.show(Page::Empty, None, None, None, cx)
-                });
+                // The first of this machine's projects, never a page that says there is none.
+                self.show_next(self.first_shown(), window, cx);
             }
             if let Some(pages) = self.sides.remove(&Some(machine.clone())) {
                 let settings = pages.settings.read(cx);
@@ -2879,7 +2920,10 @@ impl Shell {
             if open.read(cx).subject() != subject.as_ref() {
                 open.update(cx, |open, cx| open.set_subject(subject, cx));
             }
-            open.update(cx, |open, cx| open.set_title(title, cx));
+            open.update(cx, |open, cx| {
+                open.set_title(title, cx);
+                open.set_status(status.clone(), cx);
+            });
             return Some(open);
         }
         // Shown before, it followed its session meanwhile: it is shown at once.
@@ -2917,14 +2961,20 @@ impl Shell {
                     folder,
                 )
             }
-            // Its row is all this window holds of it: its page reads the rest there.
-            None => (
-                self.snapshot.elsewhere(id)?.project.clone(),
-                None,
-                None,
-                None,
-                None,
-            ),
+            // Its row is all this window holds of it: its page reads the rest there. One just
+            // started is not listed yet: its page opens all the same (#1579).
+            None => match &self.just_started {
+                Some(started) if started.row == *id => {
+                    (started.project.clone(), None, None, None, None)
+                }
+                _ => (
+                    self.snapshot.elsewhere(id)?.project.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            },
         };
         let opened = Opened {
             id: agent.clone(),
@@ -2942,32 +2992,8 @@ impl Shell {
         let asks = self
             .actions_of(machine.as_deref())
             .unwrap_or_else(|| self.actions.clone());
-        let reply = match self.replies.get(id) {
-            Some(reply) => reply.clone(),
-            None => {
-                let (shell, project) = (this.clone(), opened.project.clone());
-                let (session, its, on) = (agent.clone(), asks.clone(), machine.clone());
-                let extensions = self.extensions.downgrade();
-                let reply = cx.new(|cx| {
-                    Reply::new(shell, its, on, session, project, window, cx)
-                        .with_extensions(extensions)
-                });
-                self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
-                    let session = reply.read(cx).session().to_owned();
-                    shell.say_draft(&session, cx);
-                }));
-                self.replies.insert(id.clone(), reply.clone());
-                // What this machine keeps of its draft comes back as an `Outcome::Draft`, said of
-                // the machine whose actions asked (the keeper always asks this one).
-                asks.send(Command::DraftRead {
-                    key: DraftKey::Session {
-                        machine: machine.clone(),
-                        agent: agent.clone(),
-                    },
-                });
-                reply
-            }
-        };
+        let project = opened.project.clone();
+        let reply = self.reply_for(id, &agent, &project, machine.clone(), window, cx);
         if self.providers.known {
             let mode = reply.read(cx).mode.clone();
             let chosen = self.providers.judge.is_some();
@@ -3007,6 +3033,57 @@ impl Shell {
         let project = page.read(cx).project().to_owned();
         self.actions.send(Command::Tasks { project });
         Some(page)
+    }
+
+    /// The composer of the session of the row `row`, its root `agent` on `machine`: made the first
+    /// time, its draft read then.
+    fn reply_for(
+        &mut self,
+        row: &str,
+        agent: &str,
+        project: &str,
+        machine: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Reply> {
+        if let Some(reply) = self.replies.get(row) {
+            return reply.clone();
+        }
+        let asks = self
+            .actions_of(machine.as_deref())
+            .unwrap_or_else(|| self.actions.clone());
+        let (shell, project) = (cx.entity().downgrade(), project.to_owned());
+        let (session, its, on) = (agent.to_owned(), asks.clone(), machine.clone());
+        let extensions = self.extensions.downgrade();
+        let reply = cx.new(|cx| {
+            Reply::new(shell, its, on, session, project, window, cx).with_extensions(extensions)
+        });
+        self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
+            let session = reply.read(cx).session().to_owned();
+            shell.say_draft(&session, cx);
+        }));
+        self.replies.insert(row.to_owned(), reply.clone());
+        // What this machine keeps of its draft comes back as an `Outcome::Draft`, said of the
+        // machine whose actions asked (the keeper always asks this one).
+        asks.send(Command::DraftRead {
+            key: DraftKey::Session {
+                machine,
+                agent: agent.to_owned(),
+            },
+        });
+        reply
+    }
+
+    /// The page shown that stands in for a session of `project` being started on the machine
+    /// that answers.
+    fn standing_in(&self, project: &str, cx: &App) -> Option<Entity<SessionPage>> {
+        let page = self.session_page.as_ref()?;
+        let read = page.read(cx);
+        (read.is_starting(cx)
+            && read.project() == project
+            && read.machine() == self.answering.as_deref()
+            && self.selected == Some(Selection::Session(read.id().to_owned())))
+        .then(|| page.clone())
     }
 
     /// The agent the history shows on the session page `page`, of the row `row`.
@@ -3891,6 +3968,9 @@ impl Shell {
                 agent,
                 title,
             } => {
+                let place = self
+                    .composer_of(&project)
+                    .and_then(|composer| composer.read(cx).sending_place());
                 if let Some(composer) = self.composer_of(&project).cloned()
                     && let Some(used) =
                         composer.update(cx, |composer, cx| composer.started(window, cx))
@@ -3906,7 +3986,7 @@ impl Shell {
                             machine,
                             crate::machines::Listed {
                                 id: agent.clone(),
-                                title,
+                                title: title.clone(),
                                 project: project.clone(),
                                 state: "running".to_owned(),
                                 exchanged_at: now_ms(),
@@ -3918,8 +3998,32 @@ impl Shell {
                         row
                     }
                 };
+                // The page that stood in for it is the session's now, the same page (#1579).
+                let standing = self.standing_in(&project, cx);
+                let from_project = self.selected == Some(Selection::Project(project.clone()));
                 // Only on the page shown: one of a machine not in front is not left meanwhile.
-                if self.pages_shown() && self.selected == Some(Selection::Project(project)) {
+                let opens = self.pages_shown() && (standing.is_some() || from_project);
+                if opens {
+                    let status = cx.new(|_| Status::new(AgentState::Running));
+                    self.just_started = Some(JustStarted {
+                        row: row.clone(),
+                        title: title.clone(),
+                        project: project.clone(),
+                        place: place.flatten(),
+                        status: status.clone(),
+                    });
+                    if let Some(page) = standing {
+                        let machine = page.read(cx).machine().map(str::to_owned);
+                        let reply = self.reply_for(&row, &agent, &project, machine, window, cx);
+                        let dock = page.read(cx).ask_dock().clone();
+                        page.update(cx, |page, cx| {
+                            page.set_title(&title, cx);
+                            page.started(&agent, reply, status, cx)
+                        });
+                        self.docks.insert(row.clone(), dock);
+                        self.kept_pages.insert(row.clone(), page.clone());
+                        self.chose_on(&page, &row, cx);
+                    }
                     if self.answering.is_some()
                         && let Some(last) = self.read.clone()
                     {
@@ -3932,6 +4036,16 @@ impl Shell {
             Outcome::NotStarted { project, why } => {
                 if let Some(composer) = self.composer_of(&project).cloned() {
                     composer.update(cx, |composer, cx| composer.not_started(&why, cx));
+                }
+                // The page that stood in for it says why, where the answer would have come.
+                if self.pages_shown()
+                    && let Some(page) = self.standing_in(&project, cx)
+                {
+                    page.update(cx, |page, cx| page.not_started(&why, cx));
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure(NOT_STARTED).detail(why),
+                        cx,
+                    );
                 }
             }
             Outcome::ImageRead {
@@ -6142,10 +6256,19 @@ impl Shell {
             self.forms
                 .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         }
-        let listed = |id: &String| {
+        let projects = !snapshot.projects.is_empty();
+        self.main
+            .update(cx, |main, cx| main.set_projects(projects, cx));
+        let in_list = |id: &String| {
             snapshot.sessions.iter().any(|s| &s.id == id)
                 || snapshot.elsewhere.iter().any(|s| &s.id == id)
         };
+        // Listed, a session just started is a session as any other.
+        if self.just_started.as_ref().is_some_and(|s| in_list(&s.row)) {
+            self.just_started = None;
+        }
+        let just = self.just_started.as_ref().map(|s| s.row.clone());
+        let listed = |id: &String| in_list(id) || just.as_ref() == Some(id);
         self.replies.retain(|id, _| listed(id));
         self.docks.retain(|id, _| listed(id));
         self.kept_pages.retain(|id, _| listed(id));
@@ -7195,10 +7318,110 @@ impl Shell {
                         place: session.place.clone(),
                         status: page.status().clone(),
                     },
+                    // The page of a session being started, and of one just started that the list
+                    // does not have yet: it is the session's page, never an empty one (#1579).
+                    (None, None, Some(page)) if page.is_starting(cx) => Page::Session {
+                        id: id.clone(),
+                        title: page.title().to_owned(),
+                        place: page.place().clone(),
+                        status: page.status().clone(),
+                    },
+                    (None, None, _)
+                        if let Some(started) =
+                            self.just_started.as_ref().filter(|s| s.row == *id) =>
+                    {
+                        Page::Session {
+                            id: id.clone(),
+                            title: started.title.clone(),
+                            place: started.place.clone(),
+                            status: started.status.clone(),
+                        }
+                    }
                     _ => Page::Empty,
                 }
             }
         }
+    }
+
+    /// A session was asked from the project page's composer: its page opens now, standing in for
+    /// it with its place and its message, until the daemon answers (#1579). Asked again from that
+    /// page, the same page waits again.
+    pub fn starting(&mut self, starting: Starting, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(page) = self.session_page.clone()
+            && page.read(cx).start(cx).is_some()
+            && page.read(cx).project() == starting.project
+            && page.read(cx).machine() == starting.machine.as_deref()
+        {
+            page.update(cx, |page, cx| page.start_asked(cx));
+            return;
+        }
+        if !self.pages_shown()
+            || self.selected != Some(Selection::Project(starting.project.clone()))
+            || starting.machine != self.front
+        {
+            return;
+        }
+        self.starts_made += 1;
+        let id = format!("{STARTING}{}", self.starts_made);
+        let folder = match &starting.place {
+            None => self
+                .pages()
+                .projects
+                .iter()
+                .find(|p| p.name == starting.project)
+                .map(|p| p.folder.clone()),
+            Some(name) => self
+                .pages()
+                .workspaces
+                .iter()
+                .find(|w| w.project == starting.project && &w.name == name)
+                .map(|w| w.folder.clone()),
+        };
+        let opened = Opened {
+            id: id.clone(),
+            title: title_of(&starting.message),
+            project: starting.project.clone(),
+            place: starting.place.clone(),
+            folder: folder.map(Into::into),
+            started_by: None,
+            led_by: None,
+            child_of: None,
+        };
+        let this = cx.entity().downgrade();
+        let machine = starting.machine.clone();
+        let asks = self
+            .actions_of(machine.as_deref())
+            .unwrap_or_else(|| self.actions.clone());
+        let (on, its, project) = (machine.clone(), asks.clone(), starting.project.clone());
+        let (shell, session) = (this.clone(), id.clone());
+        let reply = cx.new(|cx| {
+            let mut reply = Reply::new(shell, its, on, session, project, window, cx);
+            reply.hold_sends();
+            reply
+        });
+        let status = cx.new(|_| Status::new(AgentState::Running));
+        let dock = cx.new(|_| crate::ask_dock::AskDock::new());
+        let (follow, layout) = (self.follow.clone(), self.layout);
+        let message = starting.message.clone();
+        let page = cx.new(|cx| {
+            SessionPage::starting(
+                this,
+                opened,
+                &message,
+                status,
+                reply,
+                dock,
+                follow,
+                (machine, asks),
+                layout,
+                cx,
+            )
+        });
+        let providers = self.providers.clone();
+        page.update(cx, |page, cx| page.set_providers(&providers, cx));
+        self.session_page = Some(page);
+        // Not a place of the history: the session's page is, once it started.
+        self.show_selection(Selection::Session(id), window, cx);
     }
 
     /// "New session": the composer that starts one is on the project page.

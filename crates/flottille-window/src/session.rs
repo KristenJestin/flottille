@@ -66,7 +66,7 @@ use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
-use crate::loading::{ConversationLoading, Opening};
+use crate::loading::{ConversationLoading, Opening, SessionStarting, Start};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
@@ -424,6 +424,11 @@ pub struct SessionPage {
     /// It was opened by a switch to its machine: its sections enter, one after the other.
     arrived: bool,
     renders: usize,
+    /// What its sections' entrances are kept by: the id it was made with, which a session that
+    /// started in place of its stand-in keeps.
+    key: String,
+    /// A session being started: what stands in over the conversation until it shows the message.
+    starting: Option<Entity<SessionStarting>>,
     _status: Subscription,
     _run_drawer: Subscription,
     _reply: Subscription,
@@ -478,6 +483,51 @@ pub fn older_tools(root: Option<&TreeAgent>) -> Option<&'static str> {
 impl SessionPage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        shell: WeakEntity<Shell>,
+        opened: Opened,
+        status: Entity<Status>,
+        reply: Entity<Reply>,
+        ask_dock: Entity<crate::ask_dock::AskDock>,
+        follow: Follow,
+        asked: (Option<String>, crate::actions::Actions),
+        layout: Layout,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut page = Self::build(
+            shell, opened, status, reply, ask_dock, follow, asked, layout, cx,
+        );
+        page.relink();
+        page.sync_pending(cx);
+        page
+    }
+
+    /// The page of a session being started, before the daemon answered: it stands in for it
+    /// with `message`, follows nothing, and becomes the session's once it started
+    /// ([`SessionPage::started`]). Its sections enter, as a page that shows up.
+    #[allow(clippy::too_many_arguments)]
+    pub fn starting(
+        shell: WeakEntity<Shell>,
+        opened: Opened,
+        message: &str,
+        status: Entity<Status>,
+        reply: Entity<Reply>,
+        ask_dock: Entity<crate::ask_dock::AskDock>,
+        follow: Follow,
+        asked: (Option<String>, crate::actions::Actions),
+        layout: Layout,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut page = Self::build(
+            shell, opened, status, reply, ask_dock, follow, asked, layout, cx,
+        );
+        let this = cx.entity().downgrade();
+        page.starting = Some(cx.new(|_| SessionStarting::new(message, this)));
+        page.arrived = true;
+        page
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
         shell: WeakEntity<Shell>,
         opened: Opened,
         status: Entity<Status>,
@@ -570,9 +620,10 @@ impl SessionPage {
             subject_shown: None,
             about_key: None,
             about_pull: None,
+            key: String::new(),
+            starting: None,
         };
-        page.relink();
-        page.sync_pending(cx);
+        page.key = page.opened.id.clone();
         page
     }
 
@@ -686,6 +737,133 @@ impl SessionPage {
 
     pub fn project(&self) -> &str {
         &self.opened.project
+    }
+
+    pub fn title(&self) -> &str {
+        &self.opened.title
+    }
+
+    pub fn place(&self) -> &Place {
+        &self.opened.place
+    }
+
+    /// It stands in for a session the daemon has not started yet.
+    pub fn is_starting(&self, cx: &gpui_kit::App) -> bool {
+        self.starting.as_ref().is_some_and(|starting| {
+            matches!(starting.read(cx).start(), Start::Asked | Start::Refused(_))
+        })
+    }
+
+    /// Where the start it stands in for is, while it stands in for one.
+    pub fn start(&self, cx: &gpui_kit::App) -> Option<Start> {
+        self.starting
+            .as_ref()
+            .map(|starting| starting.read(cx).start().clone())
+    }
+
+    /// The session is asked again: it waits for the daemon's answer again.
+    pub fn start_asked(&mut self, cx: &mut Context<Self>) {
+        if let Some(starting) = &self.starting {
+            starting.update(cx, |starting, cx| starting.set(Start::Asked, cx));
+        }
+    }
+
+    /// The daemon did not start the session: the page says why, the message kept.
+    pub fn not_started(&mut self, why: &str, cx: &mut Context<Self>) {
+        if let Some(starting) = &self.starting {
+            let why = why.to_owned();
+            starting.update(cx, |starting, cx| starting.set(Start::Refused(why), cx));
+        }
+    }
+
+    /// "Try again": the project's composer, which kept the message, sends it again.
+    pub fn start_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self
+            .shell
+            .upgrade()
+            .and_then(|shell| shell.read(cx).composer_of(&self.opened.project).cloned());
+        if let Some(composer) = composer {
+            // The composer asks the shell, which may hand this page the answer: not from here.
+            window.defer(cx, move |window, cx| {
+                composer.update(cx, |composer, cx| composer.send(window, cx));
+            });
+        }
+    }
+
+    /// "Edit message": the project's page, whose composer kept the message.
+    pub fn edit_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (shell, project) = (self.shell.clone(), self.opened.project.clone());
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| {
+                    shell.open(crate::shell::Selection::Project(project), window, cx)
+                })
+                .ok();
+        });
+    }
+
+    /// The daemon started the session it stood in for: the page is that session's, the root
+    /// `agent` written to by `reply`, its state `status`. What it shows stays until its
+    /// conversation shows the message.
+    pub fn started(
+        &mut self,
+        agent: &str,
+        reply: Entity<Reply>,
+        status: Entity<Status>,
+        cx: &mut Context<Self>,
+    ) {
+        self.opened.id = agent.to_owned();
+        self.shown = agent.to_owned();
+        self.conversation
+            .update(cx, |view, _| view.id = agent.to_owned());
+        let page = cx.entity().downgrade();
+        let opened = self.opened.clone();
+        self.rail = cx.new(|cx| SessionRail::new(page.clone(), agent.to_owned(), &opened, cx));
+        let rail = self.rail.clone();
+        self.drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail));
+        let asks = self.asks.clone();
+        self.queued =
+            cx.new(|_| QueuedMessages::new(self.shell.clone(), agent.to_owned()).asking(asks));
+        self._reply = cx.observe(&reply, |this, _, cx| this.sync_pending(cx));
+        self.reply = reply;
+        self.set_status(status, cx);
+        if let Some(starting) = &self.starting {
+            starting.update(cx, |starting, cx| starting.set(Start::Started, cx));
+        }
+        self.relink();
+        self.sync_pending(cx);
+        cx.notify();
+    }
+
+    /// The model of the session's row, once it has one.
+    pub fn set_status(&mut self, status: Entity<Status>, cx: &mut Context<Self>) {
+        if self.status == status {
+            return;
+        }
+        self._status = cx.observe(&status, |this, status, cx| {
+            let needs_you = status.read(cx).state() == AgentState::NeedsYou;
+            if this.needs_you != needs_you {
+                this.needs_you = needs_you;
+                cx.notify();
+            }
+        });
+        self.needs_you = status.read(cx).state() == AgentState::NeedsYou;
+        self.status = status;
+        cx.notify();
+    }
+
+    /// A session started in place of its stand-in: once its conversation shows something (the
+    /// message, or why it failed) or could not be read, what stood in fades out.
+    fn shown_started(&mut self, read_failed: bool, cx: &mut Context<Self>) {
+        let Some(starting) = &self.starting else {
+            return;
+        };
+        if *starting.read(cx).start() != Start::Started {
+            return;
+        }
+        if read_failed || !self.conversation.read(cx).rows.is_empty() {
+            starting.update(cx, |starting, cx| starting.set(Start::Shown, cx));
+        }
     }
 
     /// The rail's Run a task: the task starts as the user's in the session's place, and its row
@@ -1685,8 +1863,10 @@ impl SessionPage {
                 self.sync_command_cards(cx);
                 self.note_activity(cx);
                 self.fetch_pictures(cx);
+                self.shown_started(false, cx);
             }
             SessionUpdate::HistoryFailed(why) => {
+                self.shown_started(true, cx);
                 // A page asked for says why at its line; the first read, in place of the rows.
                 match self.pages > 1 {
                     true => self
@@ -1719,6 +1899,7 @@ impl SessionPage {
                 ) {
                     self.fetch_pictures(cx);
                 }
+                self.shown_started(false, cx);
             }
             SessionUpdate::Requests(requests) => {
                 self.requests = requests.into_iter().map(|r| (r.number, r)).collect();
@@ -2763,6 +2944,7 @@ impl Render for SessionPage {
                     .min_h_0()
                     .relative()
                     .child(self.conversation.clone())
+                    .children(self.starting.clone())
                     .child(self.room.watch(crate::ask_dock::Part::Conversation)),
             )
             // A review says what it waits for under its steps, and the line folds away with it.
@@ -2841,7 +3023,7 @@ impl SessionPage {
     fn section(&self, index: usize, section: impl IntoElement) -> AnyElement {
         match self.arrived {
             true => enter(
-                ElementId::Name(format!("session-section-{}-{index}", self.opened.id).into()),
+                ElementId::Name(format!("session-section-{}-{index}", self.key).into()),
                 index,
                 section,
             )
@@ -10217,6 +10399,12 @@ impl Reply {
     /// The agent it writes to: the session's root.
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// The composer of a session being started: nothing is sent from it, there is no agent yet
+    /// to take it. The session's own composer takes its place once it started.
+    pub fn hold_sends(&mut self) {
+        self.sending = true;
     }
 
     pub fn field(&self) -> &Entity<TextareaState> {

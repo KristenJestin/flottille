@@ -4418,7 +4418,13 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     type_task("Please launch a helper", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
 
     let page = session_page(&shell, cx);
@@ -4578,7 +4584,13 @@ fn the_pickers_start_on_the_project_s_default_then_on_the_last_ones_used(cx: &mu
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     open_project(&shell, "borealis", cx);
     let borealis = composer_of(&shell, "borealis", cx);
@@ -4625,7 +4637,13 @@ fn choosing_provider_model_effort_and_mode_in_the_new_controls_starts_the_sessio
     type_task("Look around", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -4767,7 +4785,13 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -4864,7 +4888,13 @@ fn start_from_composer(
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -4966,7 +4996,13 @@ fn a_project_model_its_provider_is_known_not_to_offer_is_said_instead_of_dropped
     cx.update(|window, cx| window.click("composer-field", cx));
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -5388,7 +5424,13 @@ fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_r
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -5415,7 +5457,13 @@ fn a_session_started_with_nothing_picked_names_the_model_shown(cx: &mut TestAppC
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -5470,7 +5518,13 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -5559,7 +5613,13 @@ fn picking_the_default_model_s_row_while_the_project_has_its_own_model_names_the
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        })
     });
     let page = session_page(&shell, cx);
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
@@ -6978,7 +7038,13 @@ fn open_row(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.click(session_id(id), cx));
     until(shell, cx, "the session's page is shown", |cx| {
         selected(shell, cx) == Some(Selection::Session(id.into()))
-            && shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+            && shell.read_with(cx, |s, cx| {
+                s.main().read(cx).session_page().is_some_and(|p| {
+                    !p.read(cx)
+                        .id()
+                        .starts_with(flottille_window::shell::STARTING)
+                })
+            })
     });
     settle(cx);
 }
@@ -7026,7 +7092,14 @@ fn back_from_a_session_shows_the_project_page_and_forward_shows_the_session_agai
         selected(&shell, cx),
         Some(Selection::Session(ids[0].clone()))
     );
-    assert!(shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()));
+    assert!(
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some_and(
+            |p| !p
+                .read(cx)
+                .id()
+                .starts_with(flottille_window::shell::STARTING)
+        ))
+    );
     // Nothing is left to go forward to, nor back before the first page.
     forward(cx);
     assert_eq!(

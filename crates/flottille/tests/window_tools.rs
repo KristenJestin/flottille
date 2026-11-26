@@ -459,8 +459,13 @@ fn a_reload_from_the_command_line_during_a_turn_says_it_reloads_after_this_turn(
     settle(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     until(&shell, cx, "the page says it waits again", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
-            && reloads_after_turn(&shell, cx)
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|p| {
+                !p.read(cx)
+                    .id()
+                    .starts_with(flottille_window::shell::STARTING)
+            })
+        }) && reloads_after_turn(&shell, cx)
     });
     at_rest(cx);
     assert_eq!(

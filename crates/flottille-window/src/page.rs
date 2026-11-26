@@ -81,6 +81,9 @@ pub struct MainArea {
     restarted: bool,
     /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
     read: bool,
+    /// Whether the list read has projects: an empty page then says nothing of them, it is a page
+    /// not known yet, which loads (#1579).
+    projects: bool,
     /// Whether Flottille can be reached: when it cannot, the page does not wait for it.
     reachable: bool,
     /// A page of another machine waits for that machine's first read: its pane is a skeleton.
@@ -112,6 +115,7 @@ impl MainArea {
             restarting: false,
             restarted: false,
             read: false,
+            projects: false,
             reachable: true,
             reading: false,
             machine_silent: None,
@@ -157,6 +161,14 @@ impl MainArea {
     pub fn set_reachable(&mut self, reachable: bool, cx: &mut Context<Self>) {
         if self.reachable != reachable {
             self.reachable = reachable;
+            cx.notify();
+        }
+    }
+
+    /// Whether the list read has projects.
+    pub fn set_projects(&mut self, projects: bool, cx: &mut Context<Self>) {
+        if self.projects != projects {
+            self.projects = projects;
             cx.notify();
         }
     }
@@ -328,7 +340,10 @@ impl Render for MainArea {
         let not_answering = self
             .not_answering
             .filter(|_| !holding.as_ref().is_some_and(|holding| holding.offline));
-        let waiting = (!self.read || self.reading)
+        // "No project yet." is said only of a list read empty: with projects, a page not known
+        // yet is loading, never empty.
+        let unknown = self.page == Page::Empty && self.projects;
+        let waiting = (!self.read || self.reading || unknown)
             && self.reachable
             && not_answering.is_none()
             && self.machine_silent.is_none();
@@ -344,7 +359,7 @@ impl Render for MainArea {
         let page = div().flex_1().min_h_0().relative();
         let page = match &self.page {
             // Nothing read yet: what there is is not known.
-            Page::Empty if !self.read => page,
+            Page::Empty if !self.read || self.projects => page,
             Page::Empty => page.child(
                 div()
                     .size_full()
