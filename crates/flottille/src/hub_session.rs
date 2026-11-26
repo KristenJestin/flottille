@@ -168,19 +168,20 @@ impl Control {
             let name = name.clone();
             let emit = self.emit.clone();
             runtime.spawn(async move {
-                match tokio::time::timeout(ASK_WAIT, asker.ask(Ask::Share { sealed })).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        eprintln!("flottille daemon: the hub did not keep {name}: {error}");
-                        if said {
-                            let why = match error {
-                                ControlError::Refused { reason, .. } => reason,
-                                error => error.to_string(),
-                            };
-                            emit("settings.share_refused", json!({"name": name, "why": why}));
-                        }
-                    }
-                    Err(_) => eprintln!("flottille daemon: the hub did not answer for {name}"),
+                // Whether the hub answered, and why it kept nothing.
+                let (answered, why) =
+                    match tokio::time::timeout(ASK_WAIT, asker.ask(Ask::Share { sealed })).await {
+                        Ok(Ok(())) => return,
+                        Ok(Err(ControlError::Refused { reason, .. })) => (true, reason),
+                        Ok(Err(error)) => (false, error.to_string()),
+                        Err(_) => (false, "the hub did not answer in time".to_owned()),
+                    };
+                eprintln!("flottille daemon: the hub did not keep {name}: {why}");
+                if said {
+                    emit(
+                        "settings.share_refused",
+                        json!({"name": name, "why": why, "answered": answered}),
+                    );
                 }
             });
         }
