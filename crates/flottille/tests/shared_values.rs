@@ -767,7 +767,9 @@ fn a_file_that_cannot_be_read_is_said_in_its_row_alone() {
     share(&pc, "pc", "rules", "Shared rules.");
     eventually("the server has all machines' values", || {
         let all = &shared(&server)["all"];
-        all["tool_results.limit"] == "6000" && all["appearance.shade"] == "light"
+        all["tool_results.limit"] == "6000"
+            && all["appearance.shade"] == "light"
+            && all["rules"] == "Shared rules."
     });
     let config = server.user.path("config/flottille");
     std::fs::write(config.join("tool-results.toml"), "limit = [\n").unwrap();
