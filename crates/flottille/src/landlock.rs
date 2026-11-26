@@ -27,6 +27,7 @@ const RULE_PATH_BENEATH: libc::c_uint = 1;
 const EXECUTE: u64 = 1 << 0;
 const WRITE_FILE: u64 = 1 << 1;
 const READ_FILE: u64 = 1 << 2;
+const READ_DIR: u64 = 1 << 3;
 const REFER: u64 = 1 << 13;
 const TRUNCATE: u64 = 1 << 14;
 const IOCTL_DEV: u64 = 1 << 15;
@@ -177,6 +178,9 @@ fn confine<'a>(
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
+    // The copies of the user's git settings the daemon took at its start (`pushed::take`), in its
+    // runtime folder: read-only, as the settings themselves are to every command it confines.
+    let copies = crate::pushed::copies();
     // The browsers' profiles (`browsers.rs`), emptied in the namespace with the runtime folders.
     let browsers = crate::browsers::base().filter(|base| base.is_dir());
     // The private mount namespace first: the runtime folders and, unless it is given X11,
@@ -194,6 +198,7 @@ fn confine<'a>(
                 .iter()
                 .filter_map(|folder| folder.path().canonicalize().ok())
                 .chain(browser.map(Path::to_owned))
+                .chain(copies.clone())
                 .chain(
                     crate::ssh_agent::socket()
                         .filter(|_| lent)
@@ -222,8 +227,10 @@ fn confine<'a>(
             pinned.sort();
             pinned.dedup();
             pinned.sort_by_key(|folder| folder.components().count());
+            let mut read_only = crate::pushed::read_only();
+            read_only.extend(copies.clone());
             crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
-                .protecting(&pinned, &crate::pushed::read_only())?
+                .protecting(&pinned, &read_only)?
                 .giving(crate::ssh_owned::copies())
         })
         .flatten();
@@ -282,20 +289,27 @@ fn confine<'a>(
     let lent = crate::ssh_agent::socket()
         .filter(|_| connecting && lent)
         .and_then(|socket| CString::new(socket.as_os_str().as_bytes()).ok());
+    let read: Vec<CString> = copies
+        .and_then(|folder| CString::new(folder.as_os_str().as_bytes()).ok())
+        .into_iter()
+        .collect();
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
     unsafe {
-        command.pre_exec(move || restrict(rights, &paths, &open, scoped, &ways, lent.as_deref()))
+        command.pre_exec(move || {
+            restrict(rights, &paths, &open, &read, scoped, &ways, lent.as_deref())
+        })
     }
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, the `ways` to
-/// the SSH agent's socket without the right to connect, the `lent` socket with that right alone,
-/// then the child bound to them and to the `scoped` scopes.
+/// In the child: every path a rule with every right, `open` one without `REFER`, `read` one to
+/// read alone, the `ways` to the SSH agent's socket without the right to connect, the `lent`
+/// socket with that right alone, then the child bound to them and to the `scoped` scopes.
 fn restrict(
     rights: u64,
     paths: &[CString],
     open: &[CString],
+    read: &[CString],
     scoped: u64,
     ways: &[CString],
     lent: Option<&CStr>,
@@ -319,6 +333,10 @@ fn restrict(
         .iter()
         .map(|path| (path.as_c_str(), rights))
         .chain(open.iter().map(|path| (path.as_c_str(), rights & !REFER)))
+        .chain(
+            read.iter()
+                .map(|path| (path.as_c_str(), READ_FILE | READ_DIR)),
+        )
         .chain(
             ways.iter()
                 .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX)),
@@ -435,7 +453,15 @@ mod tests {
         // SAFETY: as in `confined_but`.
         unsafe {
             command.pre_exec(move || {
-                restrict(rights, &paths, std::slice::from_ref(&open), 0, &[], None)
+                restrict(
+                    rights,
+                    &paths,
+                    std::slice::from_ref(&open),
+                    &[],
+                    0,
+                    &[],
+                    None,
+                )
             })
         };
         command.status().unwrap().success()
@@ -506,7 +532,15 @@ mod tests {
         // SAFETY: as in `confined_but`.
         unsafe {
             command.pre_exec(move || {
-                restrict(rights, &paths, std::slice::from_ref(&open), 0, &[], None)
+                restrict(
+                    rights,
+                    &paths,
+                    std::slice::from_ref(&open),
+                    &[],
+                    0,
+                    &[],
+                    None,
+                )
             })
         };
         let mut child = command.spawn().unwrap();

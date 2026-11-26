@@ -147,6 +147,9 @@ struct Setting {
 struct Taken {
     bytes: Vec<u8>,
     copy: PathBuf,
+    /// The files it includes, as git read them in it then (`include_paths`): its bytes never
+    /// change, and the confined git that reads them reads the copy only where the daemon gives it.
+    includes: Vec<String>,
 }
 
 /// A setting whose links were moved since the daemon's start, to a file [`settle`] judged sound.
@@ -280,11 +283,14 @@ fn take(settings: &mut [Setting], copies: &Path) {
         return;
     };
     for (at, setting) in settings.iter_mut().enumerate() {
-        if !std::fs::metadata(&setting.file).is_ok_and(|m| m.len() <= CONFIG_MAX)
-            || from_its_place(&setting.file)
-        {
+        if !std::fs::metadata(&setting.file).is_ok_and(|m| m.len() <= CONFIG_MAX) {
             continue;
         }
+        // What it includes, unknown where git could not read it: no copy.
+        let Some(listed) = includes_read(&setting.file).filter(|listed| !from_its_place(listed))
+        else {
+            continue;
+        };
         let Ok(bytes) = std::fs::read(&setting.file) else {
             continue;
         };
@@ -296,17 +302,23 @@ fn take(settings: &mut [Setting], copies: &Path) {
             .open(&copy)
             .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes));
         match written {
-            Ok(()) => setting.taken = Some(Taken { bytes, copy }),
+            Ok(()) => {
+                setting.taken = Some(Taken {
+                    bytes,
+                    copy,
+                    includes: listed.into_iter().map(|(_, value)| value).collect(),
+                })
+            }
             Err(error) => eprintln!("flottille daemon: cannot write {}: {error}", copy.display()),
         }
     }
 }
 
-/// Whether the git settings `file` name a file or a folder from its own place, which git reads
-/// from the folder that holds it: a relative `include.path` or `includeIf.<condition>.path`, a
-/// condition `gitdir:./`.
-fn from_its_place(file: &Path) -> bool {
-    includes_listed(file).iter().any(|(key, value)| {
+/// Whether git settings whose includes are `listed` name a file or a folder from their own place,
+/// which git reads from the folder that holds them: a relative `include.path` or
+/// `includeIf.<condition>.path`, a condition `gitdir:./`.
+fn from_its_place(listed: &[(String, String)]) -> bool {
+    listed.iter().any(|(key, value)| {
         let condition = key
             .strip_prefix("includeif.")
             .unwrap_or_default()
@@ -328,14 +340,14 @@ fn same_bytes(setting: &Setting, now: &Path) -> Option<PathBuf> {
         .then(|| taken.copy.clone())
 }
 
-/// Whether `file` is one of the copies of what the user's git settings held at the start.
-fn is_copy(found: &Found, file: &Path) -> bool {
-    found.settings.iter().any(|setting| {
-        setting
-            .taken
-            .as_ref()
-            .is_some_and(|taken| taken.copy == file)
-    })
+/// The folder of the copies of what the user's git settings held at the daemon's start, where it
+/// took one: given read-only to every command it confines (`landlock::confine`), which the
+/// runtime folder it is in is kept from, as they read the settings themselves.
+pub fn copies() -> Option<PathBuf> {
+    found()?
+        .settings
+        .iter()
+        .find_map(|setting| setting.taken.as_ref()?.copy.parent().map(Path::to_owned))
 }
 
 /// The paths every confined command has read-only: those found at the daemon's start, and the
@@ -1349,7 +1361,8 @@ fn git_unlent(found: &Found) -> Option<String> {
         Err(why) => return Some(why),
     };
     for (setting, file) in found.settings.iter().zip(&files) {
-        if !is_copy(found, file) {
+        let taken = setting.taken.as_ref().filter(|taken| taken.copy == *file);
+        if taken.is_none() {
             if changed(found, file).is_some() {
                 return Some(format!(
                     "{} is not the file the daemon found at its start (removed, or replaced), \
@@ -1362,7 +1375,17 @@ fn git_unlent(found: &Found) -> Option<String> {
             }
         }
         let mut seen = Vec::new();
-        if let Err(why) = included(file, found.home.as_deref(), &mut seen) {
+        // A copy's includes are those of the file it copied, judged as that file's.
+        let listed = match taken {
+            Some(taken) => included_from(
+                &setting.named,
+                &taken.includes,
+                found.home.as_deref(),
+                &mut seen,
+            ),
+            None => included(file, found.home.as_deref(), &mut seen),
+        };
+        if let Err(why) = listed {
             return Some(why);
         }
         for path in seen {
@@ -1403,7 +1426,17 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
             file.display()
         ));
     }
-    for value in include_paths(file) {
+    included_from(file, &include_paths(file), home, seen)
+}
+
+/// [`included`], of the include values `listed` that `file` holds.
+fn included_from(
+    file: &Path,
+    listed: &[String],
+    home: Option<&Path>,
+    seen: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for value in listed {
         let path = match value.strip_prefix("~/") {
             Some(rest) => match home {
                 Some(home) => home.join(rest),
@@ -1415,7 +1448,7 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
                     file.display()
                 ));
             }
-            None => file.parent().unwrap_or(Path::new("/")).join(&value),
+            None => file.parent().unwrap_or(Path::new("/")).join(value),
         };
         // Missing, git reads it as nothing: one made since the start is not protected, which
         // the judgement of each push finds (`git_unlent`).
@@ -1434,27 +1467,31 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
 /// The values of `include.path` and `includeIf.<condition>.path` in `file` itself, as git reads
 /// them (`git config --file`, not what they include).
 fn include_paths(file: &Path) -> Vec<String> {
-    includes_listed(file)
+    includes_read(file)
+        .unwrap_or_default()
         .into_iter()
         .map(|(_, value)| value)
         .collect()
 }
 
-/// [`include_paths`], each with its key (`includeif.gitdir:~/work/.path`).
-fn includes_listed(file: &Path) -> Vec<(String, String)> {
-    let listed = crate::git::start_read(&[
+/// [`include_paths`], each with its key (`includeif.gitdir:~/work/.path`); None where git could
+/// not read the file.
+fn includes_read(file: &Path) -> Option<Vec<(String, String)>> {
+    let listed = crate::git::start_listed(&[
         OsStr::new("config"),
         OsStr::new("--null"),
         OsStr::new("--file"),
         file.as_os_str(),
         OsStr::new("--get-regexp"),
         OsStr::new(r"^include(if\..*)?\.path$"),
-    ]);
-    listed
-        .split('\0')
-        .filter_map(|entry| entry.split_once('\n'))
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect()
+    ])?;
+    Some(
+        listed
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\n'))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+    )
 }
 
 /// The `ssh` a push signs in with, read for the repository at `folder`: the daemon's own
