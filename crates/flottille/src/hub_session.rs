@@ -118,9 +118,9 @@ impl Control {
 
     /// The user's change of values of all machines made on this machine, checked already: kept,
     /// then given to the hub now, or once a session to it is open again. Refused when a value
-    /// sealed would be larger than the hub keeps. Where it went: `given` to a hub open now,
-    /// `later` with none open, `old-hub` to a hub of before the values of all machines, which
-    /// keeps none.
+    /// sealed would be larger than the hub keeps. Where it went: `sent` to a hub open now, whose
+    /// refusal is said later (`settings.share_refused`), `later` with none open, `old-hub` to a
+    /// hub of before the values of all machines, which keeps none.
     pub(crate) fn share(&self, text: &str) -> Result<&'static str, String> {
         let (_, members) = self.checked()?;
         let changes = crate::shared::from_request(text, &members)?;
@@ -140,15 +140,16 @@ impl Control {
         let delivery = match self.asker.borrow().as_ref() {
             None => "later",
             Some(asker) if !asker.takes_shared() => "old-hub",
-            Some(_) => "given",
+            Some(_) => "sent",
         };
-        self.give(&members, &changed);
+        self.give(&members, &changed, true);
         Ok(delivery)
     }
 
     /// The values `names`, sealed for every machine of `members`, given to the hub while a session
     /// to one that keeps them is open; otherwise the next session gives them (`took_shared`).
-    fn give(&self, members: &Members, names: &[String]) {
+    /// `said`: the user's own change, whose refusal by the hub is said to them.
+    fn give(&self, members: &Members, names: &[String], said: bool) {
         let Some(asker) = self.asker.borrow().clone().filter(Asker::takes_shared) else {
             return;
         };
@@ -165,13 +166,22 @@ impl Control {
             };
             let asker = asker.clone();
             let name = name.clone();
+            let emit = self.emit.clone();
             runtime.spawn(async move {
-                match tokio::time::timeout(ASK_WAIT, asker.ask(Ask::Share { sealed })).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        eprintln!("flottille daemon: the hub did not keep {name}: {error}")
-                    }
-                    Err(_) => eprintln!("flottille daemon: the hub did not answer for {name}"),
+                // Whether the hub answered, and why it kept nothing.
+                let (answered, why) =
+                    match tokio::time::timeout(ASK_WAIT, asker.ask(Ask::Share { sealed })).await {
+                        Ok(Ok(())) => return,
+                        Ok(Err(ControlError::Refused { reason, .. })) => (true, reason),
+                        Ok(Err(error)) => (false, error.to_string()),
+                        Err(_) => (false, "the hub did not answer in time".to_owned()),
+                    };
+                eprintln!("flottille daemon: the hub did not keep {name}: {why}");
+                if said {
+                    emit(
+                        "settings.share_refused",
+                        json!({"name": name, "why": why, "answered": answered}),
+                    );
                 }
             });
         }
@@ -196,7 +206,31 @@ impl Control {
         if !changed.is_empty() {
             (self.emit)("settings.shared_changed", json!({"names": changed}));
         }
-        self.give(members, &again);
+        self.give(members, &again, false);
+        self.unshare(crate::shared::void(&hub, &self.key, members));
+    }
+
+    /// The hub's copies `void` dropped, as this machine asks a hub that takes it: a hub of before
+    /// it keeps them, refused by every machine, until a newer value replaces them.
+    fn unshare(&self, void: Vec<(String, u64)>) {
+        let Some(asker) = self.asker.borrow().clone().filter(Asker::takes_unshare) else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        for (name, at) in void {
+            let asker = asker.clone();
+            runtime.spawn(async move {
+                let unshare = Ask::Unshare {
+                    name: name.clone(),
+                    at,
+                };
+                if let Ok(Err(error)) = tokio::time::timeout(ASK_WAIT, asker.ask(unshare)).await {
+                    eprintln!("flottille daemon: the hub did not drop {name}: {error}");
+                }
+            });
+        }
     }
 
     /// What tells the hub the notices for the phones, while a session to a hub that takes them

@@ -122,6 +122,14 @@ pub enum Update {
         state: String,
         why: Option<String>,
     },
+    /// The hub refused a value of all machines the user changed, or did not answer
+    /// (`settings.share_refused`): its name, the reason and whether the hub answered, said as a
+    /// toast.
+    ShareRefused {
+        name: String,
+        why: String,
+        answered: bool,
+    },
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -685,6 +693,11 @@ fn settings_changed(event: &Event) -> Option<Update> {
         | "provider.judge_changed"
         | "extension.changed"
         | "connection.changed" => Update::SharedChanged,
+        "settings.share_refused" => Update::ShareRefused {
+            name: text("name").unwrap_or_default(),
+            why: text("why").unwrap_or_default(),
+            answered: event.data["answered"].as_bool().unwrap_or(true),
+        },
         "developer.changed" => Update::DeveloperChanged,
         "developer.reported" => Update::FindingsChanged,
         "workspaces_folder.changed" => Update::WorkspacesFolderChanged {
@@ -1334,6 +1347,33 @@ mod tests {
 
         drop(said);
         watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_share_the_hub_refuses_is_said_to_the_user() {
+        let refused = event(
+            "settings.share_refused",
+            json!({"name": "about.name", "why": "the hub cannot write", "answered": true}),
+        );
+        assert_eq!(
+            settings_changed(&refused),
+            Some(Update::ShareRefused {
+                name: "about.name".into(),
+                why: "the hub cannot write".into(),
+                answered: true,
+            })
+        );
+        let silent = event(
+            "settings.share_refused",
+            json!({"name": "about.name", "why": "the hub did not answer in time", "answered": false}),
+        );
+        assert!(matches!(
+            settings_changed(&silent),
+            Some(Update::ShareRefused {
+                answered: false,
+                ..
+            })
+        ));
     }
 
     #[test]

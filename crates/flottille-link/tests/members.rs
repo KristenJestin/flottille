@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use flottille_link::{
     Action, Change, ChangeHash, Colour, DeviceKey, HubKey, Icon, Keyring, KeyringError, ListError,
-    MANAGING_HEADROOM, MOST_CHANGES, MachineKey, MemberList, PublicKey, Role,
+    MANAGING_HEADROOM, MOST_CHANGES, MachineKey, MemberList, PublicKey, Request, Role, Sealed,
 };
 use zeroize::Zeroizing;
 
@@ -836,6 +836,26 @@ fn only_the_hub_pairs_a_device_or_changes_a_role() {
         hub_key(),
     );
     assert!(renamed_by_hub.check(&hub(), &hub()).is_err());
+}
+
+/// A copy of a value of all machines whose change inside a viewer signed is void: a viewer may
+/// not set one. A controller's is not.
+#[test]
+fn a_copy_a_viewer_signed_is_void() {
+    let (pc, pixel, tablet, list) = three();
+    let members = list.check(&pc.public(), &hub()).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let machine = MachineKey::load_or_make(&folder.path().join("remote")).unwrap();
+    let copy = |device: &DeviceKey| {
+        let params = serde_json::json!({"name": "Sam"});
+        let at = std::time::SystemTime::now();
+        let request = Request::sign(device, "share", "pc", "about.share", &params, at).unwrap();
+        let plain = serde_json::to_vec(&request).unwrap();
+        Sealed::seal("about.name", 7, &plain, &[machine.public()], &machine).unwrap()
+    };
+
+    assert!(copy(&tablet).is_void(&machine, &members));
+    assert!(!copy(&pixel).is_void(&machine, &members));
 }
 
 #[test]

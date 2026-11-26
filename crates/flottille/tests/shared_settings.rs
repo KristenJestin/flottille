@@ -12,6 +12,7 @@ use common::User;
 use flottille_link::DeviceKey;
 use remote::{Machine, TestHub, error_of, eventually, pair, pc_and_server, signed};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 const SAM: &str = "Sam";
 const NOTES: &str = "Backend developer, new to Rust. Answer short and direct.";
@@ -354,11 +355,114 @@ fn a_value_of_a_device_made_a_viewer_is_dropped_and_the_hub_goes_quiet() {
     });
 }
 
+/// A value whose device left the members is refused by every machine: the first machine that
+/// finds the hub's copy void asks the hub to drop it, so that the name is not held on the hub
+/// until someone sets it again.
+#[test]
+fn a_void_copy_leaves_the_hub_when_a_machine_says_so() {
+    let (hub, pc, server) = pc_and_server(User::new());
+    let laptop = Machine::new();
+    pair(&hub, &laptop, "laptop", "controller");
+    pc.wait_for_member("laptop", true);
+    server.wait_for_member("laptop", true);
+    let answer = pc.raw(&signed(
+        &laptop.device(),
+        "laptop-share",
+        "pc",
+        "about.share",
+        json!({"name": SAM}),
+    ));
+    assert!(answer["error"].is_null(), "{answer}");
+    eventually("the hub keeps the laptop's value", || {
+        hub_copy(&hub).contains("about.name")
+    });
+
+    hub.with_hub(|hub| hub.remove("laptop")).unwrap();
+
+    eventually("the hub's void copy is dropped", || {
+        !hub_copy(&hub).contains("about.name")
+    });
+    // Kept no more; the hub remembers the drop only, so that it is not given again.
+    let file: Value = serde_json::from_slice(&std::fs::read(hub.state_file()).unwrap()).unwrap();
+    assert!(!file["shared"].to_string().contains("about.name"), "{file}");
+    assert_eq!(file["dropped"][0][0], "about.name", "{file}");
+    // The name is free again: a change of a member's device reaches every machine.
+    share(&pc, "pc", json!({"name": "Alex"}));
+    until(&server, "the new name reaches the server", |about| {
+        about["name"] == "Alex"
+    });
+}
+
+/// The hub refuses a value it cannot write: the answer said it was sent, and the refusal reaches
+/// the user as `settings.share_refused`, which the window shows as a toast.
+#[test]
+fn a_share_the_hub_refuses_is_said_to_the_user() {
+    let (hub, pc, _server) = pc_and_server(User::new());
+    // The disk refuses the hub's state (a folder sits where its temporary file goes).
+    let blocked = hub
+        .state_file()
+        .with_file_name(format!(".hub.json.{}.new", std::process::id()));
+    std::fs::create_dir(&blocked).unwrap();
+
+    let shown = share(&pc, "pc", json!({"name": SAM}));
+
+    assert_eq!(shown["hub"], "sent", "{shown}");
+    let refused = refusal(&pc);
+    assert_eq!(refused["data"]["name"], "about.name", "{refused}");
+    let why = refused["data"]["why"].as_str().unwrap();
+    assert!(why.contains("cannot be written"), "{refused}");
+    std::fs::remove_dir(&blocked).unwrap();
+}
+
+/// The hub does not answer in time (busy past the daemon's wait): the answer said it was sent,
+/// and the user is told the hub did not answer, as a refusal is.
+#[test]
+fn a_share_the_hub_does_not_answer_is_said_to_the_user() {
+    let (hub, pc, _server) = pc_and_server(User::new());
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        // The hub's state held longer than the daemon waits for an answer.
+        scope.spawn(|| {
+            hub.with_hub(|_| {
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(12));
+            })
+        });
+        holding.recv().unwrap();
+
+        let shown = share(&pc, "pc", json!({"name": SAM}));
+
+        assert_eq!(shown["hub"], "sent", "{shown}");
+        let refused = refusal(&pc);
+        assert_eq!(refused["data"]["name"], "about.name", "{refused}");
+        let why = refused["data"]["why"].as_str().unwrap();
+        assert!(why.contains("did not answer"), "{refused}");
+    });
+}
+
+/// The `settings.share_refused` event `machine` emitted, once it did.
+fn refusal(machine: &Machine) -> Value {
+    let mut refused = Value::Null;
+    eventually("the refusal is said", || {
+        let events = machine
+            .user
+            .watch(&["--after", "0"])
+            .within(Duration::from_secs(1));
+        refused = events
+            .into_iter()
+            .find(|event| event["name"] == "settings.share_refused")
+            .unwrap_or_default();
+        !refused.is_null()
+    });
+    refused
+}
+
 #[test]
 fn the_answer_says_where_the_change_went() {
     let (mut hub, pc, _server) = pc_and_server(User::new());
 
-    assert_eq!(share(&pc, "pc", json!({"name": SAM}))["hub"], "given");
+    // Sent: what the hub answers comes later, said as `settings.share_refused` when it refuses.
+    assert_eq!(share(&pc, "pc", json!({"name": SAM}))["hub"], "sent");
 
     hub.stop();
     pc.wait_until("the hub is out of reach", |remote| {

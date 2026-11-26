@@ -812,6 +812,158 @@ fn a_copy_of_the_same_time_replaces_the_kept_one_only_when_it_adds_machines() {
     assert_eq!(hub.shared()[0].recipients().count(), 2);
 }
 
+/// While two machines see different member lists, each seals the same value for the machines it
+/// knows: a copy of the same time replaces the kept one only when it is sealed for every machine
+/// the kept one is, so that the copy does not swing between them.
+#[test]
+fn an_equal_time_copy_that_drops_a_recipient_replaces_nothing() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    let (server, laptop) = (machine_key(dir.path(), "s"), machine_key(dir.path(), "l"));
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |to: &[flottille_link::PublicKey]| {
+        Sealed::seal("about.name", START_MS, b"Sam", to, &machine).unwrap()
+    };
+    assert!(
+        hub.share(seal(&[machine.public(), server.public()]))
+            .unwrap()
+    );
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    // A machine more, but one less: neither kept nor written.
+    assert!(
+        !hub.share(seal(&[machine.public(), laptop.public()]))
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    let kept: Vec<_> = hub.shared()[0].recipients().copied().collect();
+    assert_eq!(kept, [machine.public(), server.public()]);
+    // Every machine of the kept copy and one more: kept.
+    let all = [machine.public(), server.public(), laptop.public()];
+    assert!(hub.share(seal(&all)).unwrap());
+    assert_eq!(hub.shared()[0].recipients().count(), 3);
+}
+
+/// A machine found the kept copy void: only a member's machine that is no viewer's drops it,
+/// and only the copy it names, of that time.
+#[test]
+fn a_void_copy_is_dropped_only_at_a_member_s_word_and_of_its_time() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let (machine, stranger) = (machine_key(dir.path(), "m"), machine_key(dir.path(), "x"));
+    with_machine(&mut hub, &pc, &machine);
+    let sealed = Sealed::seal(
+        "about.name",
+        START_MS,
+        b"Sam",
+        &[machine.public()],
+        &machine,
+    );
+    assert!(hub.share(sealed.unwrap()).unwrap());
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    let not_member = error(hub.unshare(&stranger.public(), "about.name", START_MS));
+    assert!(
+        not_member.contains("only a member's machine"),
+        "{not_member}"
+    );
+    // Another time, or another name: nothing dropped, nothing written.
+    assert!(
+        !hub.unshare(&machine.public(), "about.name", START_MS - 1)
+            .unwrap()
+    );
+    assert!(
+        !hub.unshare(&machine.public(), "about.notes", START_MS)
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    assert_eq!(hub.shared().len(), 1);
+
+    assert!(
+        hub.unshare(&machine.public(), "about.name", START_MS)
+            .unwrap()
+    );
+    assert!(hub.shared().is_empty());
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+    // Dropped already: nothing more is written.
+    assert!(
+        !hub.unshare(&machine.public(), "about.name", START_MS)
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+}
+
+/// A machine whose list is behind still counts the device inside a copy another machine
+/// dropped, and gives it again: the hub keeps the copy dropped, so that the two machines do not
+/// drop and give it again in turn. A newer value is kept as ever, and frees the name.
+#[test]
+fn a_dropped_copy_given_again_is_not_kept() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |at: u64, value: &[u8]| {
+        Sealed::seal("about.name", at, value, &[machine.public()], &machine).unwrap()
+    };
+    assert!(hub.share(seal(START_MS, b"Sam")).unwrap());
+    assert!(
+        hub.unshare(&machine.public(), "about.name", START_MS)
+            .unwrap()
+    );
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    // Given again, or an older copy: refused with its reason (the user who set it is told),
+    // neither kept nor written, and so not told to anyone.
+    for refused in [seal(START_MS, b"Sam"), seal(START_MS - 1, b"Old")] {
+        let why = hub.share(refused).unwrap_err().to_string();
+        assert!(why.contains("dropped"), "{why}");
+    }
+    assert!(hub.shared().is_empty());
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    // The hub remembers it across a start.
+    drop(hub);
+    let mut hub = open(&folder, &time);
+    assert!(hub.share(seal(START_MS, b"Sam")).is_err());
+    assert!(hub.shared().is_empty());
+
+    // A newer value is kept, and clears what the hub remembered of the drop.
+    assert!(hub.share(seal(START_MS + 1, b"Alex")).unwrap());
+    assert_eq!(hub.shared()[0].at, START_MS + 1);
+    let file = std::fs::read_to_string(folder.join("hub.json")).unwrap();
+    assert!(!file.contains("dropped"), "{file}");
+}
+
+/// A viewer's machine may not drop a value of all machines, as it may not set one.
+#[test]
+fn a_viewer_s_machine_drops_no_copy() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    let sealed = Sealed::seal(
+        "about.name",
+        START_MS,
+        b"Sam",
+        &[machine.public()],
+        &machine,
+    );
+    assert!(hub.share(sealed.unwrap()).unwrap());
+    hub.change_role("pc", Role::Viewer).unwrap();
+
+    let viewer = error(hub.unshare(&machine.public(), "about.name", START_MS));
+    assert!(viewer.contains("may only view"), "{viewer}");
+    assert_eq!(hub.shared().len(), 1);
+}
+
 #[test]
 fn a_value_later_than_the_hub_s_clock_is_refused() {
     let (dir, folder) = folder();

@@ -19,7 +19,8 @@
 //! The values of all machines (`Ask::Share`, `docs/remote.md`, "Settings for all machines") are
 //! kept, the latest of each name, as the machines sealed them: the hub checks the sealing
 //! machine's signature and never reads a value. A session that asked for them (`Ask::Shared`) is
-//! sent them whole, then again whenever one changes.
+//! sent them whole, then again whenever one changes. A copy a member's machine found void
+//! (`Ask::Unshare`) is dropped.
 //!
 //! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
 //! its proof is checked against the pair mode's secret, the device is paired, and its session is
@@ -725,6 +726,12 @@ fn handle<C: Clock>(
         // The values of all machines: only from a member's machine, and only a member's device
         // or machine hears them.
         Ask::Share { sealed } => match hub.share(sealed) {
+            Ok(true) => Ok(()),
+            Ok(false) => return Ok(()),
+            Err(error) => Err(error),
+        },
+        // A copy a member's machine found void: only it can open it.
+        Ask::Unshare { name, at } => match hub.unshare(device, &name, at) {
             Ok(true) => Ok(()),
             Ok(false) => return Ok(()),
             Err(error) => Err(error),

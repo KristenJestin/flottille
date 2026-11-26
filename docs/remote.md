@@ -2118,7 +2118,9 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
   at most a copy, of a name it knows (`SHARED_NAMES` in `flottille-link`: a setting shared later
   adds its own there), dated no later than its clock plus a request's five minutes (a time far
   ahead would hold the name for ever). A copy of the same time replaces the one kept only when it
-  is sealed for a machine more: the same value sealed again for the same machines is not written. It sends them whole to each session that asks for them
+  is sealed for every machine the kept one is and one more: the same value sealed again for the
+  same machines is not written, and while two machines see different member lists, a copy that
+  drops a machine does not swing the kept one between them (#1500). It sends them whole to each session that asks for them
   (`{"ask": {"kind": "shared"}}`), then again at each change (`{"shared": [...]}`); a hub of before
   says nothing of them in its welcome, and a machine asks it nothing. What the hub sees of them:
   their names, their times, which machines they are sealed for, and their size.
@@ -2129,8 +2131,18 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
   the device's signature inside, not the machine's that sealed it, which only lets the hub keep it.
 - **A device removed, or made a viewer**: each machine drops the values its device signed at the
   next list, and gives them to the hub no more; About you is then as if none were shared, until the
-  user changes it again. The hub's copy stays until a newer one replaces it, refused by every
-  machine that opens it.
+  user changes it again. The first machine that finds the hub's copy void (the device inside
+  removed by its list, or a viewer) tells the hub to drop it (`{"ask": {"kind": "unshare", "name",
+  "at"}}`, #1500), so that no machine is given a value of a device it no longer counts; the hub,
+  which cannot open the copy, takes a member's machine at its word, as it takes the copies it
+  seals, and refuses a viewer's. The hub remembers each copy it dropped (its name and time, one per
+  name, in its state file) and refuses that copy, or an older one, saying why (the user whose own
+  change it is sees it, as any refusal of the hub): a
+  machine whose list is behind still counts the device inside and gives it again, and the two
+  machines would otherwise drop and give it in turn. A newer value is kept as ever, and clears
+  it. A hub of before says nothing of it in its welcome
+  (`unshare`), and is asked nothing: its copy stays, refused by every machine, until a newer one
+  replaces it. A machine whose list does not know the device yet leaves the copy.
   Neither the request's five minutes nor its nonce is checked again: a machine off for a week takes
   the latest copy when it is back, and an older copy never replaces a newer one. **The latest of
   two changes wins**, by the time the device signed it (then by its signature, so that every
@@ -2138,8 +2150,10 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
 - **Each machine keeps the last copy it checked**, `remote/shared.json` (600), the user's signed
   requests themselves: with the hub out of reach its agents read what it last checked, and a change
   made meanwhile waits on the machine where it was made, given to the hub at the next session.
-  `about.share` says where it went (`hub`: `given`, `later` with the hub out of reach, `old-hub`
-  with a hub of before them, which keeps none), and the window's toast says it; a value that,
+  `about.share` says where it went (`hub`: `sent` to the hub open now, `later` with the hub out of
+  reach, `old-hub` with a hub of before them, which keeps none), and the window's toast says it; a
+  refusal of the hub's comes after the answer, as `settings.share_refused`, which the window shows
+  as a toast too; a value that,
   sealed for every machine, would be larger than the hub keeps (notes of characters escaped twice
   over) is refused on the machine, before anything is kept. A
   change reaches every machine at once, a machine that was off at its connect. A machine paired
