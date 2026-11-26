@@ -2932,11 +2932,10 @@ impl Render for SessionRow {
                 let elsewhere = elsewhere.clone();
                 shell
                     .update(cx, |shell, cx| match elsewhere {
-                        // Its machine is off: nothing of it can be read now.
-                        Some(there) if there.offline => {}
                         // This machine's, listed while another is in front: this one comes back.
                         Some(there) if there.here => shell.open_here(there.agent, window, cx),
-                        // Another machine's: its page is that machine's, on that session.
+                        // Another machine's, on or off: its page is that machine's, on that
+                        // session, shown from its ghost at once.
                         Some(there) => shell.open_elsewhere(there.machine, there.agent, window, cx),
                         None => shell.open(Selection::Session(session), window, cx),
                     })

@@ -8,6 +8,7 @@
 //! and hands its keyring in.
 
 mod control;
+mod ghosts;
 mod hello;
 mod link;
 mod members;
@@ -38,6 +39,7 @@ pub use control::{
     Paired, Pairing, PresenceOf, Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream,
     Tls, ToDevice, Transcript, arrive, relays_in_memory,
 };
+pub use ghosts::{GHOST_EVENTS, GhostAsk, GhostNews};
 pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,

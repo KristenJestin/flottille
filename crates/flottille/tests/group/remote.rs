@@ -31,6 +31,8 @@ mod remote_code;
 mod remote_deliveries;
 #[path = "../remote_files.rs"]
 mod remote_files;
+#[path = "../remote_ghosts.rs"]
+mod remote_ghosts;
 #[path = "../remote_hub.rs"]
 mod remote_hub;
 #[path = "../remote_hub_only.rs"]

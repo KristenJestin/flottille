@@ -145,6 +145,12 @@ pub enum MachineMessage {
     /// answered, and idempotent (a session ended already is answered as closed). Answered `{}`,
     /// `{"later": why}`, or refused.
     Close(Box<crate::Request>),
+    /// The ghosts of the receiver's sessions, asked once a link by a machine that shows them
+    /// (`docs/remote.md`, "Machines are one"): each from after the last event the sender holds of
+    /// it. Answered `{}`, then, on the same stream, a [`crate::GhostNews`] a frame for as long as
+    /// the link lasts, or refused. A machine of before refuses it as a kind it does not know: the
+    /// sender then holds no ghost of its sessions.
+    Ghost(crate::GhostAsk),
 }
 
 /// A delivery one machine sends another for one of the receiver's agents: taken only for the
