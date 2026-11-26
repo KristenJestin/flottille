@@ -398,6 +398,8 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
                     && last_call.as_ref().is_some_and(|call| {
                         call.data["tool"] == "session_send"
                             && call.data["outcome"] == "ok"
+                            // Named by its agent id only, so the recorded argument says whom.
+                            && call.data["arguments"]["session"] == s.agent.as_str()
                             && call.at >= answered
                     })
             });
