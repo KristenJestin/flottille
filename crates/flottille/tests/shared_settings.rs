@@ -382,8 +382,10 @@ fn a_void_copy_leaves_the_hub_when_a_machine_says_so() {
     eventually("the hub's void copy is dropped", || {
         !hub_copy(&hub).contains("about.name")
     });
-    let file = std::fs::read_to_string(hub.state_file()).unwrap();
-    assert!(!file.contains("about.name"), "{file}");
+    // Kept no more; the hub remembers the drop only, so that it is not given again.
+    let file: Value = serde_json::from_slice(&std::fs::read(hub.state_file()).unwrap()).unwrap();
+    assert!(!file["shared"].to_string().contains("about.name"), "{file}");
+    assert_eq!(file["dropped"][0][0], "about.name", "{file}");
     // The name is free again: a change of a member's device reaches every machine.
     share(&pc, "pc", json!({"name": "Alex"}));
     until(&server, "the new name reaches the server", |about| {
