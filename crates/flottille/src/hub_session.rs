@@ -23,9 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Ask, Asker, Change, ControlError, Device, DeviceKey, Facts, Hello, HubUrl, ListError,
-    MachineKey, MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed,
-    Request, Role, Sealed, Session, Tls,
+    Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
+    MemberList, Members, Nonce, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Request,
+    Role, Sealed, Session, Signature, Signed, Tls,
 };
 use serde_json::{Value, json};
 
@@ -145,25 +145,31 @@ impl Control {
     }
 
     /// Why `share` would refuse the value `name` of `params` for its size, sealed for every
-    /// machine in a request of its own as the user's device would sign it: checked before a
+    /// machine in a request of its own shaped as the user's device signs it: checked before a
     /// change of several values shares any. Nothing to check without a hub (`share` refuses).
     pub(crate) fn fits(&self, name: &str, params: &Value) -> Result<(), String> {
         let Ok((_, members)) = self.checked() else {
             return Ok(());
         };
-        // A key of the check's own, never kept: a signature is as long whoever makes it, and the
-        // names are as long as the longest a window gives.
-        let key = DeviceKey::make().map_err(|error| error.to_string())?;
+        // A request of the same shape as the device's: a signature and a nonce are as long
+        // whoever makes them, and the names are as long as the longest a window gives. Nothing
+        // is signed: the daemon never holds the device key.
         let long = "x".repeat(64);
-        let request = Request::sign(
-            &key,
-            &long,
-            &long,
-            crate::all_settings::SHARE,
-            params,
-            std::time::SystemTime::now(),
-        )
-        .map_err(|error| error.to_string())?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        let request = Request {
+            id: long.clone(),
+            machine: long,
+            signed: Signed {
+                device: self.key.public(),
+                nonce: Nonce([0; 16]),
+                at,
+                method: crate::all_settings::SHARE.to_owned(),
+                params: params.to_string(),
+            },
+            sig: Signature([0; 64]),
+        };
         let plain = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
         let sealed = Sealed::seal(
             name,
