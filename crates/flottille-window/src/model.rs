@@ -613,6 +613,12 @@ fn under_its_pilot(launched: &crate::machines::Launched) -> bool {
         && !(launched.state == "ended" && launched.heard.as_deref() != Some("child-report"))
 }
 
+/// Whether a child started on another machine ended with its report: an ended child, as one of
+/// this machine, gathered in its parent's "N ended" of the rail and no live row (#1520).
+fn reported(launched: &crate::machines::Launched) -> bool {
+    launched.state == "ended" && launched.heard.as_deref() == Some("child-report")
+}
+
 /// A session or a child an agent of this machine started on another, as the lists of its pilot's
 /// session say it: a row with its machine's icon in the rail's Agents and, for a child, in the
 /// sub-agents list.
@@ -635,6 +641,8 @@ pub struct RemoteAgent {
     pub icon: String,
     pub colour: String,
     pub offline: bool,
+    /// A child that ended with its report: the rail gathers it in its parent's "N ended".
+    pub ended: bool,
 }
 
 /// What [`remote_agents`] says now, kept where a page reads it with no read of the shell, which
@@ -685,6 +693,7 @@ pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
                 icon,
                 colour,
                 offline,
+                ended: reported(launched),
             }
         })
         .collect()
@@ -1573,12 +1582,14 @@ impl Snapshot {
     }
 
     /// This snapshot with the sessions this machine's agents started on other machines, each
-    /// under the live session whose tree started it: a child or a led session, while it lives or
-    /// once it reported. A session handed to the user is theirs, on its machine only.
+    /// under the live session whose tree started it: a child or a led session, while it lives. A
+    /// session handed to the user is theirs, on its machine only.
     pub fn with_elsewhere(mut self, machines: &crate::machines::Machines) -> Snapshot {
         let mut added = Vec::new();
         for launched in &machines.launches {
-            if !under_its_pilot(launched) {
+            // A child that reported is an ended child: no live row of the list, as one of this
+            // machine is none, but its parent's rail keeps it among the ended.
+            if !under_its_pilot(launched) || reported(launched) {
                 continue;
             }
             let root = self.root_of(&launched.caller);

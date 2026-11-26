@@ -3,6 +3,7 @@
 // Each test file uses its own part of it.
 #![allow(dead_code)]
 
+pub mod claude_drops;
 pub mod mcp;
 
 use std::io::{BufRead, BufReader, Write};

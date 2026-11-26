@@ -3247,8 +3247,10 @@ row of a session led from another machine.
   what that machine delivered here: `running` once launched until its first delivery, `waiting`
   after a turn's end, a question or a request, until the next delivery says otherwise (a message
   the pilot sends does not make it `running` again here). An ended launch leaves its pilot's
-  rows unless its last delivery was a report: a reported child stays, `reported`, under its pilot
-  while the pilot lives. A session handed to the user is not shown under the agent that started it.
+  rows unless its last delivery was a report: a reported child is an ended child (#1520), in its
+  parent's `N ended` of the rail (of its Review, under a review's pilot), no row of the sidebar,
+  while its parent lives. A session handed to the user is not shown under the agent that started
+  it.
   The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
   whose caller ended: an old launch is never read again. A launch held for the user there is
   `needs you` from the moment it is held, drawn with the request's mark, until the user's answer
@@ -3256,8 +3258,10 @@ row of a session led from another machine.
   delivery; refused, it leaves its pilot's rows. While it is held, a list that says `idle` (a
   machine of before, which did not list a held launch as `needs you`) does not take it back.
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
-  those sessions, so a project's page, search, a session's page and the inbox do not list them,
-  and nothing offers to end them from here.
+  those sessions, so a project's page, search, a session's page and the inbox do not list them.
+  Their row's End session closes them as a session of another machine's list is closed (#1520):
+  the user's close goes to that machine, which stops it there, kept while that machine is off; the
+  launch leaves its pilot's rail and rows at once.
 - Those rows are always in the list, which is this machine's whatever page is shown (#1271).
 - Links through the hub (#1151): a link's packets travel in the control session as JSON lines, the
   packet in base64, not as binary WebSocket frames: the session is one JSON object a line since

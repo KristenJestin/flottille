@@ -4155,6 +4155,22 @@ mod tests {
     }
 
     #[test]
+    fn every_served_definition_is_one_a_claude_client_offers() {
+        // Whatever an agent's role and project give it: a list held over HTTP shows only some.
+        let extensions = crate::extensions::definitions();
+        let tools: Vec<Value> = SERVED
+            .iter()
+            .chain(extensions.iter().copied())
+            .map(|definition| serde_json::to_value(tool_of(definition, true)).unwrap())
+            .collect();
+        for name in ["spec", "review"] {
+            assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
+        }
+        let dropped = crate::claude_drops::dropped(&tools);
+        assert!(dropped.is_empty(), "{dropped:#?}");
+    }
+
+    #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true, false);
         assert_eq!(served(&claude::PROVIDER, &leaf).len(), 18);
