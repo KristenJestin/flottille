@@ -3822,6 +3822,64 @@ mod tests {
     }
 
     #[test]
+    fn a_command_s_card_says_who_stopped_it() {
+        for (how, said) in [
+            ("was stopped by the user", "stopped by you"),
+            (
+                "was stopped by the agent that started it",
+                "stopped by the agent",
+            ),
+            (
+                "was stopped because its session ended",
+                "stopped when its session ended",
+            ),
+            (
+                "was stopped because its workspace was removed",
+                "stopped when its workspace was removed",
+            ),
+            ("was stopped", "stopped"),
+        ] {
+            let mut c = root();
+            running_card(&mut c);
+
+            c.apply(&event(
+                20,
+                "agent.prompted",
+                json!({"text": ended_delivery(how)}),
+            ));
+
+            assert_eq!(cards(&c)[0].ending.said(), said, "{how}");
+        }
+    }
+
+    #[test]
+    fn a_command_killed_from_outside_flottille_ends_its_card_killed() {
+        for (how, signal) in [
+            (
+                "was killed by signal 9 (SIGKILL) from outside Flottille: the system's \
+                 out-of-memory killer, or a kill",
+                9,
+            ),
+            (
+                "was killed by signal 15 (SIGTERM) from outside Flottille",
+                15,
+            ),
+            ("was killed by signal 1 from outside Flottille", 1),
+        ] {
+            let mut c = root();
+            running_card(&mut c);
+
+            c.apply(&event(
+                20,
+                "agent.prompted",
+                json!({"text": ended_delivery(how)}),
+            ));
+
+            assert_eq!(cards(&c)[0].ending, Ending::Killed(signal), "{how}");
+        }
+    }
+
+    #[test]
     fn a_command_ended_delivery_without_its_card_is_one_quiet_line_once() {
         let mut c = root();
         let delivery = json!({"text": ended_delivery("exited with code 3")});

@@ -2151,6 +2151,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_command_says_who_stopped_it() {
+        for (by, said) in [
+            ("agent", "stopped by the agent"),
+            ("user", "stopped by you"),
+            ("session", "stopped when its session ended"),
+            ("workspace", "stopped when its workspace was removed"),
+        ] {
+            let row = CommandRow::of(&serde_json::json!({"run": "r1", "state": "stopped",
+                "stopped_by": by}));
+            assert_eq!(row.ending().said(), said, "{by}");
+        }
+        let row = CommandRow::of(&serde_json::json!({"run": "r1", "state": "interrupted",
+            "stopped_by": "daemon"}));
+        assert_eq!(row.ending().said(), "interrupted when Flottille stopped");
+    }
+
+    #[test]
     fn the_root_agent_is_not_named_on_its_own_commands() {
         let names = HashMap::from([
             ("a".to_owned(), crate::session::THE_CONVERSATION.to_owned()),
