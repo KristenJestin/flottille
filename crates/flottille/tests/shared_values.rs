@@ -795,3 +795,39 @@ fn a_check_s_guidance_shared_says_its_part() {
 
     watch.until(|event| event["name"] == "review.changed" && event["data"]["part"] == "bugs");
 }
+
+/// A hub and two machines, the hub of a version before #1525: it keeps only #1514's values, and
+/// says no names in its welcome, as v0.4.4 does.
+fn machines_on_a_hub_of_before() -> (TestHub, Machine, Machine) {
+    let hub = TestHub::new();
+    hub.with_hub(|hub| hub.keep_as_before(flottille_link::SHARED_NAMES_BEFORE));
+    remote::pc_and_server_through(
+        hub,
+        Machine::of(User::new().with_cut_results()),
+        User::new().with_cut_results(),
+    )
+}
+
+/// Point 1 of #1525's review: a hub of before keeps no rules; shared there, they stay this
+/// machine's own, said `old-hub`, and are never all machines' value, here or on another machine.
+#[test]
+fn rules_shared_through_a_hub_of_before_stay_this_machine_s_own() {
+    let (hub, pc, server) = machines_on_a_hub_of_before();
+
+    let answer = share(&pc, "pc", "rules", "Rules of pc.");
+
+    assert_eq!(answer["hub"], "old-hub", "{answer}");
+    let rules = call(&pc, "rules.show", json!({}));
+    assert_eq!(rules["text"], "Rules of pc.", "{rules}");
+    assert_eq!(rules["source"], "global", "{rules}");
+    // A value the hub keeps still reaches the server: once it has, it has seen what was sent.
+    share(&pc, "pc", "sessions.end_inactive_days", "12");
+    eventually("the server follows the days of all machines", || {
+        shared(&server)["all"]["sessions.end_inactive_days"] == "12"
+    });
+    assert_ne!(call(&server, "rules.show", json!({}))["source"], "all");
+    assert!(shared(&pc)["all"].get("rules").is_none());
+    assert!(!hub_copy(&hub).contains("\"rules\""));
+    let kept = std::fs::read_to_string(pc.folder().join("shared.json")).unwrap_or_default();
+    assert!(!kept.contains("\"rules\""), "{kept}");
+}

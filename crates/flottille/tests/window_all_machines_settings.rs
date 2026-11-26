@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
 use flottille_window::about::USE_ALL;
-use flottille_window::all_settings::{AllSettings, DEFAULT_SAID, Shown};
+use flottille_window::all_settings::{AllSettings, DEFAULT_SAID};
 use flottille_window::link::Sign;
 use gpui_kit::base::input::TextareaState;
 use gpui_kit::test::TestWindowExt;
@@ -322,33 +322,33 @@ fn all_machines_shows_the_default_where_nothing_is_shared(cx: &mut TestAppContex
     assert!(!present(cx, "all-rules-save"));
 }
 
-/// Point 2 of #1525: a hub of a version that keeps no value of all machines leaves the change on
-/// this machine, and the window says so.
+/// Point 1 of #1525's review: a hub of a version before #1525 (as v0.4.4: it keeps only #1514's
+/// values and names none in its welcome) leaves the rules saved on All machines to this machine,
+/// and the window says so.
 #[gpui_kit::test]
 fn a_save_to_a_hub_that_keeps_none_says_it_stayed_here(cx: &mut TestAppContext) {
-    let (_hub, pc, _server) = pc_and_server();
+    let hub = crate::remote::TestHub::new();
+    hub.with_hub(|hub| hub.keep_as_before(flottille_link::SHARED_NAMES_BEFORE));
+    let (_hub, pc, server) = crate::remote::pc_and_server_through(
+        hub,
+        Machine::of(runner().with_cut_results()),
+        runner().with_cut_results(),
+    );
     let (shell, cx) = window(&pc, cx);
+    shell.update(cx, |s, _| s.sign_with(signing(&pc)));
     all_machines(&shell, cx);
     let field = text_field(&shell, "rules", cx);
     put_text(&field, RULES, cx);
-    settle(&shell, cx);
-    assert!(present(cx, "all-rules-save"));
-    let all = all_settings(&shell, cx);
-    let mut kept = all.read_with(cx, |all, _| all.shown().cloned().unwrap());
-    kept.all
-        .as_mut()
-        .unwrap()
-        .insert("rules".into(), RULES.into());
-    kept.hub = Some("old-hub".into());
-
-    // The answer of `settings.share` from a hub of before the values of all machines.
-    cx.update(|window, cx| {
-        all.update(cx, |all, cx| {
-            all.answered(Ok::<Shown, String>(kept), Some(true), window, cx)
-        })
+    until(&shell, cx, "the Save unfolds", |cx| {
+        present(cx, "all-rules-save")
     });
     settle(&shell, cx);
 
+    click(&shell, "all-rules-save", cx);
+
+    until(&shell, cx, "the save is said", |cx| {
+        !toasts(&shell, cx).is_empty()
+    });
     let said = toasts(&shell, cx);
     assert!(
         said.contains(&"Saved on this machine only".to_owned()),
@@ -358,6 +358,10 @@ fn a_save_to_a_hub_that_keeps_none_says_it_stayed_here(cx: &mut TestAppContext) 
         !said.contains(&"Saved for all machines".to_owned()),
         "{said:?}"
     );
+    let rules = call(&pc, "rules.show", json!({}));
+    assert_eq!(rules["text"], RULES, "{rules}");
+    assert_eq!(rules["source"], "global", "{rules}");
+    assert_ne!(call(&server, "rules.show", json!({}))["source"], "all");
 }
 
 /// Point 4 of #1525: the line that says a value is the default folds away once a machine shares
