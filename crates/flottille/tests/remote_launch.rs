@@ -832,7 +832,7 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
 }
 
 #[test]
-fn a_controller_s_launch_in_full_starts_nothing() {
+fn a_controller_s_launch_starts_nothing() {
     let (_hub, pc, server) = pc_and_server_as("controller", server_user(allowing()), Some(""));
     let (root, _mcp) = pc.root("full");
     let key = pc.stand_in();
@@ -841,7 +841,7 @@ fn a_controller_s_launch_in_full_starts_nothing() {
 
     let answers = sent_with(&key, &server, vec![MachineMessage::Launch(Box::new(asked))]);
 
-    // A controller runs no agent, so no agent of it launches: in Full no more than in Auto.
+    // A controller runs no agent, so no agent of it launches, refused before its mode is read.
     let refused = answers[0].clone().unwrap_err();
     assert!(
         refused.contains("pc is a controller: it runs no agent, so no agent of it launches"),
