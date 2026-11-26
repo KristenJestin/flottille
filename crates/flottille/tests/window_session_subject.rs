@@ -459,6 +459,29 @@ fn the_subject_fades_in_when_it_changes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_subject_line_does_not_repeat_the_linked_ticket(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the workspace's ticket line", |cx| {
+        label(cx, "rail-line-ticket").is_some()
+    });
+    settle(cx);
+
+    // The workspace links #5 and the session is about #5: the section says it once, in the
+    // workspace's own line, and no line of the subject comes under it.
+    assert!(label(cx, "rail-about-ticket").is_none());
+    assert!(label(cx, "rail-about-open").is_none());
+    let drawn = cx.update(|window, _| {
+        window
+            .try_find("rail-about-block".to_owned())
+            .map_or(0., |found| f32::from(found.bounds().size.height))
+    });
+    assert_eq!(drawn, 0., "no room kept for it");
+}
+
+#[gpui_kit::test]
 fn a_session_page_says_its_ticket_in_workspace_not_in_its_header(cx: &mut TestAppContext) {
     let user = user();
     let (id, shell, cx) = about_five(&user, cx);
