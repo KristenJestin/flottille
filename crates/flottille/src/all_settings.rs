@@ -514,7 +514,16 @@ pub fn applied(daemon: &Arc<Daemon>, names: &[String]) {
             compaction::SHARED_GUIDANCE => "compaction",
             results::SHARED_LIMIT | results::SHARED_UNCHANGED => "tool_results.changed",
             appearance::SHARED_SHADE => "appearance.changed",
-            name if TEXTS.contains(&name) => "review.changed",
+            name if TEXTS.contains(&name) => {
+                // Review's change of that part, as `review.set {part}` says it.
+                match guidance_of(name) {
+                    Some((_, Some(part))) => {
+                        said.insert(REVIEW_PART.to_owned() + part);
+                        continue;
+                    }
+                    _ => "review.changed",
+                }
+            }
             "specs.language" | "specs.mode" => "specs",
             "autosubscriptions.created_pull"
             | "autosubscriptions.branch_pull"
@@ -523,10 +532,10 @@ pub fn applied(daemon: &Arc<Daemon>, names: &[String]) {
             name if name.starts_with("about.") => "about.changed",
             _ => continue,
         };
-        said.insert(event);
+        said.insert(event.to_owned());
     }
     for event in said {
-        if let Err(error) = say(daemon, event) {
+        if let Err(error) = say(daemon, &event) {
             eprintln!(
                 "flottille daemon: a change of all machines could not be said: {}",
                 error.message
@@ -534,6 +543,9 @@ pub fn applied(daemon: &Arc<Daemon>, names: &[String]) {
         }
     }
 }
+
+/// What `applied` says for a change of a check's guidance, then the check's name.
+const REVIEW_PART: &str = "review.changed:";
 
 fn say(daemon: &Arc<Daemon>, event: &str) -> Result<(), Failure> {
     let emit = |name: &str, data: Value| {
@@ -568,6 +580,10 @@ fn say(daemon: &Arc<Daemon>, event: &str) -> Result<(), Failure> {
             emit("extension.changed", json!({"name": event, "project": null}))
         }
         "rules.changed" => emit(event, json!({"project": null})),
+        event if event.starts_with(REVIEW_PART) => emit(
+            "review.changed",
+            json!({"part": &event[REVIEW_PART.len()..]}),
+        ),
         "tool_results.changed" => results::announce(daemon).map_err(invalid),
         "appearance.changed" => appearance::announce(daemon).map_err(invalid),
         event => emit(event, json!({})),
