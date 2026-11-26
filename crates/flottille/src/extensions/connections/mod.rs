@@ -1666,6 +1666,21 @@ fn made(name: String, description: String) -> &'static Definition {
     definition
 }
 
+/// A connection's tool under the longest name a connection takes, for the test of every
+/// definition: no connection is declared for it.
+#[cfg(test)]
+pub(super) fn sample() -> &'static Definition {
+    Box::leak(Box::new(Definition {
+        name: Box::leak(format!("{PREFIX}{}", "a".repeat(NAME_CHARS)).into_boxed_str()),
+        title: "Connection",
+        description: "A connection.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: tool_schema,
+    }))
+}
+
 /// The tools of the connections that are ready, for an agent of `project`.
 fn given(daemon: &Daemon, project: &Project) -> Vec<&'static Definition> {
     let Ok(all) = declarations(&daemon.paths) else {

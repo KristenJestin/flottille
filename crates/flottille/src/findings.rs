@@ -47,10 +47,17 @@ pub fn is(args: &Value) -> bool {
 /// the guide that says when to use them.
 pub fn offer(tool: &mut rmcp::model::Tool) {
     let mut schema = Value::Object((*tool.input_schema).clone());
-    if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+    // Read, never indexed into: indexing adds the keys that are missing, as `null` (#1509).
+    if let Some(actions) = schema
+        .pointer_mut("/properties/action/enum")
+        .and_then(Value::as_array_mut)
+    {
         actions.extend(ACTIONS.iter().map(|action| json!(action)));
     }
-    if let Some(fields) = schema["properties"].as_object_mut() {
+    if let Some(fields) = schema
+        .pointer_mut("/properties")
+        .and_then(Value::as_object_mut)
+    {
         let texts = [
             (
                 "title",
@@ -362,4 +369,39 @@ pub fn listing(said: &Value) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{Definition, tool_of};
+
+    #[test]
+    fn the_findings_offer_adds_no_action_to_a_tool_that_has_none() {
+        // Indexing into the schema would add `"action": {"enum": null}`, a schema Claude Code
+        // drops its tool for (#1509).
+        let schemas: [fn() -> Value; 2] = [
+            || json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            || json!({"type": "object"}),
+        ];
+        for schema in schemas {
+            let mut tool = tool_of(
+                &Definition {
+                    name: "no_action",
+                    title: "No action",
+                    description: "A tool of a test.",
+                    read_only: true,
+                    idempotent: true,
+                    destructive: false,
+                    schema,
+                },
+                true,
+            );
+            offer(&mut tool);
+            let listed = Value::Object((*tool.input_schema).clone());
+            assert_eq!(listed.pointer("/properties/action"), None, "{listed}");
+            // Nor a `"properties": null` to a schema that declares none.
+            assert_ne!(listed.get("properties"), Some(&Value::Null), "{listed}");
+        }
+    }
 }
