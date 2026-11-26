@@ -422,15 +422,39 @@ fn emails_masked(line: &str) -> String {
 /// The shared masker holds `name=value`, which reads the same wherever a text is cut; this line
 /// is whole.
 fn named_tokens_masked(line: &str) -> String {
-    let mut words: Vec<String> = line.split(' ').map(str::to_owned).collect();
-    for at in 1..words.len() {
-        let named = words[at - 1].to_ascii_lowercase().ends_with("token:");
-        let word = &words[at];
-        // A plain word (`expired`) or a number says no token.
-        if named && word.len() >= 8 && word.chars().any(|c| !c.is_alphabetic()) {
-            words[at] = flottille_core::secrets::MASK.to_owned();
-        }
-    }
+    // A plain word (`expired.`) or a number says no token: its sentence's punctuation does not
+    // make it one.
+    let opaque = |word: &str| {
+        let word = word.trim_matches(['.', ',', ';', ':', '!', '?', '(', ')', '"', '\'']);
+        word.len() >= 8 && word.chars().any(|c| !c.is_alphabetic())
+    };
+    let mut named = false;
+    let words: Vec<String> = line
+        .split(' ')
+        .map(|word| {
+            // Spaces between the name and its value are kept as they were.
+            if word.is_empty() {
+                return String::new();
+            }
+            let after_name = std::mem::take(&mut named);
+            if after_name && opaque(word) {
+                return flottille_core::secrets::MASK.to_owned();
+            }
+            match word.split_once(':') {
+                Some((name, value)) if name.to_ascii_lowercase().ends_with("token") => {
+                    if value.is_empty() {
+                        named = true;
+                        word.to_owned()
+                    } else if opaque(value) {
+                        format!("{name}:{}", flottille_core::secrets::MASK)
+                    } else {
+                        word.to_owned()
+                    }
+                }
+                _ => word.to_owned(),
+            }
+        })
+        .collect();
     words.join(" ")
 }
 
