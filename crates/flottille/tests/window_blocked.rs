@@ -7,7 +7,8 @@
 
 use crate::common;
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -88,9 +89,14 @@ fn script(user: &User, requested: Value) {
 
 /// The fake `gh` answers the pull request #12, a review asked of `requested`, `reviews` given.
 fn answer(user: &User, requested: Value, reviews: Value) {
+    answer_on(user, "feat/docs", requested, reviews)
+}
+
+/// The same, the pull request #12 being the one of `branch`.
+fn answer_on(user: &User, branch: &str, requested: Value, reviews: Value) {
     static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    user.gh_script(json!({"pulls": {"acme/atlas": {"feat/docs": {
+    user.gh_script(json!({"pulls": {"acme/atlas": {branch: {
         "number": 12, "title": "Write the docs", "state": "OPEN", "isDraft": false,
         "headRefOid": "aaaaaaa1", "baseRefName": "main",
         "url": "https://github.com/acme/atlas/pull/12", "author": {"login": "someone"},
@@ -130,13 +136,17 @@ fn line(user: &User, id: &str) -> Value {
 
 /// A session started in `atlas`, at rest after its first turn: its id and its MCP session.
 fn start(user: &User, message: &str) -> (String, Mcp) {
+    start_in(user, message, None)
+}
+
+/// The same, in the workspace `workspace` of the project when one is given.
+fn start_in(user: &User, message: &str, workspace: Option<&str>) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
-    let id = user
-        .call(
-            "agent.start",
-            json!({"project": "atlas", "message": message}),
-        )
-        .unwrap()["agent"]["id"]
+    let mut params = json!({"project": "atlas", "message": message});
+    if let Some(workspace) = workspace {
+        params["workspace"] = json!(workspace);
+    }
+    let id = user.call("agent.start", params).unwrap()["agent"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -336,8 +346,14 @@ fn wait_for_the_assignee(user: &User, id: &str, mcp: &Mcp) {
     });
 }
 
-/// The words of a wait as the Workspace line says them, from what the daemon says of it.
+/// The words of a wait as the Workspace line says them under the line of what it waits on, from
+/// what the daemon says of it.
 fn wait_said(user: &User, id: &str) -> String {
+    wait_said_with(user, id, false)
+}
+
+/// The same; `what` when the wait is not under the line of what it waits on, which then says it.
+fn wait_said_with(user: &User, id: &str, what: bool) -> String {
     let blocked = line(user, id)["blocked"].clone();
     let who: Vec<&str> = blocked["by"]
         .as_array()
@@ -346,7 +362,14 @@ fn wait_said(user: &User, id: &str) -> String {
         .filter_map(Value::as_str)
         .collect();
     let at = flottille_window::session::clock(blocked["since"].as_u64().unwrap());
-    format!("Waits for {} · since {at}", who.join(", "))
+    match what {
+        true => format!(
+            "Waits for {}: {} · since {at}",
+            who.join(", "),
+            blocked["why"].as_str().unwrap()
+        ),
+        false => format!("Waits for {} · since {at}", who.join(", ")),
+    }
 }
 
 /// How high an element of the page is drawn, none while it is not.
@@ -1144,4 +1167,302 @@ fn the_window_draws_no_frame_at_rest_on_a_blocked_session_s_row_and_page(cx: &mu
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     assert_eq!((drawn, asked), (0, 0), "(frames drawn, frames asked)");
+}
+
+/// What the window opens when a link is pressed, the opener being the test's.
+fn links(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Arc<Mutex<Vec<PathBuf>>> {
+    let opened: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    opened
+}
+
+fn page_of(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::session::SessionPage> {
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+        .expect("its page")
+}
+
+/// The subject of a session that opened the pull request #12: as the daemon says it.
+fn pull_subject() -> flottille_window::model::Subject {
+    flottille_window::model::Subject {
+        kind: "pull_request".to_owned(),
+        key: Some("#12".to_owned()),
+        title: Some("Write the docs".to_owned()),
+        url: None,
+        from: "a pull request it opened".to_owned(),
+        last: None,
+        pull: Some(flottille_window::session_link::PullRequest {
+            repository: ".".to_owned(),
+            number: 12,
+            state: "open".to_owned(),
+            mark: None,
+            url: "https://github.com/acme/atlas/pull/12".to_owned(),
+        }),
+    }
+}
+
+#[gpui_kit::test]
+fn a_pull_request_subject_is_said_in_workspace(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // A session of the project folder itself: its workspace section holds no pull request line.
+    let (id, _mcp) = start(&user, "open the docs pull request");
+    let (shell, cx) = window(&user, cx);
+    let opened = links(&shell, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "its workspace", |cx| {
+        label(cx, "rail-workspace-read").is_some()
+    });
+    settle(cx);
+    assert!(label(cx, "rail-about-pull").is_none(), "about nothing yet");
+
+    page_of(&shell, cx).update(cx, |page, cx| page.set_subject(Some(pull_subject()), cx));
+    settle(cx);
+
+    // Its number and its title, and an icon button that opens it: the header says none of it.
+    assert_eq!(
+        label(cx, "rail-about-pull").as_deref(),
+        Some("#12 Write the docs")
+    );
+    assert_eq!(label(cx, "rail-about-open").as_deref(), Some("Open #12"));
+    assert!(label(cx, "session-about-line").is_none());
+    cx.update(|window, cx| window.click("rail-about-open", cx));
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from("https://github.com/acme/atlas/pull/12")]
+    );
+}
+
+#[gpui_kit::test]
+fn what_a_free_session_last_held_is_said_in_workspace(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    with_issue(&user, json!([]));
+    let (id, mcp) = start(&user, "open the docs pull request");
+    takes_the_ticket(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "the ticket", |cx| {
+        label(cx, "rail-about-ticket").is_some()
+    });
+    settle(cx);
+    assert!(label(cx, "rail-about-last").is_none(), "it holds a ticket");
+
+    // The ticket is done: the session is free, and says what it last held.
+    let mut script = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(user.path("gh/script.json")).unwrap(),
+    )
+    .unwrap();
+    script["issues"]["acme/atlas"]["5"]["state"] = json!("CLOSED");
+    script["issues"]["acme/atlas"]["5"]["updatedAt"] = json!("2999-01-02T00:00:00Z");
+    user.gh_script(script);
+    a_round(&user);
+    eventually("free", || line(&user, &id)["subject"]["kind"] == "free");
+    let last = line(&user, &id)["subject"]["last"]
+        .as_str()
+        .expect("what it last held")
+        .to_owned();
+    until(&shell, cx, "what it last held, said", |cx| {
+        label(cx, "rail-about-last").is_some()
+    });
+    settle(cx);
+    assert_eq!(label(cx, "rail-about-last"), Some(last));
+    assert!(label(cx, "rail-about-ticket").is_none());
+}
+
+#[gpui_kit::test]
+fn the_open_button_of_a_ticket_opens_its_page(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    with_issue(&user, json!([]));
+    let (id, mcp) = start(&user, "open the docs pull request");
+    takes_the_ticket(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    let opened = links(&shell, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "the ticket", |cx| {
+        label(cx, "rail-about-open").is_some()
+    });
+    settle(cx);
+
+    assert_eq!(label(cx, "rail-about-open").as_deref(), Some("Open #5"));
+    cx.update(|window, cx| window.click("rail-about-open", cx));
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from("https://github.com/acme/atlas/issues/5")]
+    );
+}
+
+#[gpui_kit::test]
+fn a_wait_not_under_its_pull_request_says_what_it_waits_on(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // On the project folder: its section holds no line of the pull request #12.
+    let (id, mcp) = start(&user, "open the docs pull request");
+    wait_for_maya(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "the wait said in Workspace", |cx| {
+        label(cx, "rail-wait").is_some()
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "rail-wait"),
+        Some(wait_said_with(&user, &id, true))
+    );
+    assert!(label(cx, "rail-wait").unwrap().contains("review of #12"));
+}
+
+/// A session in the workspace `docs`, whose branch has the pull request #12 asking a review of
+/// Maya, and which waits on it.
+fn blocked_in_a_workspace(user: &User) -> String {
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "atlas", "name": "docs", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(made["state"], "ready", "{made}");
+    let branch = user
+        .call("workspace.list", json!({"project": "atlas"}))
+        .unwrap()["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "docs")
+        .unwrap()["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    answer_on(
+        user,
+        &branch,
+        json!([{"__typename": "User", "login": "maya", "name": "Maya"}]),
+        json!([]),
+    );
+    a_round(user);
+    let (id, mcp) = start_in(user, "open the docs pull request", Some("docs"));
+    wait_for_maya(user, &id, &mcp);
+    id
+}
+
+#[gpui_kit::test]
+fn the_wait_goes_under_its_pull_request_line(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let id = blocked_in_a_workspace(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "its pull request and the wait", |cx| {
+        label(cx, "rail-pull-atlas").is_some() && label(cx, "rail-wait").is_some()
+    });
+    settle(cx);
+
+    // Under the pull request's line, which says what it waits on: the wait does not.
+    assert_eq!(label(cx, "rail-wait"), Some(wait_said(&user, &id)));
+    let (pull_bottom, wait_top) = cx.update(|window, _| {
+        let pull = window.find("rail-line-pull-atlas".to_owned()).bounds();
+        let wait = window.find("rail-wait".to_owned()).bounds();
+        (
+            f32::from(pull.origin.y + pull.size.height),
+            f32::from(wait.origin.y),
+        )
+    });
+    assert!(
+        wait_top >= pull_bottom - 1.,
+        "{wait_top} under {pull_bottom}"
+    );
+    // One place, not two: the line at the top of the section is not drawn.
+    assert_eq!(drawn_height(cx, "rail-wait-block"), 0.);
+}
+
+#[gpui_kit::test]
+fn the_agents_row_keeps_what_it_waits_for_and_its_mark_cross_fades(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // The ticket is the user's own: the session waits, it is blocked by no one.
+    with_issue(&user, json!([]));
+    let (id, mcp) = start(&user, "open the docs pull request");
+    takes_the_ticket(&user, &id, &mcp);
+    wait_for_ticket_unassigned(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    let waiting = format!("rail-waiting-{id}");
+    until(&shell, cx, "what it waits for", |cx| {
+        label(cx, waiting.as_str()).is_some()
+    });
+    settle(cx);
+    let words = label(cx, waiting.as_str()).unwrap();
+    assert!(words.contains("ticket"), "{words}");
+    let mark_height = |cx: &mut VisualTestContext, shape: &str| {
+        let (within, shape) = (format!("rail-mark-{id}"), shape.to_owned());
+        cx.update(|window, _| {
+            window
+                .within(within)
+                .try_find(shape)
+                .map(|found| f32::from(found.bounds().size.height))
+        })
+    };
+    assert!(mark_height(cx, "state-mark-clock").is_some(), "a clock");
+    assert!(mark_height(cx, "state-mark-person").is_none());
+
+    // Maya is assigned: the session is blocked by her, the words stay, the mark swaps.
+    with_issue(&user, json!([{"login": "maya", "name": "Maya"}]));
+    eventually("blocked", || !line(&user, &id)["blocked"].is_null());
+    until(&shell, cx, "the person's mark", |cx| {
+        mark_height(cx, "state-mark-person").is_some()
+    });
+    // In the middle of the swap it is smaller than at rest.
+    let coming = mark_height(cx, "state-mark-person").unwrap();
+    settle(cx);
+    let full = mark_height(cx, "state-mark-person").unwrap();
+    assert!(
+        coming < full,
+        "the mark fades in over a few frames: {coming} of {full}"
+    );
+    assert!(
+        mark_height(cx, "state-mark-clock").is_none(),
+        "the clock left"
+    );
+    assert_eq!(label(cx, waiting.as_str()), Some(words), "its words stay");
+}
+
+/// The session subscribes to ticket #5, which is assigned to no one: it waits, blocked by no one.
+fn wait_for_ticket_unassigned(user: &User, id: &str, mcp: &Mcp) {
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "#5", "events": ["commented", "status"]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    eventually("the session waiting", || {
+        user.call("agent.tree", json!({"agent": id})).unwrap()["agents"][0]["waiting_on"]
+            == "subscription"
+    });
 }
