@@ -464,10 +464,12 @@ fn a_session_page_says_its_ticket_in_workspace_not_in_its_header(cx: &mut TestAp
     let (id, shell, cx) = about_five(&user, cx);
 
     cx.update(|window, cx| window.click(session_id(&id), cx));
+    // The ticket is the workspace's own: its line says it once, and no second line repeats it.
     until(&shell, cx, "the page says its ticket in Workspace", |cx| {
-        label(cx, "rail-about-ticket").as_deref() == Some("#5 The login fails")
+        label(cx, "rail-line-ticket").is_some()
     });
-    assert_eq!(label(cx, "rail-about-open").as_deref(), Some("Open #5"));
+    settle(cx);
+    assert!(label(cx, "rail-about-ticket").is_none(), "said once");
     // The header keeps the session's own title, and no line of what it is about.
     assert_eq!(
         label(cx, "session-title").as_deref(),
@@ -475,64 +477,4 @@ fn a_session_page_says_its_ticket_in_workspace_not_in_its_header(cx: &mut TestAp
     );
     assert!(label(cx, "session-about-ticket").is_none());
     assert!(label(cx, "session-about-from-words").is_none());
-}
-
-/// The fake `gh` answers these issues and pull requests, and a round of the items reads them.
-fn forge(user: &User, issues: &[Value], pulls: &[Value]) {
-    let issues: serde_json::Map<String, Value> = issues
-        .iter()
-        .map(|issue| (issue["number"].to_string(), issue.clone()))
-        .collect();
-    let pulls: serde_json::Map<String, Value> = pulls
-        .iter()
-        .map(|pull| {
-            (
-                pull["headRefName"].as_str().unwrap().to_owned(),
-                pull.clone(),
-            )
-        })
-        .collect();
-    user.gh_script(json!({"issues": {"acme/api": issues}, "pulls": {"acme/api": pulls}}));
-    user.call("items.refresh", json!({"project": "app"}))
-        .unwrap();
-}
-
-#[gpui_kit::test]
-fn the_workspace_ticket_line_folds_away_as_the_session_becomes_free(cx: &mut TestAppContext) {
-    let user = user();
-    let (id, shell, cx) = about_five(&user, cx);
-    cx.update(|window, cx| window.click(session_id(&id), cx));
-    until(&shell, cx, "the Workspace ticket line", |cx| {
-        label(cx, "rail-about-ticket").as_deref() == Some("#5 The login fails")
-    });
-    settle(cx);
-    let drawn = |cx: &mut VisualTestContext| {
-        cx.update(|window, _| {
-            window
-                .try_find("rail-about-block".to_owned())
-                .map_or(0.0, |found| f32::from(found.bounds().size.height))
-        })
-    };
-    let full = drawn(cx);
-    assert!(full > 0.0, "the line is drawn");
-
-    // The ticket is done: the session is free, its line folds away over a few frames.
-    forge(
-        &user,
-        &[
-            issue(5, "The login fails", "CLOSED"),
-            issue(6, "The logout hangs", "OPEN"),
-        ],
-        &[],
-    );
-    eventually("free", || subject(&user, &id)["kind"] == "free");
-    until(&shell, cx, "the line folding away", |cx| drawn(cx) < full);
-    let going = drawn(cx);
-    assert!(
-        going > 0.0 && going < full,
-        "it does not leave at once: {going} of {full}"
-    );
-    settle(cx);
-    assert_eq!(drawn(cx), 0.0, "it ends gone");
-    assert!(label(cx, "rail-about-ticket").is_none());
 }

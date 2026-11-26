@@ -1,9 +1,9 @@
 //! A session blocked by someone else in the window (#1451, #1530, `docs/design.md` §10, "Blocked
 //! by others"), on GPUI's test platform in front of a real daemon whose agents are the fake ACP
 //! agent and whose forge is the fake `gh`: a root at rest whose subscription waits on someone else
-//! stays in its project, at its foot under a folded `N blocked by others`, and comes back to its
-//! place by itself; its page says the wait in the Workspace section, under its ticket. No window
-//! opens on a screen.
+//! stays a visible row of its project, slid to the foot of the project's sessions, and slides back
+//! to its place when the wait ends; its page says the wait in the Workspace section, under its
+//! ticket. No window opens on a screen.
 
 use crate::common;
 
@@ -16,7 +16,7 @@ use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::state::AgentState;
 use flottille_window::tree::{
-    project_blocked_id, session_id, session_key_beside_id, session_place_id, session_waits_id,
+    session_id, session_key_beside_id, session_place_id, session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -231,14 +231,15 @@ fn listed(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
-/// The ids of the rows of `atlas`'s foot, `N blocked by others`.
+/// The ids of the rows of the project's level that wait on someone else, in the order drawn.
 fn blocked(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, cx| {
         s.project("atlas")
             .map(|node| {
                 node.read(cx)
-                    .blocked(cx)
+                    .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).is_blocked())
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })
@@ -255,77 +256,37 @@ fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Opti
     })
 }
 
-/// Where a row is drawn: in its project's level, or in the project's foot.
+/// Where the rows of the project are drawn.
 const IN_PROJECT: &str = "fold-project-atlas";
-const IN_GROUP: &str = "fold-blocked-atlas";
-/// The foot's row, `N blocked by others`, unfolds as the project gets its first blocked session.
-const FOOT_BLOCK: &str = "project-blocked-block-atlas";
 
-/// The height of the frame a row of the tree is drawn in within `scope`, `None` when it is not
-/// drawn there.
-fn frame_height(
-    shell: &Entity<Shell>,
-    id: &str,
-    scope: &'static str,
-    cx: &mut VisualTestContext,
-) -> Option<f32> {
-    let row = shell.read_with(cx, |s, _| s.session(id).map(|row| row.entity_id()))?;
-    // The foot's rows are framed under a name of their own: a project's fold holds both levels.
-    let kind = if scope == IN_GROUP {
-        "blocked-row"
-    } else {
-        "tree-row"
-    };
-    let frame = gpui_kit::ElementId::Name(format!("{kind}-{}", row.as_u64()).into());
-    cx.update(|window, _| {
-        window
-            .within(scope)
-            .try_find(frame)
-            .map(|found| f32::from(found.bounds().size.height))
-    })
-}
-
-/// Where the top of a session's row is drawn in its project's level: in its frame, which is
-/// its own while the row is also drawn at the foot, sliding out of it.
-fn row_top(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+/// Where a row of the project is drawn, `(top, height)` of its frame, `None` when it is not drawn:
+/// the frame is what the list slides, rises and folds.
+fn frame(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<(f32, f32)> {
     let row = shell.read_with(cx, |s, _| s.session(id).map(|row| row.entity_id()))?;
     let frame = gpui_kit::ElementId::Name(format!("tree-row-{}", row.as_u64()).into());
     cx.update(|window, _| {
-        window
-            .within(frame)
-            .try_find(session_id(id))
-            .map(|found| f32::from(found.bounds().origin.y))
+        window.within(IN_PROJECT).try_find(frame).map(|found| {
+            let bounds = found.bounds();
+            (f32::from(bounds.origin.y), f32::from(bounds.size.height))
+        })
     })
 }
 
-/// How high the foot's fold is drawn: none while it is folded.
-fn group_height(cx: &mut VisualTestContext) -> f32 {
-    cx.update(|window, _| {
-        window
-            .try_find(gpui_kit::ElementId::Name(IN_GROUP.into()))
-            .map_or(0., |found| f32::from(found.bounds().size.height))
-    })
+fn top(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> f32 {
+    frame(shell, id, cx).expect("its row is drawn").0
 }
 
-/// How high the foot's row is drawn with its fold: none while the project has no blocked session.
-fn foot_height(cx: &mut VisualTestContext) -> f32 {
-    cx.update(|window, _| {
-        window
-            .within(IN_PROJECT)
-            .try_find(FOOT_BLOCK)
-            .map_or(0., |found| f32::from(found.bounds().size.height))
-    })
-}
-
-/// Unfolds the foot once its row stands still: a row folded away cannot be pressed.
-fn unfold_foot(cx: &mut VisualTestContext) {
-    settle(cx);
-    unfold_foot(cx);
-}
-
-/// What the foot's row says: `1 blocked by others`.
-fn foot_said(cx: &mut VisualTestContext) -> Option<String> {
-    label(cx, project_blocked_id("atlas"))
+/// Steps the window one frame at a time until the row has left `from`, and gives the top it is
+/// drawn at then: a frame in the middle of its slide.
+fn midway(shell: &Entity<Shell>, id: &str, from: f32, cx: &mut VisualTestContext) -> f32 {
+    for _ in 0..60 {
+        after(cx, Duration::from_millis(16));
+        let now = top(shell, id, cx);
+        if (now - from).abs() > 1. {
+            return now;
+        }
+    }
+    panic!("its row never moved from {from}");
 }
 
 /// The tracker is the project's issues: #5 is what the session takes in hand, assigned to
@@ -400,74 +361,109 @@ fn drawn_height(cx: &mut VisualTestContext, id: &str) -> f32 {
 
 /// Opens the session's page, the right panel with it.
 fn open_page(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
-    // A blocked session's row is at the foot of its project: unfolded first.
-    if blocked(shell, cx).contains(&id.to_owned()) {
-        unfold_foot(cx);
-    }
     cx.update(|window, cx| window.click(session_id(id), cx));
     until(shell, cx, "its page", |cx| {
         label(cx, "session-title").is_some()
     });
 }
 
+/// Two sessions of the project, the one that waits on top of the other: the project lists the
+/// newest first.
+fn two_sessions(user: &User) -> (String, Mcp, String) {
+    let (other, _) = start(user, "write the readme");
+    let (id, mcp) = start(user, "open the docs pull request");
+    (id, mcp, other)
+}
+
 #[gpui_kit::test]
-fn a_blocked_session_stays_under_its_project(cx: &mut TestAppContext) {
+fn a_blocked_session_moves_to_the_foot_of_its_project_and_stays_visible(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
-    let (other, _) = start(&user, "write the readme");
-    let (id, mcp) = start(&user, "open the docs pull request");
+    let (id, mcp, other) = two_sessions(&user);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "both rows", |cx| {
-        label(cx, session_id(&id)).is_some() && label(cx, session_id(&other)).is_some()
-    });
+    until(&shell, cx, "both rows", |cx| listed(&shell, cx).len() == 2);
     settle(cx);
-    let full = frame_height(&shell, &id, IN_PROJECT, cx).expect("its row");
-    assert_eq!(foot_height(cx), 0., "no foot while none is blocked");
+    assert_eq!(listed(&shell, cx), [id.clone(), other.clone()]);
+    let (before, full) = frame(&shell, &id, cx).expect("its row");
 
     wait_for_maya(&user, &id, &mcp);
-    until(&shell, cx, "the row leaves the live list", |cx| {
-        !listed(&shell, cx).contains(&id)
+    until(&shell, cx, "the row after the other", |cx| {
+        listed(&shell, cx) == [other.clone(), id.clone()]
     });
 
-    // Its project holds it still, at its foot: the live list folds the row away with its gap, and
-    // the foot's row unfolds with the count it says.
-    assert_eq!(listed(&shell, cx), std::slice::from_ref(&other));
-    assert_eq!(blocked(&shell, cx), std::slice::from_ref(&id));
-    after(cx, Duration::from_millis(70));
-    let folding =
-        frame_height(&shell, &id, IN_PROJECT, cx).expect("still drawn while it folds away");
-    assert!(
-        folding > 0. && folding < full,
-        "it folds away: {folding} of {full}"
-    );
-    let unfolding = foot_height(cx);
-    assert!(
-        unfolding > 0.,
-        "the foot's row unfolds as the row folds away: {unfolding}"
-    );
+    // It slides down over a few frames, drawn all along: it never leaves its project's list.
+    let slid = midway(&shell, &id, before, cx);
+    let (_, height) = frame(&shell, &id, cx).expect("still drawn while it slides");
+    assert_eq!(height, full, "no fold: the row keeps its height");
     settle(cx);
-    let foot = foot_height(cx);
+    let after = top(&shell, &id, cx);
     assert!(
-        foot > unfolding,
-        "it is still unfolding at 70 ms: {unfolding} then {foot}"
+        before < slid && slid < after,
+        "it slides to the foot: {before}, {slid}, {after}"
+    );
+    assert_eq!(after, before + full, "under the other row, which came up");
+    assert_eq!(top(&shell, &other, cx), before);
+
+    // Visible: a plain row of its project, its person and who it waits for.
+    assert!(label(cx, session_id(&id)).is_some());
+    let (mark, waits, scope) = shell.read_with(cx, |s, cx| {
+        let row = s.session(&id).unwrap().read(cx);
+        (
+            row.mark(),
+            row.waits().to_owned(),
+            row.scope().map(str::to_owned),
+        )
+    });
+    assert_eq!(mark, Some(AgentState::Blocked));
+    assert_eq!(waits, "waits for Maya · review of #12");
+    assert_eq!(
+        scope, None,
+        "it is in its project: it does not say whose it is"
     );
     assert_eq!(
-        frame_height(&shell, &id, IN_PROJECT, cx),
-        None,
-        "gone from the live list"
+        label(cx, session_waits_id(&id)).as_deref(),
+        Some("waits for Maya · review of #12")
     );
-    assert_eq!(foot_said(cx).as_deref(), Some("1 blocked by others"));
-    // The foot is inside the project's fold: its row is drawn there.
-    let inside = cx.update(|window, _| {
-        window
-            .within(IN_PROJECT)
-            .try_find(project_blocked_id("atlas"))
-            .is_some()
+    assert_eq!(blocked(&shell, cx), [id]);
+}
+
+#[gpui_kit::test]
+fn a_session_whose_wait_ends_goes_back_to_its_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let (id, mcp, other) = two_sessions(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "both rows", |cx| listed(&shell, cx).len() == 2);
+    settle(cx);
+    let place = top(&shell, &id, cx);
+    wait_for_maya(&user, &id, &mcp);
+    until(&shell, cx, "the row at the foot", |cx| {
+        listed(&shell, cx) == [other.clone(), id.clone()]
     });
-    assert!(inside, "under its project, not apart");
-    assert!(group_height(cx) < 1., "the foot is folded");
-    let mark = shell.read_with(cx, |s, cx| s.session(&id).unwrap().read(cx).mark());
-    assert_eq!(mark, Some(AgentState::Blocked));
+    settle(cx);
+    let foot = top(&shell, &id, cx);
+    assert!(foot > place);
+
+    maya_reviews(&user, &id);
+    // On top: it had the last exchange, its turn the review woke.
+    until(&shell, cx, "the row back on top", |cx| {
+        listed(&shell, cx) == [id.clone(), other.clone()]
+    });
+
+    // It slides back up over a few frames, drawn all along.
+    let slid = midway(&shell, &id, foot, cx);
+    assert!(
+        frame(&shell, &id, cx).is_some(),
+        "still drawn while it slides"
+    );
+    settle(cx);
+    let back = top(&shell, &id, cx);
+    assert!(
+        back < slid && slid < foot,
+        "it slides back: {foot}, {slid}, {back}"
+    );
+    assert_eq!(back, place, "in its place");
+    assert!(blocked(&shell, cx).is_empty());
 }
 
 #[gpui_kit::test]
@@ -477,19 +473,35 @@ fn there_is_no_blocked_group_across_projects(cx: &mut TestAppContext) {
     let (id, mcp) = start(&user, "open the docs pull request");
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| foot_said(cx).is_some());
+    until(&shell, cx, "its row", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
     settle(cx);
 
-    // Neither the group above "Ended" nor its fold: only the project's own foot.
-    assert!(label(cx, "blocked").is_none(), "no group row");
-    assert!(label(cx, "blocked-who").is_none(), "no names heading");
-    assert!(label(cx, "fold-blocked").is_none(), "no group fold");
-    assert!(label(cx, "blocked-sessions").is_none(), "no group list");
-    assert_eq!(foot_said(cx).as_deref(), Some("1 blocked by others"));
+    // Neither a group above "Ended" nor a fold nor a count in the project: the row is a row of
+    // its project, and nothing of it is kept with the sidebar's folds.
+    for gone in [
+        "blocked",
+        "blocked-who",
+        "fold-blocked",
+        "blocked-sessions",
+        "sidebar-blocked",
+        "blocked-footer",
+        "project-blocked-atlas",
+        "project-blocked-block-atlas",
+    ] {
+        assert!(label(cx, gone).is_none(), "{gone} is gone");
+        assert_eq!(drawn_height(cx, gone), 0., "{gone} is not drawn");
+    }
+    assert!(frame(&shell, &id, cx).is_some_and(|(_, height)| height > 0.));
+    assert!(
+        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"].is_null(),
+        "no fold kept for it"
+    );
 }
 
 #[gpui_kit::test]
-fn a_project_gathers_its_blocked_sessions_under_n_blocked_by_others(cx: &mut TestAppContext) {
+fn a_project_keeps_its_blocked_sessions_at_its_foot_in_its_order(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
     let (live, _) = start(&user, "write the readme");
@@ -509,96 +521,17 @@ fn a_project_gathers_its_blocked_sessions_under_n_blocked_by_others(cx: &mut Tes
     });
     settle(cx);
 
-    assert_eq!(listed(&shell, cx), std::slice::from_ref(&live));
-    assert_eq!(foot_said(cx).as_deref(), Some("2 blocked by others"));
-    // A session keeps its place in its project's order whatever its state: the foot holds the
-    // blocked ones in the order the project had them.
+    // The others first, in their order, then the blocked ones in the order the project had them.
     let kept: Vec<String> = order
         .into_iter()
         .filter(|id| *id == first || *id == second)
         .collect();
+    assert_eq!(listed(&shell, cx)[0], live);
     assert_eq!(blocked(&shell, cx), kept);
-
-    // Its rows are drawn once the foot is unfolded, each one in its place.
-    unfold_foot(cx);
-    assert!(group_height(cx) > 1., "unfolded");
+    assert_eq!(listed(&shell, cx)[1..], kept[..]);
     for id in [&first, &second] {
-        assert!(frame_height(&shell, id, IN_GROUP, cx).is_some_and(|h| h > 0.));
-        assert_eq!(frame_height(&shell, id, IN_PROJECT, cx), None);
+        assert!(frame(&shell, id, cx).is_some_and(|(_, height)| height > 0.));
     }
-}
-
-#[gpui_kit::test]
-fn n_blocked_by_others_is_folded_by_default_and_keeps_its_fold(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user);
-    let (id, mcp) = start(&user, "open the docs pull request");
-    wait_for_maya(&user, &id, &mcp);
-    let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| foot_said(cx).is_some());
-    settle(cx);
-
-    let open = shell.read_with(cx, |s, cx| {
-        s.project("atlas").unwrap().read(cx).blocked_open(cx)
-    });
-    assert!(!open, "folded by default");
-    assert!(group_height(cx) < 1., "its rows are folded away");
-
-    // The fold turns over a few frames, as the rail's `N ended` does.
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    after(cx, Duration::from_millis(70));
-    let folding = group_height(cx);
-    settle(cx);
-    let full = group_height(cx);
-    assert!(
-        folding > 0. && folding < full,
-        "it unfolds over a few frames: {folding} of {full}"
-    );
-    assert!(frame_height(&shell, &id, IN_GROUP, cx).is_some_and(|h| h > 0.));
-    // The daemon keeps it with the sidebar's other folds, one key for each project.
-    eventually("the fold kept", || {
-        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"]
-            == json!({"atlas": true})
-    });
-
-    // And folds again over a few frames, kept as folded.
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    after(cx, Duration::from_millis(70));
-    let folding = group_height(cx);
-    assert!(
-        folding > 0. && folding < full,
-        "it folds over a few frames: {folding} of {full}"
-    );
-    settle(cx);
-    assert!(group_height(cx) < 1.);
-    eventually("the fold kept folded (nothing to keep)", || {
-        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"].is_null()
-    });
-}
-
-#[gpui_kit::test]
-fn n_blocked_by_others_opens_as_the_user_left_it(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user);
-    let (id, mcp) = start(&user, "open the docs pull request");
-    wait_for_maya(&user, &id, &mcp);
-    // The window was closed with the foot of atlas unfolded.
-    user.call(
-        "window.set",
-        json!({"key": "sidebar", "value": {
-            "projects": {}, "leads": {}, "blocked": {"atlas": true}}}),
-    )
-    .unwrap();
-    let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| foot_said(cx).is_some());
-
-    // Made unfolded, it never animates from the other: its row is there at once.
-    let open = shell.read_with(cx, |s, cx| {
-        s.project("atlas").unwrap().read(cx).blocked_open(cx)
-    });
-    assert!(open, "unfolded as it was left");
-    assert!(group_height(cx) > 1., "its rows are drawn");
-    assert!(frame_height(&shell, &id, IN_GROUP, cx).is_some_and(|h| h > 0.));
 }
 
 #[gpui_kit::test]
@@ -610,7 +543,9 @@ fn a_folded_project_shows_its_strongest_mark_and_a_blocked_session_never_needs_y
     let (id, mcp) = start(&user, "open the docs pull request");
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| foot_said(cx).is_some());
+    until(&shell, cx, "its row", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
     settle(cx);
 
     // Only a blocked session in it: the folded project says the person, never "needs you".
@@ -634,52 +569,6 @@ fn a_folded_project_shows_its_strongest_mark_and_a_blocked_session_never_needs_y
     settle(cx);
     let held = shell.read_with(cx, |s, cx| s.project("atlas").unwrap().read(cx).held());
     assert_ne!(held, Some(AgentState::Blocked));
-}
-
-#[gpui_kit::test]
-fn a_blocked_session_comes_back_in_its_place_by_itself(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user);
-    let (id, mcp) = start(&user, "open the docs pull request");
-    let (other, _) = start(&user, "write the readme");
-    wait_for_maya(&user, &id, &mcp);
-    let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| {
-        blocked(&shell, cx) == [id.clone()]
-    });
-    unfold_foot(cx);
-    assert!(
-        frame_height(&shell, &id, IN_GROUP, cx).is_some(),
-        "its row at the foot"
-    );
-    // A row of its project is two lines high.
-    let full = frame_height(&shell, &other, IN_PROJECT, cx).expect("the other row");
-    assert!(foot_height(cx) > 0.);
-
-    maya_reviews(&user, &id);
-    until(&shell, cx, "the row back in its project", |cx| {
-        listed(&shell, cx).contains(&id)
-    });
-
-    // On top: it had the last exchange, its turn the review woke. The row rises into place as it
-    // fades in, and leaves the foot over a few frames, the foot's row folding away with its last.
-    assert_eq!(listed(&shell, cx), [id.clone(), other.clone()]);
-    after(cx, Duration::from_millis(70));
-    let leaving = frame_height(&shell, &id, IN_GROUP, cx).expect("still drawn as it leaves");
-    assert!(leaving > 0., "it slides out of the foot: {leaving}");
-    let folding = foot_height(cx);
-    assert!(folding > 0., "the foot's row folds away: {folding}");
-    let rising = row_top(&shell, &id, cx).expect("drawn as it arrives");
-    settle(cx);
-    let placed = row_top(&shell, &id, cx).expect("in place");
-    assert!(
-        rising > placed,
-        "it rises into place: {rising} then {placed}"
-    );
-    assert_eq!(frame_height(&shell, &id, IN_PROJECT, cx), Some(full));
-    assert!(blocked(&shell, cx).is_empty());
-    assert_eq!(foot_height(cx), 0., "the foot is gone with its last row");
-    assert!(foot_said(cx).is_none());
 }
 
 #[gpui_kit::test]
@@ -733,8 +622,6 @@ fn a_blocked_led_session_stays_under_its_pilot(cx: &mut TestAppContext) {
 
     // Its pilot speaks for it: it stays under it, its mark and its line saying who.
     assert_eq!(listed(&shell, cx), [lead.clone(), led.clone()]);
-    assert!(blocked(&shell, cx).is_empty());
-    assert!(foot_said(cx).is_none(), "no foot");
     let (mark, waits) = shell.read_with(cx, |s, cx| {
         let row = s.session(&led).unwrap().read(cx);
         (row.mark(), row.waits().to_owned())
@@ -747,11 +634,11 @@ fn a_blocked_led_session_stays_under_its_pilot(cx: &mut TestAppContext) {
 fn a_withdrawn_review_request_brings_the_row_back(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
-    let (id, mcp) = start(&user, "open the docs pull request");
+    let (id, mcp, other) = two_sessions(&user);
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| {
-        blocked(&shell, cx) == [id.clone()]
+    until(&shell, cx, "the row at the foot", |cx| {
+        listed(&shell, cx) == [other.clone(), id.clone()]
     });
     let turns = user.received_requests("session/prompt").len();
 
@@ -762,10 +649,11 @@ fn a_withdrawn_review_request_brings_the_row_back(cx: &mut TestAppContext) {
     eventually("the session no longer blocked", || {
         line(&user, &id)["blocked"].is_null()
     });
-    until(&shell, cx, "the row back in its project", |cx| {
-        listed(&shell, cx).contains(&id)
+    // Nothing happened to it but the end of the wait: it takes its place back, whatever it is.
+    until(&shell, cx, "the row back in its place", |cx| {
+        blocked(&shell, cx).is_empty()
     });
-    assert!(blocked(&shell, cx).is_empty());
+    assert_eq!(listed(&shell, cx).len(), 2);
     assert_eq!(
         user.received_requests("session/prompt").len(),
         turns,
@@ -823,33 +711,8 @@ fn a_blocked_pilot_stays_with_the_sessions_it_leads(cx: &mut TestAppContext) {
 
     // It stays in its project with the session it leads, its mark saying it is blocked.
     assert_eq!(listed(&shell, cx), [lead.clone(), led.clone()]);
-    assert!(blocked(&shell, cx).is_empty());
-    assert!(foot_said(cx).is_none(), "no foot");
     let mark = shell.read_with(cx, |s, cx| s.session(&lead).unwrap().read(cx).mark());
     assert_eq!(mark, Some(AgentState::Blocked));
-}
-
-#[gpui_kit::test]
-fn the_foot_is_absent_while_none_is_blocked(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user);
-    let (id, mcp) = start(&user, "open the docs pull request");
-    let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the row", |cx| {
-        label(cx, session_id(&id)).is_some()
-    });
-    settle(cx);
-    assert!(foot_said(cx).is_none(), "no foot while none is blocked");
-
-    wait_for_maya(&user, &id, &mcp);
-    until(&shell, cx, "the foot", |cx| foot_said(cx).is_some());
-    maya_reviews(&user, &id);
-    until(&shell, cx, "the row back", |cx| {
-        listed(&shell, cx).contains(&id)
-    });
-    // The foot folds away with its last row.
-    settle(cx);
-    assert!(foot_said(cx).is_none(), "gone with its last row");
 }
 
 #[gpui_kit::test]
@@ -861,12 +724,12 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
     takes_the_ticket(&user, &id, &mcp);
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| {
+    until(&shell, cx, "its row", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    unfold_foot(cx);
+    settle(cx);
 
-    // The foot changes where the row sits, not what it says: the subject on its first line, the
+    // Where the row sits is not what it says: the subject on its first line, the
     // key as the mono word on its second. It is in its project: it does not say whose it is.
     let (first, scope) = shell.read_with(cx, |s, cx| {
         let row = s.session(&id).unwrap().read(cx);
@@ -876,7 +739,7 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
     assert_eq!(scope, None);
     let key = cx.update(|window, _| {
         window
-            .within(IN_GROUP)
+            .within(IN_PROJECT)
             .try_find(session_key_beside_id(&id))
             .and_then(|found| found.label().map(str::to_owned))
     });
@@ -889,29 +752,32 @@ fn a_blocked_row_says_who_it_waits_for_on_its_second_line(cx: &mut TestAppContex
     project(&user);
     let (other, _) = start(&user, "write the readme");
     let (id, mcp) = start(&user, "open the docs pull request");
-    // A row of its project is two lines high: the foot's row keeps that height.
+    // A row of its project is two lines high: a blocked row keeps that height.
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the other row", |cx| {
         label(cx, session_id(&other)).is_some()
     });
     settle(cx);
-    let two_lines = frame_height(&shell, &other, IN_PROJECT, cx).expect("the other row");
+    let (_, two_lines) = frame(&shell, &other, cx).expect("the other row");
 
     wait_for_maya(&user, &id, &mcp);
-    until(&shell, cx, "the foot", |cx| {
+    until(&shell, cx, "its row", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    unfold_foot(cx);
+    settle(cx);
 
     // Line 2 says who and why, as #1508 gave it.
     let says = cx.update(|window, _| {
         window
-            .within(IN_GROUP)
+            .within(IN_PROJECT)
             .try_find(session_waits_id(&id))
             .and_then(|found| found.label().map(str::to_owned))
     });
     assert_eq!(says.as_deref(), Some("waits for Maya · review of #12"));
-    assert_eq!(frame_height(&shell, &id, IN_GROUP, cx), Some(two_lines));
+    assert_eq!(
+        frame(&shell, &id, cx).map(|(_, height)| height),
+        Some(two_lines)
+    );
 }
 
 #[gpui_kit::test]
@@ -921,18 +787,18 @@ fn its_second_line_comes_back_when_it_is_no_longer_blocked(cx: &mut TestAppConte
     let (id, mcp) = start(&user, "open the docs pull request");
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| {
+    until(&shell, cx, "its row", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    unfold_foot(cx);
+    settle(cx);
     assert!(
         label(cx, session_waits_id(&id)).is_some(),
-        "it says who it waits for at the foot"
+        "it says who it waits for"
     );
 
     maya_reviews(&user, &id);
-    until(&shell, cx, "the row back in its project", |cx| {
-        listed(&shell, cx).contains(&id)
+    until(&shell, cx, "the wait over", |cx| {
+        blocked(&shell, cx).is_empty()
     });
 
     // Its usual line 2 is back, the words of the wait gone.
@@ -1154,6 +1020,48 @@ fn the_ticket_line_unfolds_in_workspace_as_the_session_takes_a_ticket(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn the_ticket_line_folds_away_in_workspace_as_the_session_becomes_free(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    with_issue(&user, json!([]));
+    let (id, mcp) = start(&user, "open the docs pull request");
+    takes_the_ticket(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "the ticket", |cx| {
+        label(cx, "rail-about-ticket").is_some()
+    });
+    settle(cx);
+    let full = drawn_height(cx, "rail-about-block");
+    assert!(full > 0.);
+
+    // The ticket is done: the session is about nothing, its line folds away over a few frames.
+    let mut script = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(user.path("gh/script.json")).unwrap(),
+    )
+    .unwrap();
+    script["issues"]["acme/atlas"]["5"]["state"] = json!("CLOSED");
+    script["issues"]["acme/atlas"]["5"]["updatedAt"] = json!("2999-01-02T00:00:00Z");
+    user.gh_script(script);
+    a_round(&user);
+    eventually("free", || line(&user, &id)["subject"]["kind"] == "free");
+    until(&shell, cx, "the line folding away", |cx| {
+        drawn_height(cx, "rail-about-block") < full
+    });
+    let going = drawn_height(cx, "rail-about-block");
+    assert!(
+        going > 0. && going < full,
+        "it does not leave at once: {going} of {full}"
+    );
+    settle(cx);
+    assert_eq!(drawn_height(cx, "rail-about-block"), 0.);
+    assert!(label(cx, "rail-about-ticket").is_none());
+}
+
+#[gpui_kit::test]
 fn nothing_is_drawn_above_the_composer_for_a_wait(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
@@ -1205,18 +1113,15 @@ fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn the_window_draws_no_frame_at_rest_on_a_blocked_session_s_page_and_its_foot(
-    cx: &mut TestAppContext,
-) {
+fn the_window_draws_no_frame_at_rest_on_a_blocked_session_s_row_and_page(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
     let (id, mcp) = start(&user, "open the docs pull request");
     wait_for_maya(&user, &id, &mcp);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the foot", |cx| {
+    until(&shell, cx, "its row", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    unfold_foot(cx);
     quiet(&shell, cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     until(&shell, cx, "the wait said in Workspace", |cx| {
