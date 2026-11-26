@@ -3072,7 +3072,9 @@ row of a session led from another machine.
   at most waiting for their code, its next refused until they are placed or forgotten.
 - The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
   no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
-  have is untracked there, even one the sender had staged.
+  have is untracked there, even one the sender had staged. So a change staged there since is the
+  workspace's own, a loss, even when the file was put back as laid; and a copy forced away for what
+  was laid is read again right before its removal, which a change written since refuses.
 - Every git of a launch runs with `GIT_NO_LAZY_FETCH=1`, and a partial clone
   (`extensions.partialClone`, or a remote with `promisor = true`) is refused on either side: what
   it lacks is on its remote, and a bundle of it would be incomplete.
