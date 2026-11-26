@@ -725,27 +725,86 @@ fn a_failed_sign_in_says_what_the_program_said() {
 
 #[test]
 fn a_failed_sign_in_never_says_an_address_or_a_code() {
-    let user = User::new().with_sign_in_programs(&["gh"]);
-    // What a program prints for the dialog, on its error output too (gh does), then why it failed.
-    let said = "Open https://id.example.test/device?code=XYZW\n\
-                one-time code: ABCD-1234\n\
-                Error: the sign-in needs a terminal";
-    user.sign_in_script("gh", json!({"signed_in": false, "sign_in": {"fail": said}}));
+    const KEPT: &str = "Error: the sign-in needs a terminal";
+    // One case per filter of what a failure says (at most the last three lines are kept, so a
+    // case holds three at most): the line only that filter drops, and what must not be said.
+    let cases: [(&str, Option<&str>, &str, &str); 5] = [
+        // An address, with no code shape in it.
+        (
+            "an address",
+            None,
+            "Open https://id.example.test/device?code=XYZW\n",
+            "id.example.test",
+        ),
+        // The announcement of the code, with none in it.
+        (
+            "the announcement",
+            None,
+            "Please copy your one-time code first\n",
+            "one-time code",
+        ),
+        // A code the program did not announce (another than the one it showed).
+        (
+            "a word shaped as a code",
+            None,
+            "Retry with WXYZ-9876 instead\n",
+            "WXYZ-9876",
+        ),
+        // The code it showed, in a word that is no code by itself.
+        (
+            "the code shown, glued to letters",
+            None,
+            "one-time code: ABCD-1234\nsee xABCD-1234x\n",
+            "ABCD-1234",
+        ),
+        // What it printed on its output, where the dialog reads it: never a failure's.
+        (
+            "its output",
+            Some("Your one-time code is wxyz9876"),
+            "",
+            "wxyz9876",
+        ),
+    ];
+    for (case, stdout, error, never) in cases {
+        let user = User::new().with_sign_in_programs(&["gh"]);
+        let mut flow = json!({"fail": format!("{error}{KEPT}")});
+        if let Some(stdout) = stdout {
+            flow["stdout"] = json!(stdout);
+        }
+        user.sign_in_script("gh", json!({"signed_in": false, "sign_in": flow}));
 
-    user.call("signin.start", json!({"program": "gh"})).unwrap();
+        user.call("signin.start", json!({"program": "gh"})).unwrap();
 
-    eventually("gh's sign-in failed", || {
-        changed_to(&user, "gh", "failed").is_some()
-    });
-    let failed = changed_to(&user, "gh", "failed").unwrap();
-    let why = failed["why"].as_str().unwrap_or_default();
-    assert!(
-        why.contains("Error: the sign-in needs a terminal"),
-        "{failed}"
-    );
-    for never in ["id.example.test", "XYZW", "ABCD-1234", "one-time code"] {
-        assert!(!why.contains(never), "{never}: {failed}");
+        eventually(&format!("{case}: gh's sign-in failed"), || {
+            changed_to(&user, "gh", "failed").is_some()
+        });
+        let failed = changed_to(&user, "gh", "failed").unwrap();
+        let why = failed["why"].as_str().unwrap_or_default();
+        assert!(why.contains(KEPT), "{case}: {failed}");
+        assert!(!why.contains(never), "{case}: {never}: {failed}");
     }
+}
+
+#[test]
+fn acli_without_a_site_fails_saying_why() {
+    // No project names a Jira site: the sign-in is the program's `--web` alone, which cannot ask
+    // for the site without a terminal and says so.
+    let user = User::new().with_sign_in_programs(&["acli"]);
+    user.sign_in_script("acli", json!({"signed_in": false}));
+
+    user.call("signin.start", json!({"program": "acli"}))
+        .unwrap();
+
+    eventually("acli's sign-in failed", || {
+        changed_to(&user, "acli", "failed").is_some()
+    });
+    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(why.contains("pass --site <site>"), "{failed}");
+    assert_eq!(
+        user.sign_in_record("acli")[0]["login"],
+        json!(["jira", "auth", "login", "--web"])
+    );
 }
 
 #[test]

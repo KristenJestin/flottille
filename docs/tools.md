@@ -549,7 +549,10 @@ pending requests.
   is an expression set with spaces around its `=` (`token = self.token`, `os.getenv(…)`,
   `config[…]`), calls or names a type of no argument or a name (`Optional[str]`), or is a
   single word or a number (`token: str`, `max_token: 100`). Any key's passes its name on
-  (`password=password,`). And the
+  (`password=password,`). After a whitespace in the middle of a line, only `key=value` with no
+  space is read, and it is code, kept, when its value ends in `)`, `,` or `;`, starts with `$` or
+  is a dotted name (`Client(url, token=self.token)`, `let token=foo_bar;`, `--token=$GH_TOKEN`),
+  so that a diff or a file read back shows its code. And the
   password of each `-p<password>` of a MySQL or MariaDB command, up to a `|` or a `;`
   (`mysql -uapp -p…`; not a shell's `pwd`), but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,

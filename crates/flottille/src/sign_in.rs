@@ -1233,6 +1233,29 @@ mod tests {
     }
 
     #[test]
+    fn acli_signs_in_to_a_site_only_when_one_is_known() {
+        let args = |host| match Program::Acli.sign_in(host) {
+            Way::Run { args, .. } => args,
+            Way::Terminal(line) => panic!("a terminal: {line}"),
+        };
+        // No project names a site, nor the row: its documented `--web` alone.
+        for none in [None, Some("")] {
+            assert_eq!(args(none), ["jira", "auth", "login", "--web"]);
+        }
+        assert_eq!(
+            args(Some("example.atlassian.net")),
+            [
+                "jira",
+                "auth",
+                "login",
+                "--web",
+                "--site",
+                "example.atlassian.net"
+            ]
+        );
+    }
+
+    #[test]
     fn a_token_said_after_its_name_is_masked_however_it_is_spaced() {
         for (said, masked) in [
             (
