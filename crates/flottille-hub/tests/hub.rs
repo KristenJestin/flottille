@@ -919,15 +919,18 @@ fn a_dropped_copy_given_again_is_not_kept() {
     );
     let file = std::fs::read(folder.join("hub.json")).unwrap();
 
-    // Given again, or an older copy: neither kept nor written, and so not told to anyone.
-    assert!(!hub.share(seal(START_MS, b"Sam")).unwrap());
-    assert!(!hub.share(seal(START_MS - 1, b"Old")).unwrap());
+    // Given again, or an older copy: refused with its reason (the user who set it is told),
+    // neither kept nor written, and so not told to anyone.
+    for refused in [seal(START_MS, b"Sam"), seal(START_MS - 1, b"Old")] {
+        let why = hub.share(refused).unwrap_err().to_string();
+        assert!(why.contains("dropped"), "{why}");
+    }
     assert!(hub.shared().is_empty());
     assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
     // The hub remembers it across a start.
     drop(hub);
     let mut hub = open(&folder, &time);
-    assert!(!hub.share(seal(START_MS, b"Sam")).unwrap());
+    assert!(hub.share(seal(START_MS, b"Sam")).is_err());
     assert!(hub.shared().is_empty());
 
     // A newer value is kept, and clears what the hub remembered of the drop.
