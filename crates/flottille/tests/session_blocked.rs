@@ -257,11 +257,12 @@ fn a_wait_on_a_review_says_which_pull_request_in_a_field_of_its_own() {
 
     subscribe(&mcp, "forge", json!({"events": ["review"]}));
 
-    // A window reads which pull request it is, never the words of `why`.
+    // A window reads which pull request it is, and of which repository (#12 of another one is
+    // not it), never the words of `why`.
     let blocked = blocked(&user, &id);
     assert_eq!(
         blocked["on"],
-        json!({"kind": "pull_request", "number": 12}),
+        json!({"kind": "pull_request", "repository": "api", "number": 12}),
         "{blocked}"
     );
 }
