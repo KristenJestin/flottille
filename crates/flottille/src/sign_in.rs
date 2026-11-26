@@ -386,6 +386,54 @@ pub(crate) fn account_masked(account: &str) -> Option<String> {
     }
 }
 
+/// `line` with each email address in it masked as an account's name is (`someone@example.com` is
+/// `s***@e***`): a failure may name the account the program tried.
+fn emails_masked(line: &str) -> String {
+    let local = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-');
+    let domain = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-');
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find('@') {
+        let before = &rest[..at];
+        let start = before.rfind(|c: char| !local(c)).map_or(0, |i| {
+            i + before[i..].chars().next().map_or(1, char::len_utf8)
+        });
+        let after = &rest[at + 1..];
+        let end = after.find(|c: char| !domain(c)).unwrap_or(after.len());
+        // A sentence's full stop after the address is not its domain's.
+        let host = after[..end].trim_end_matches('.');
+        if start < at && host.contains('.') && !host.starts_with('.') {
+            out.push_str(&before[..start]);
+            out.push_str(
+                &account_masked(&rest[start..at + 1 + host.len()]).unwrap_or_else(|| "***".into()),
+            );
+            rest = &after[host.len()..];
+        } else {
+            out.push_str(&rest[..at + 1]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `line` with the word after a token's name (`token:`, `access_token:`) masked when it is no
+/// plain word: a program's failure may say a token as `name: value`, which no shape gives away.
+/// The shared masker holds `name=value`, which reads the same wherever a text is cut; this line
+/// is whole.
+fn named_tokens_masked(line: &str) -> String {
+    let mut words: Vec<String> = line.split(' ').map(str::to_owned).collect();
+    for at in 1..words.len() {
+        let named = words[at - 1].to_ascii_lowercase().ends_with("token:");
+        let word = &words[at];
+        // A plain word (`expired`) or a number says no token.
+        if named && word.len() >= 8 && word.chars().any(|c| !c.is_alphabetic()) {
+            words[at] = flottille_core::secrets::MASK.to_owned();
+        }
+    }
+    words.join(" ")
+}
+
 /// The hosts the projects use, by program, in the order they first use them: the programs the
 /// projects use come first among the forges, each with its first host.
 fn used_hosts(daemon: &Daemon) -> Vec<(Program, String)> {
@@ -449,6 +497,8 @@ struct Running {
     shows_code: bool,
     /// The program's input, while a pasted code may still be written to it: taken by the first.
     input: Option<ChildStdin>,
+    /// The code the user pasted, to keep out of a failure the program may repeat it in.
+    pasted: Option<String>,
     pid: u32,
     cancelled: bool,
     /// Woken when the address or the code is read, and when the flow ends.
@@ -572,11 +622,20 @@ async fn read_stream(
             (reading.address.clone(), reading.code.clone())
         };
         // The one-time code and the address are the user's to see in the dialog, never in a
-        // failure said in an event: a line holding either is not kept.
+        // failure said in an event, nor the code the user pasted: a line holding one is not kept.
+        let pasted = running()
+            .lock()
+            .unwrap()
+            .get(&program)
+            .filter(|flow| flow.id == id)
+            .and_then(|flow| flow.pasted.clone());
         let sensitive = line.contains("://")
             || line.to_ascii_lowercase().contains("one-time code")
             || code_in(&line).is_some()
-            || code.as_deref().is_some_and(|code| line.contains(code));
+            || code.as_deref().is_some_and(|code| line.contains(code))
+            || pasted
+                .as_deref()
+                .is_some_and(|pasted| line.contains(pasted));
         if let Some(tail) = &tail
             && !sensitive
             && !line.trim().is_empty()
@@ -848,6 +907,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
                 asks_code,
                 shows_code: wants_code,
                 input: child.stdin.take(),
+                pasted: None,
                 pid: child.id().unwrap_or_default(),
                 cancelled: false,
                 said: said.clone(),
@@ -898,7 +958,11 @@ fn said_by(tail: &Tail) -> String {
         .lock()
         .unwrap()
         .iter()
-        .map(|line| masked(&declared::without_credentials(line)))
+        .map(|line| {
+            emails_masked(&named_tokens_masked(&masked(
+                &declared::without_credentials(line),
+            )))
+        })
         .map(|line| line.chars().take(200).collect())
         .collect();
     lines.join(" / ")
@@ -1017,12 +1081,14 @@ async fn code(daemon: &Daemon, program: Program, code: String) -> Answer {
                 format!("{}'s sign-in asks for no code", program.name()),
             ));
         }
-        flow.input.take().ok_or_else(|| {
+        let input = flow.input.take().ok_or_else(|| {
             Failure::new(
                 "refused",
                 format!("{}'s sign-in was already given its code", program.name()),
             )
-        })?
+        })?;
+        flow.pasted = Some(code.clone());
+        input
     };
     let mut input = input;
     let mut line = code.into_bytes();
