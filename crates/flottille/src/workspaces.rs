@@ -3709,6 +3709,30 @@ mod tests {
         assert!(!as_laid(repo, &snapshot, "a.txt").await);
     }
 
+    #[tokio::test]
+    async fn a_staged_change_put_back_on_disk_is_still_a_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_ok(repo, &["init", "--quiet"]).await;
+        std::fs::write(repo.join("a.txt"), "start\n").unwrap();
+        git_ok(repo, &["add", "--all"]).await;
+        git_ok(repo, &["commit", "--quiet", "-m", "start"]).await;
+        std::fs::write(repo.join("a.txt"), "laid\n").unwrap();
+        git_ok(repo, &["commit", "--quiet", "--all", "-m", "snapshot"]).await;
+        let snapshot = git_ok(repo, &["rev-parse", "HEAD"]).await;
+        // Laid as `lay_snapshot` lays it: the file changed, the index left at `HEAD`.
+        git_ok(repo, &["reset", "--quiet", "HEAD^"]).await;
+        assert!(as_laid(repo, &snapshot, "a.txt").await);
+
+        // The agent stages its own content, then puts the file back as it was laid: the index
+        // holds work the snapshot never had, which a forced removal would lose.
+        std::fs::write(repo.join("a.txt"), "the agent's\n").unwrap();
+        git_ok(repo, &["add", "a.txt"]).await;
+        std::fs::write(repo.join("a.txt"), "laid\n").unwrap();
+
+        assert!(!as_laid(repo, &snapshot, "a.txt").await);
+    }
+
     #[test]
     fn only_the_worktree_holding_the_launcher_s_copy_is_forced() {
         let laid = vec!["api".to_owned()];
