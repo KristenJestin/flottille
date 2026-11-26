@@ -24,6 +24,7 @@ pub mod extensions;
 pub mod findings;
 pub mod glyphs;
 pub mod group_name;
+pub mod hidden_projects;
 pub mod history;
 pub mod instance;
 pub mod items;

@@ -106,6 +106,23 @@ pub fn project_remove_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-remove-{name}").into())
 }
 
+/// The menu of the row of a project that has its settings file: Hide on this machine. `key` is
+/// what the row's ids are made from (its name, and its machine in a machine's section); it is
+/// not [`project_menu_id`], the menu of a project with no file, which one of its name may sit
+/// beside.
+pub fn project_options_id(key: &str) -> ElementId {
+    ElementId::Name(format!("project-options-{key}").into())
+}
+
+/// Hide on this machine, in the menu of a project's row (`key` is what the row's ids are made
+/// from: its name, and its machine in a machine's section).
+pub fn project_hide_id(key: &str) -> ElementId {
+    ElementId::Name(format!("project-hide-{key}").into())
+}
+
+/// What the menu of a project's row says of hiding it.
+pub const HIDE_LABEL: &str = "Hide on this machine";
+
 /// The element id of a machine's section header (Group by machine).
 pub fn machine_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-{machine}").into())
@@ -1356,6 +1373,25 @@ impl ProjectNode {
             None => name.clone(),
         };
         let fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions.clone(), open));
+        // Hiding works on any project of the list, whichever machine has it: one entry, the row's.
+        let menu = {
+            let (shell, name, key) = (shell.clone(), name.clone(), key.clone());
+            cx.new(|cx| {
+                Menu::new(project_options_id(&key), "Project actions", cx).entry(
+                    project_hide_id(&key),
+                    HIDE_LABEL,
+                    Some(glyphs::HIDE),
+                    move |window, cx| {
+                        let name = name.clone();
+                        shell
+                            .update(cx, |shell, cx| shell.hide_project(&name, window, cx))
+                            .ok();
+                    },
+                )
+            })
+        };
+        // The row keeps the menu in sight while it is open: it draws again as it changes.
+        let watch = cx.observe(&menu, |_, _, cx| cx.notify());
         Self {
             title: name.clone().into(),
             name,
@@ -1368,7 +1404,7 @@ impl ProjectNode {
             commands: 0,
             unconfigured: false,
             removal: None,
-            menu: None,
+            menu: Some((menu, watch)),
             sessions,
             fold,
             shell,

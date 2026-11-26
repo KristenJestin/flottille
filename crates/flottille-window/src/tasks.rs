@@ -918,11 +918,12 @@ impl TasksSection {
             .shell
             .upgrade()
             .map(|shell| {
+                let shell = shell.read(cx);
                 shell
-                    .read(cx)
                     .snapshot()
                     .projects
                     .iter()
+                    .filter(|project| !shell.is_hidden(&project.name))
                     .filter(|project| project.name != self.project)
                     .map(|project| (project.name.clone(), project.folder.clone()))
                     .collect()

@@ -459,3 +459,61 @@ fn check_is_quiet_when_nothing_differs_and_fails_when_something_does() {
         stdout(&missing)
     );
 }
+
+/// What `flottille project list --hidden --json` says is hidden on this machine.
+fn hidden_json(user: &User) -> Vec<String> {
+    let output = user.run(&["project", "list", "--hidden", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    listed["hidden"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_cli_hides_and_shows_a_project() {
+    let user = User::new();
+    registered(&user);
+
+    assert!(hidden_json(&user).is_empty(), "nothing is hidden at first");
+    let none = user.run(&["project", "list", "--hidden"]);
+    assert!(
+        stdout(&none).contains("No project is hidden on this machine."),
+        "{}",
+        stdout(&none)
+    );
+
+    let hidden = user.run(&["project", "hide", "app"]);
+    assert!(hidden.status.success(), "{}", stderr(&hidden));
+    assert!(
+        stdout(&hidden).contains("Hid app on this machine."),
+        "{}",
+        stdout(&hidden)
+    );
+    assert_eq!(hidden_json(&user), ["app"]);
+    let listed = user.run(&["project", "list", "--hidden"]);
+    assert!(
+        stdout(&listed).lines().any(|line| line.trim() == "app"),
+        "{}",
+        stdout(&listed)
+    );
+    // Hiding is a view of this machine: the project is still registered, and listed as it was.
+    let all = user.run(&["project", "list"]);
+    assert!(stdout(&all).contains("app"), "{}", stdout(&all));
+
+    // Twice is once.
+    assert!(user.run(&["project", "hide", "app"]).status.success());
+    assert_eq!(hidden_json(&user), ["app"]);
+
+    let shown = user.run(&["project", "unhide", "app"]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    assert!(
+        stdout(&shown).contains("Showing app again on this machine."),
+        "{}",
+        stdout(&shown)
+    );
+    assert!(hidden_json(&user).is_empty());
+}

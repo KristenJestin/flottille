@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use flottille_core::paths::{Paths, ensure_private_dir};
-use flottille_core::protocol::ImageUpload;
+use flottille_core::protocol::{ImageUpload, ProjectName};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,6 +23,28 @@ const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 /// The key the window's sidebar state is kept under (`window.set`).
 const SIDEBAR: &str = "sidebar";
+
+/// The key the names of the projects this machine hides are kept under: a list of the rows' keys,
+/// the user's view of this machine alone (`project.hide`).
+const HIDDEN: &str = "hidden";
+
+/// The longest name of a project a window hides: more than any name a project has.
+const MAX_NAME_BYTES: usize = 200;
+
+/// The names the window's state says are hidden, in the order they were hidden.
+fn hidden_names(state: &[(String, Value)]) -> Vec<String> {
+    state
+        .iter()
+        .find(|(key, _)| key == HIDDEN)
+        .and_then(|(_, names)| names.as_array())
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,6 +379,32 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
         "draft.list" => {
             let keys = daemon.read(|store| store.draft_keys())?;
             Ok(json!({"drafts": keys}))
+        }
+        "project.hide" | "project.unhide" => {
+            let ProjectName { name } = serde_json::from_value(params)?;
+            if name.is_empty() || name.len() > MAX_NAME_BYTES {
+                return Err(Failure::refused(format!(
+                    "a project's name is 1 to {MAX_NAME_BYTES} bytes"
+                )));
+            }
+            let hide = method == "project.hide";
+            // Read and written in one transaction, so that two clients hiding at once keep both.
+            let hidden = daemon.write(|store| {
+                let mut hidden = hidden_names(&store.window_state()?);
+                match hide {
+                    true if !hidden.contains(&name) => hidden.push(name.clone()),
+                    true => {}
+                    false => hidden.retain(|hidden| *hidden != name),
+                }
+                let kept = json!(hidden);
+                store.set_window_state(HIDDEN, (!hidden.is_empty()).then_some(&kept))?;
+                Ok((hidden, None::<flottille_core::protocol::Event>))
+            })?;
+            Ok(json!({"hidden": hidden}))
+        }
+        "project.hidden" => {
+            let state = daemon.read(|store| store.window_state())?;
+            Ok(json!({"hidden": hidden_names(&state)}))
         }
         "window.get" => {
             let state = daemon.read(|store| store.window_state())?;
