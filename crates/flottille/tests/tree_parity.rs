@@ -1053,6 +1053,46 @@ fn a_paused_launcher_refuses_a_write_back_as_on_one_machine() {
     });
 }
 
+/// A led session the user detached writes to its former launcher with `session_send`: it is the
+/// user's alone, so it needs a leave there as any other session does, on one machine as on two.
+#[test]
+fn a_detached_session_across_needs_a_leave_to_write_to_its_former_launcher() {
+    parity(|topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            json!([{"when": "Write back now", "times": 1, "do": [{"mcp": {"tool": "session_send",
+                "arguments": {"session": play.root, "text": "The export is half done."}}}]}]),
+        );
+        let (_, session) = play.started("led");
+        play.idle(&session);
+        play.there()
+            .user
+            .call("agent.detach", json!({"agent": session}))
+            .unwrap();
+        soon(|| !play.root_deliveries().is_empty());
+        play.there()
+            .user
+            .call(
+                "agent.send",
+                json!({"agent": session, "message": "Write back now"}),
+            )
+            .unwrap();
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        a_while();
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("detached: its answer", list(play.tool_answers())),
+            seen("detached: reached the launcher", reached.to_string()),
+            seen("detached: requests", play.requests().to_string()),
+        ]
+    });
+}
+
 /// The root, in `mode`, with uncommitted work in its place, launches a led session in a workspace
 /// of its own, which ends; then removes that workspace: what it is answered, and what waits for
 /// the user. Here the session is given a new workspace; there it works in the copy of the root's
