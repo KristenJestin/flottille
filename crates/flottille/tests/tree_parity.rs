@@ -1016,6 +1016,47 @@ fn a_handed_session_writes_to_its_launcher() {
     parity(writes_to_its_launcher("handed"));
 }
 
+/// A led session whose launcher paused their following (fifty messages without the user, the
+/// last asking it to write back) writes to its launcher with `session_send`: refused as paused,
+/// and nothing reaches the launcher, on one machine as on two.
+#[test]
+fn a_paused_launcher_refuses_a_write_back_as_on_one_machine() {
+    parity(|topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            json!([{"when": "Write back now", "times": 1, "do": [{"mcp": {"tool": "session_send",
+                "arguments": {"session": play.root, "text": "The export is half done."}}}]}]),
+        );
+        let (_, session) = play.started("led");
+        play.idle(&session);
+        let texts = (1..50).map(|_| "Go on.").chain(["Write back now"]);
+        let sent: Vec<String> = texts
+            .map(|text| {
+                said(
+                    &play
+                        .mcp
+                        .call("session_send", json!({"session": session, "text": text})),
+                )
+            })
+            .filter(|said| said.starts_with("error: "))
+            .collect();
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        a_while();
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("paused: the launcher's messages refused", list(sent)),
+            seen("paused: its answer", list(play.tool_answers())),
+            seen("paused: reached the launcher", reached.to_string()),
+            seen("paused: requests", play.requests().to_string()),
+        ]
+    });
+}
+
 /// The root, in `mode`, with uncommitted work in its place, launches a led session in a workspace
 /// of its own, which ends; then removes that workspace: what it is answered, and what waits for
 /// the user. Here the session is given a new workspace; there it works in the copy of the root's
