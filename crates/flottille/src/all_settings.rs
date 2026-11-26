@@ -253,9 +253,11 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
                 flottille_core::place::says_a_place(&paths.workspaces_place())
             }
             updates::SHARED => updates::own_check(paths).map_err(invalid)?.is_some(),
+            // A `rules.md` is this machine's own even empty: its agents follow "no rules", as
+            // `rules.set` with an empty text chose.
             rules::SHARED => rules::global(paths)
                 .map_err(|failure| invalid(failure.message))?
-                .is_some_and(|text| !text.trim().is_empty()),
+                .is_some(),
             judge::SHARED => written(&paths.judge()),
             compaction::SHARED_GUIDANCE => written(&compaction::guidance_file(paths)),
             results::SHARED_LIMIT => results::own_keys(paths).map_err(invalid)?.0,

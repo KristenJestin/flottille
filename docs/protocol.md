@@ -772,7 +772,7 @@ name the entry instead"), and a machine that receives one drops it.
 - `settings.shared` answers `{"all", "own", "ignored", "defaults"}`: all machines' values by name
   (`null` without a hub), the names among them this machine holds itself (a connection it
   declares otherwise as `connections.<name>`; a judge or compactor Flottille picked is none; a
-  guidance file of only spaces is none), why each value it cannot follow is ignored here, by name
+  guidance file of only spaces is none; a `rules.md`, even empty, is this machine's "no rules"), why each value it cannot follow is ignored here, by name
   (a provider not ready, a model it does not offer), and Flottille's default of each value of the
   guidance and the rest, as its value says it (what the window's All machines shows while none
   is shared).
