@@ -745,6 +745,13 @@ impl Remote {
             // What its led sessions asked the user while it was off, told once.
             crate::across::relinked(&daemon, &machine);
         }
+        // The ghosts of its sessions, kept current while this link is the machine's.
+        tokio::spawn(crate::ghost::follow(
+            self.clone(),
+            link.clone(),
+            name.to_owned(),
+            generation,
+        ));
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
 
@@ -862,18 +869,26 @@ impl Remote {
     }
 
     /// This machine's live root sessions, light, as `listed` says its member: none unless it is
-    /// a runner. It reads the store: called on a blocking thread.
+    /// a runner, and an error when the store cannot be read (what is listed then stays as it was).
+    /// It reads the store: called on a blocking thread.
     fn sessions_here(
         &self,
         listed: Option<&(flottille_link::Members, String)>,
-    ) -> Option<flottille_link::SessionList> {
-        let (members, name) = listed?;
+    ) -> flottille_core::Result<Option<flottille_link::SessionList>> {
+        let Some((members, name)) = listed else {
+            return Ok(None);
+        };
         let runner = members
             .members()
             .iter()
             .any(|member| member.name == *name && member.role == Role::Runner);
-        let daemon = self.daemon.get().and_then(std::sync::Weak::upgrade)?;
-        runner.then(|| sessions_of(&daemon))
+        let Some(daemon) = self.daemon.get().and_then(std::sync::Weak::upgrade) else {
+            return Ok(None);
+        };
+        if !runner {
+            return Ok(None);
+        }
+        try_sessions_of(&daemon).map(Some)
     }
 
     /// This machine's projects, as `sessions_here` says its sessions. It runs git for each
@@ -906,11 +921,21 @@ impl Remote {
         let remote = self.clone();
         let (offers, sessions, projects, pilots) = tokio::task::spawn_blocking(move || {
             let listed = remote.listed().ok();
-            let sessions = remote.sessions_here(listed.as_ref());
-            let pilots = sessions
-                .as_ref()
-                .zip(remote.daemon())
-                .map(|(sessions, daemon)| pilots_of(&daemon, sessions));
+            // A store that cannot be read says nothing this round: the sessions and their pilots
+            // stay as last said, never an empty list that makes every machine forget them.
+            let sessions = match remote.sessions_here(listed.as_ref()) {
+                Ok(sessions) => Some(sessions),
+                Err(error) => {
+                    eprintln!("flottille daemon: the sessions could not be listed: {error}");
+                    None
+                }
+            };
+            let pilots = sessions.as_ref().map(|sessions| {
+                sessions
+                    .as_ref()
+                    .zip(remote.daemon())
+                    .map(|(sessions, daemon)| pilots_of(&daemon, sessions))
+            });
             (
                 remote.offers_here(listed.as_ref()),
                 sessions,
@@ -925,21 +950,25 @@ impl Remote {
             *current = offers;
             changed
         });
-        self.sessions.send_if_modified(|current| {
-            let changed = *current != sessions;
-            *current = sessions;
-            changed
-        });
+        if let Some(sessions) = sessions {
+            self.sessions.send_if_modified(|current| {
+                let changed = *current != sessions;
+                *current = sessions;
+                changed
+            });
+        }
         self.projects.send_if_modified(|current| {
             let changed = *current != projects;
             *current = projects;
             changed
         });
-        self.pilots.send_if_modified(|current| {
-            let changed = *current != pilots;
-            *current = pilots;
-            changed
-        });
+        if let Some(pilots) = pilots {
+            self.pilots.send_if_modified(|current| {
+                let changed = *current != pilots;
+                *current = pilots;
+                changed
+            });
+        }
     }
 
     /// What the machine of `key` offers, said over its link of `generation`: kept when its member
@@ -967,8 +996,16 @@ impl Remote {
         Ok(json!({}))
     }
 
+    /// This machine's live root sessions as it lists them to the others, from now on: none
+    /// while its member is no runner.
+    pub(crate) fn listed_sessions(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<flottille_link::SessionList>> {
+        self.sessions.subscribe()
+    }
+
     /// Whether the link of `generation` is the one kept for the machine of `key`.
-    fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
+    pub(crate) fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
         self.seen
             .lock()
             .unwrap()
@@ -1124,8 +1161,16 @@ pub(crate) fn offered(daemon: &Daemon) -> Capabilities {
 /// leads it here; never its conversation. Those of the latest exchange when there are more than
 /// a list holds.
 pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
+    try_sessions_of(daemon).unwrap_or_default()
+}
+
+/// `sessions_of`, or why the agents could not be read: an empty list is no answer of a store that
+/// failed, since the machines that follow this list would drop every session they keep of it.
+pub(crate) fn try_sessions_of(
+    daemon: &Daemon,
+) -> flottille_core::Result<flottille_link::SessionList> {
     use flottille_core::agent::AgentState;
-    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let agents = daemon.read(|store| store.agents())?;
     let parents: HashMap<&str, Option<&str>> = agents
         .iter()
         .map(|agent| (agent.id.as_str(), agent.parent.as_deref()))
@@ -1216,7 +1261,7 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .collect();
     sessions.sort_by(|a, b| b.exchanged_at.cmp(&a.exchanged_at).then(a.id.cmp(&b.id)));
     sessions.truncate(flottille_link::MOST_SESSIONS);
-    flottille_link::SessionList { sessions }
+    Ok(flottille_link::SessionList { sessions })
 }
 
 /// The pilots of another machine of the led sessions of `list`, this machine's: each session led by
@@ -1572,6 +1617,16 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     link.peer(),
                     received,
                     deliver,
+                ));
+            }
+            // Served for as long as its stream lasts.
+            Message::Machine(MachineMessage::Ghost(ask)) => {
+                let ask = ask.clone();
+                tokio::spawn(crate::ghost::serve(
+                    remote.clone(),
+                    name.clone(),
+                    received,
+                    ask,
                 ));
             }
             Message::Machine(MachineMessage::Call(call)) => {
@@ -2006,7 +2061,7 @@ impl Remote {
 }
 
 /// A key as the outbox and the copies of the lists name its machine.
-fn hex_of(key: &PublicKey) -> String {
+pub(crate) fn hex_of(key: &PublicKey) -> String {
     key.as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -2890,6 +2945,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
     // Said of this machine, on or off: before a link is needed.
     if matches!(method, "remote.settings" | "remote.configure") {
         return crate::remote_config::call(daemon, method, params).await;
+    }
+    // Read from this machine's store alone: a ghost opens while its machine, or the link, is off.
+    if method == "remote.ghost" {
+        let params = if params.is_null() { json!({}) } else { params };
+        return tokio::task::spawn_blocking(move || crate::ghost::read(&daemon, params))
+            .await
+            .map_err(|_| {
+                Failure::new(
+                    flottille_protocol::code::UNAVAILABLE,
+                    "the ghost could not be read",
+                )
+            })?;
     }
     let remote = remote_of(&daemon)?;
     let params = if params.is_null() { json!({}) } else { params };

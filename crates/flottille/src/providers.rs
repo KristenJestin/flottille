@@ -285,6 +285,24 @@ pub enum Version {
     Ask,
 }
 
+/// What a warning of a provider is about (`warning_kinds` of `provider.list`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WarningKind {
+    /// A version of its program other than the one this Flottille was checked against.
+    Version,
+    /// A sign-in the provider lacks, or refused its models for.
+    SignIn,
+}
+
+impl WarningKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WarningKind::Version => "version",
+            WarningKind::SignIn => "sign_in",
+        }
+    }
+}
+
 /// What is known of a provider on this machine: whether it is enabled, its program, its login.
 pub struct Check {
     pub provider: &'static Provider,
@@ -414,15 +432,27 @@ impl Check {
     /// What may stop its agents that the daemon cannot tell for sure: a version other than the
     /// one this Flottille was checked against, no sign-in it can see.
     pub fn warnings(&self) -> Vec<String> {
+        self.warnings_of_kind()
+            .into_iter()
+            .map(|(_, warning)| warning)
+            .collect()
+    }
+
+    /// Each of its warnings with what it is about, as the daemon tells it: the window shows the
+    /// ones that are the user's to act on where they are, never by reading the text.
+    pub fn warnings_of_kind(&self) -> Vec<(WarningKind, String)> {
         let provider = self.provider;
         let mut warnings = Vec::new();
         if let Some(version) = self.version.as_deref()
             && !self.qualified(version)
             && !self.version_refused()
         {
-            warnings.push(format!(
-                "{} is {version}, and this Flottille was checked against {}: {}",
-                provider.program, provider.checked, provider.may_change
+            warnings.push((
+                WarningKind::Version,
+                format!(
+                    "{} is {version}, and this Flottille was checked against {}: {}",
+                    provider.program, provider.checked, provider.may_change
+                ),
             ));
         }
         if self.enabled
@@ -431,10 +461,13 @@ impl Check {
             && !self.login_present
             && self.api_key.is_none()
         {
-            warnings.push(format!(
-                "{} is not signed in where Flottille can see it, and its agents fail if it is not \
-                 signed in at all: {}",
-                provider.title, provider.sign_in
+            warnings.push((
+                WarningKind::SignIn,
+                format!(
+                    "{} is not signed in where Flottille can see it, and its agents fail if it is \
+                     not signed in at all: {}",
+                    provider.title, provider.sign_in
+                ),
             ));
         }
         warnings
@@ -2034,10 +2067,12 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
         .iter()
         .map(|check| {
             let mut entry = check.to_json();
-            let mut warnings = check.warnings();
+            let mut warnings = check.warnings_of_kind();
             // A listing of its models the provider refused for no login.
-            warnings.extend(crate::models::refused(check));
-            entry["warnings"] = json!(warnings);
+            warnings.extend(crate::models::refused(check).map(|line| (WarningKind::SignIn, line)));
+            entry["warnings"] = json!(warnings.iter().map(|(_, w)| w).collect::<Vec<_>>());
+            entry["warning_kinds"] =
+                json!(warnings.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>());
             let last = last_models(daemon, check);
             entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
             entry["models"] = json!(last.map(|(models, _)| models));

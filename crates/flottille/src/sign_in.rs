@@ -9,7 +9,7 @@
 //! The methods are the user's (`drive`, `docs/protocol.md`, "The sign-in methods"): no tool of an
 //! agent reaches them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,8 @@ type Answer = Result<Value, Failure>;
 fn status_time() -> Duration {
     crate::forge::gh_time()
 }
+/// How many of a failed sign-in's last lines of error output its toast says.
+const SAID_LINES: usize = 3;
 /// A sign-in is given this long: a device code lasts 15 minutes.
 const FLOW_TIME: Duration = Duration::from_secs(15 * 60);
 /// `signin.start` waits this long for the address and the code before it answers.
@@ -140,7 +142,11 @@ impl Program {
                 false,
             ),
             Program::Glab => run(&["auth", "login", "--hostname", host, "--device"], false),
-            Program::Acli => run(&["jira", "auth", "login", "--web"], false),
+            // Without a terminal it cannot ask which site to sign in to (its picker "Select the
+            // site to login"), so the row's site answers it (#1529). No project names a site:
+            // its documented `--web` alone.
+            Program::Acli if host.is_empty() => run(&["jira", "auth", "login", "--web"], false),
+            Program::Acli => run(&["jira", "auth", "login", "--web", "--site", host], false),
             Program::Bkt if host == declared::BITBUCKET_CLOUD => run(
                 &[
                     "auth",
@@ -380,6 +386,78 @@ pub(crate) fn account_masked(account: &str) -> Option<String> {
     }
 }
 
+/// `line` with each email address in it masked as an account's name is (`someone@example.com` is
+/// `s***@e***`): a failure may name the account the program tried.
+fn emails_masked(line: &str) -> String {
+    let local = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-');
+    let domain = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-');
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find('@') {
+        let before = &rest[..at];
+        let start = before.rfind(|c: char| !local(c)).map_or(0, |i| {
+            i + before[i..].chars().next().map_or(1, char::len_utf8)
+        });
+        let after = &rest[at + 1..];
+        let end = after.find(|c: char| !domain(c)).unwrap_or(after.len());
+        // A sentence's full stop after the address is not its domain's.
+        let host = after[..end].trim_end_matches('.');
+        if start < at && host.contains('.') && !host.starts_with('.') {
+            out.push_str(&before[..start]);
+            out.push_str(
+                &account_masked(&rest[start..at + 1 + host.len()]).unwrap_or_else(|| "***".into()),
+            );
+            rest = &after[host.len()..];
+        } else {
+            out.push_str(&rest[..at + 1]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `line` with the word after a token's name (`token:`, `access_token:`) masked when it is no
+/// plain word: a program's failure may say a token as `name: value`, which no shape gives away.
+/// The shared masker holds `name=value`, which reads the same wherever a text is cut; this line
+/// is whole.
+fn named_tokens_masked(line: &str) -> String {
+    // A plain word (`expired.`) or a number says no token: its sentence's punctuation does not
+    // make it one.
+    let opaque = |word: &str| {
+        let word = word.trim_matches(['.', ',', ';', ':', '!', '?', '(', ')', '"', '\'']);
+        word.len() >= 8 && word.chars().any(|c| !c.is_alphabetic())
+    };
+    let mut named = false;
+    let words: Vec<String> = line
+        .split(' ')
+        .map(|word| {
+            // Spaces between the name and its value are kept as they were.
+            if word.is_empty() {
+                return String::new();
+            }
+            let after_name = std::mem::take(&mut named);
+            if after_name && opaque(word) {
+                return flottille_core::secrets::MASK.to_owned();
+            }
+            match word.split_once(':') {
+                Some((name, value)) if name.to_ascii_lowercase().ends_with("token") => {
+                    if value.is_empty() {
+                        named = true;
+                        word.to_owned()
+                    } else if opaque(value) {
+                        format!("{name}:{}", flottille_core::secrets::MASK)
+                    } else {
+                        word.to_owned()
+                    }
+                }
+                _ => word.to_owned(),
+            }
+        })
+        .collect();
+    words.join(" ")
+}
+
 /// The hosts the projects use, by program, in the order they first use them: the programs the
 /// projects use come first among the forges, each with its first host.
 fn used_hosts(daemon: &Daemon) -> Vec<(Program, String)> {
@@ -443,6 +521,8 @@ struct Running {
     shows_code: bool,
     /// The program's input, while a pasted code may still be written to it: taken by the first.
     input: Option<ChildStdin>,
+    /// The code the user pasted, to keep out of a failure the program may repeat it in.
+    pasted: Option<String>,
     pid: u32,
     cancelled: bool,
     /// Woken when the address or the code is read, and when the flow ends.
@@ -546,12 +626,17 @@ impl Reading {
     }
 }
 
-/// Reads a stream of the sign-in line by line, keeping only the address and the code.
+/// The last lines a sign-in said on its error output, held to say why it failed.
+type Tail = Arc<Mutex<VecDeque<String>>>;
+
+/// Reads a stream of the sign-in line by line, keeping only the address and the code, and, of its
+/// error output (`tail`), the last lines.
 async fn read_stream(
     program: Program,
     id: u64,
     stream: impl AsyncRead + Unpin,
     reading: Arc<Mutex<Reading>>,
+    tail: Option<Tail>,
 ) {
     let mut lines = BufReader::new(stream).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -560,6 +645,31 @@ async fn read_stream(
             reading.line(&line);
             (reading.address.clone(), reading.code.clone())
         };
+        // The one-time code and the address are the user's to see in the dialog, never in a
+        // failure said in an event, nor the code the user pasted: a line holding one is not kept.
+        let pasted = running()
+            .lock()
+            .unwrap()
+            .get(&program)
+            .filter(|flow| flow.id == id)
+            .and_then(|flow| flow.pasted.clone());
+        let sensitive = line.contains("://")
+            || line.to_ascii_lowercase().contains("one-time code")
+            || code_in(&line).is_some()
+            || code.as_deref().is_some_and(|code| line.contains(code))
+            || pasted
+                .as_deref()
+                .is_some_and(|pasted| line.contains(pasted));
+        if let Some(tail) = &tail
+            && !sensitive
+            && !line.trim().is_empty()
+        {
+            let mut tail = tail.lock().unwrap();
+            tail.push_back(line.trim().to_owned());
+            if tail.len() > SAID_LINES {
+                tail.pop_front();
+            }
+        }
         let mut running = running().lock().unwrap();
         if let Some(flow) = running.get_mut(&program).filter(|flow| flow.id == id) {
             let changed = flow.address != address || flow.code != code;
@@ -802,11 +912,13 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
         let said = Arc::new(Notify::new());
         let reading = Arc::new(Mutex::new(Reading::default()));
         if let Some(out) = child.stdout.take() {
-            tokio::spawn(read_stream(program, id, out, reading.clone()));
+            tokio::spawn(read_stream(program, id, out, reading.clone(), None));
         }
-        if let Some(err) = child.stderr.take() {
-            tokio::spawn(read_stream(program, id, err, reading));
-        }
+        let tail = Tail::default();
+        let errors = child
+            .stderr
+            .take()
+            .map(|err| tokio::spawn(read_stream(program, id, err, reading, Some(tail.clone()))));
         flows.insert(
             program,
             Running {
@@ -819,13 +931,22 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
                 asks_code,
                 shows_code: wants_code,
                 input: child.stdin.take(),
+                pasted: None,
                 pid: child.id().unwrap_or_default(),
                 cancelled: false,
                 said: said.clone(),
                 ended: false,
             },
         );
-        tokio::spawn(follow(daemon.clone(), program, id, path, child));
+        tokio::spawn(follow(
+            daemon.clone(),
+            program,
+            id,
+            path,
+            child,
+            errors,
+            tail,
+        ));
         said
     };
     announce(&daemon, program, host.as_deref(), "started", None);
@@ -854,14 +975,34 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
     }
 }
 
+/// The last lines of error output of a failed sign-in, masked as every output is: what the
+/// program said, never what it printed on its output (the address and the code are there).
+fn said_by(tail: &Tail) -> String {
+    let lines: Vec<String> = tail
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|line| {
+            emails_masked(&named_tokens_masked(&masked(
+                &declared::without_credentials(line),
+            )))
+        })
+        .map(|line| line.chars().take(200).collect())
+        .collect();
+    lines.join(" / ")
+}
+
 /// Waits for the sign-in's end (cut after `FLOW_TIME`), then says how it ended: signed in by the
-/// program's own status, or why not, in a sentence of Flottille's (never what it printed).
+/// program's own status, or why not, in a sentence of Flottille's and, when it failed, the last
+/// lines the program said on its error output (masked).
 async fn follow(
     daemon: Arc<Daemon>,
     program: Program,
     id: u64,
     path: PathBuf,
     mut child: tokio::process::Child,
+    errors: Option<tokio::task::JoinHandle<()>>,
+    tail: Tail,
 ) {
     let ended = tokio::time::timeout(FLOW_TIME, child.wait()).await;
     let pid = child.id();
@@ -870,6 +1011,10 @@ async fn follow(
             crate::agents::signal_group(pid, libc::SIGKILL);
         }
         let _ = child.wait().await;
+    }
+    if let Some(errors) = errors {
+        // What a program started itself may hold its pipe open: the lines read so far are enough.
+        let _ = tokio::time::timeout(Duration::from_secs(1), errors).await;
     }
     let (host, cancelled) = {
         let mut flows = running().lock().unwrap();
@@ -902,12 +1047,20 @@ async fn follow(
                     .map(|host| format!(" to {host}"))
                     .unwrap_or_default()
             ),
-            Ok(Ok(exit)) => format!(
-                "{}'s sign-in ended without signing in (exit code {})",
-                program.name(),
-                exit.code()
-                    .map_or_else(|| "none".to_owned(), |code| code.to_string())
-            ),
+            Ok(Ok(exit)) => {
+                let said = said_by(&tail);
+                format!(
+                    "{}'s sign-in ended without signing in (exit code {}){}",
+                    program.name(),
+                    exit.code()
+                        .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                    if said.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {said}")
+                    }
+                )
+            }
             Ok(Err(error)) => format!(
                 "{}'s sign-in could not be followed: {error}",
                 program.name()
@@ -952,12 +1105,14 @@ async fn code(daemon: &Daemon, program: Program, code: String) -> Answer {
                 format!("{}'s sign-in asks for no code", program.name()),
             ));
         }
-        flow.input.take().ok_or_else(|| {
+        let input = flow.input.take().ok_or_else(|| {
             Failure::new(
                 "refused",
                 format!("{}'s sign-in was already given its code", program.name()),
             )
-        })?
+        })?;
+        flow.pasted = Some(code.clone());
+        input
     };
     let mut input = input;
     let mut line = code.into_bytes();
@@ -1075,6 +1230,49 @@ mod tests {
             reading.line(line);
         }
         (reading.address, reading.code)
+    }
+
+    #[test]
+    fn acli_signs_in_to_a_site_only_when_one_is_known() {
+        let args = |host| match Program::Acli.sign_in(host) {
+            Way::Run { args, .. } => args,
+            Way::Terminal(line) => panic!("a terminal: {line}"),
+        };
+        // No project names a site, nor the row: its documented `--web` alone.
+        for none in [None, Some("")] {
+            assert_eq!(args(none), ["jira", "auth", "login", "--web"]);
+        }
+        assert_eq!(
+            args(Some("example.atlassian.net")),
+            [
+                "jira",
+                "auth",
+                "login",
+                "--web",
+                "--site",
+                "example.atlassian.net"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_token_said_after_its_name_is_masked_however_it_is_spaced() {
+        for (said, masked) in [
+            (
+                "bad access_token: abc123def456",
+                "bad access_token: [masked]",
+            ),
+            ("bad token:  abc123def456 x", "bad token:  [masked] x"),
+            ("bad token:abc123def456 x", "bad token:[masked] x"),
+            // A plain word, a number, a name that is no token's: kept.
+            ("an invalid token: expired.", "an invalid token: expired."),
+            ("an invalid token:  expired.", "an invalid token:  expired."),
+            ("max token:100 left", "max token:100 left"),
+            ("the tokens: abc123def456", "the tokens: abc123def456"),
+            ("at 12:30 abc123def456", "at 12:30 abc123def456"),
+        ] {
+            assert_eq!(named_tokens_masked(said), masked, "{said}");
+        }
     }
 
     #[test]

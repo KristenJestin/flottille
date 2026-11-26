@@ -237,6 +237,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.members` | read |
 | `remote.launches` | read |
 | `remote.sessions` | read |
+| `remote.ghost` | read |
 | `remote.change` | drive |
 | `remote.pair` | local |
 | `remote.declare` | local |
@@ -1618,6 +1619,16 @@ was removed on 2026-11-21).
   does not know makes it refuse the whole list), what is new beside it travels as a message of its
   own (`projects`, `pilots`) that a machine of before refuses alone, and a machine that receives
   none of them draws the list as before.
+- `remote.ghost {machine, session}` answers what this machine keeps of the session `session` of
+  the machine `machine`, by its name (`docs/remote.md`, "One list of every machine"), read from
+  this machine's store alone, that machine on or off: `{"events": [event…], "more", "view":
+  {"tree", "requests", "asks"} | null, "last": seq | null}`, `events` its last ones (2000 at most,
+  oldest first) as that machine's `agent.show` gives them, numbered there, `more` whether it has
+  earlier ones (read there by `agent.show {before}`), `view` what that machine's `agent.tree`
+  (`agents`), `approval.list {tree}` (`requests`) and `vault.asks` (its tree's `asks`) last
+  answered, `last` the number of its last event, from which that machine's `events.watch {after}`
+  follows it. `not-found` when this machine keeps none of it. It is read only: nothing of it is
+  written by a client.
 - `remote.close {request}` keeps the user's close of a session of another machine: `request` is
   `agent.stop {agent}` for that machine, signed by the client with the device key as any request
   for another machine. This machine stores it before it sends it, sends it once that machine is
@@ -2876,6 +2887,7 @@ when they name none:
       "ready": true,
       "why": null,
       "warnings": [],
+      "warning_kinds": [],
       "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
                   "version": "2.1.295", "checked": "2.1.295"},
       "login": {"present": true, "path": "/home/user/.claude/.credentials.json", "api_key": null},
@@ -2905,6 +2917,12 @@ sign-in line of the provider (`Codex's login expired: sign in again (run codex l
 agent refused to list its models for no login: it stays while its program, its API keys and its
 sign-in file are those the listing was refused in, and goes once a listing is read (`models`
 stays `null` until then).
+`warning_kinds` is an array as long as `warnings`, in the same order, that tells what each
+warning is about: `version` (a version other than the one Flottille was checked against) or
+`sign_in` (no sign-in it can see, or the sign-in line of a refused listing). The kind is told
+by the daemon, never read from the text; `warnings` stays an array of strings, so a client that
+knows no kinds keeps working. The window says the `sign_in` warnings under the composer's
+pickers, and the others only where the providers are looked at (Settings, `flottille providers`).
 `images` says whether its agents take images in a prompt, as the last of them that started said
 (`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test

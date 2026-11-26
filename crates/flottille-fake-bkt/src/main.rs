@@ -166,6 +166,14 @@ fn main() {
 fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     Some(match words.as_slice() {
+        // `login [host]` takes its host as one word: without it, `bkt` asks "Bitbucket base URL" on
+        // a terminal and ends "host is required when not running in a TTY" on a null input (#1529).
+        ["auth", "login", rest @ ..] if login_host(rest).is_none() => {
+            sign_in::record(dir, json!({"login": args, "pid": std::process::id()}));
+            eprintln!("Error: host is required when not running in a TTY");
+            sign_in::record(dir, json!({"ended": "refused"}));
+            1
+        }
         ["auth", "login", ..] => sign_in::login(dir, script, args, |address, _| {
             println!("Authenticating with Bitbucket Cloud via OAuth...");
             println!("Failed to open browser: no browser here");
@@ -174,6 +182,28 @@ fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
         ["auth", "logout", ..] => sign_in::logout(dir, args),
         _ => return None,
     })
+}
+
+/// The host `bkt auth login` was given: its one word that is neither a flag nor a flag's value.
+fn login_host<'a>(args: &[&'a str]) -> Option<&'a str> {
+    const TAKING_A_VALUE: [&str; 5] = [
+        "--kind",
+        "--username",
+        "--token",
+        "--auth-method",
+        "--alias",
+    ];
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match word {
+            word if TAKING_A_VALUE.contains(word) => {
+                words.next();
+            }
+            word if word.starts_with('-') => {}
+            word => return Some(word),
+        }
+    }
+    None
 }
 
 /// The contexts `bkt context list --json` lists.

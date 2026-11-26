@@ -385,11 +385,14 @@ fn a_model_a_machine_lacks_is_ignored_there_and_said() {
         }),
     );
 
+    // The hub is given each value apart: either may reach the server first.
+    let names = ["new_session", "review.spec_model"];
     eventually("the server says the model it lacks", || {
-        shared(&server)["ignored"]["new_session"].is_string()
+        let ignored = shared(&server)["ignored"].clone();
+        names.iter().all(|name| ignored[name].is_string())
     });
     let ignored = shared(&server)["ignored"].clone();
-    for name in ["new_session", "review.spec_model"] {
+    for name in names {
         let why = ignored[name].as_str().unwrap_or_default();
         assert!(why.contains("elsewhere-huge"), "{name}: {ignored}");
     }
