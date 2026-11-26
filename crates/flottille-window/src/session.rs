@@ -65,6 +65,7 @@ use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
+use crate::loading::{ConversationLoading, Opening};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
@@ -1499,6 +1500,13 @@ impl SessionPage {
         cx.notify();
     }
 
+    /// The first page of the shown conversation, which could not be read, is asked again.
+    pub fn read_again(&mut self, cx: &mut Context<Self>) {
+        self.conversation.update(cx, |view, cx| view.read_again(cx));
+        self.relink();
+        cx.notify();
+    }
+
     /// How many pages of the shown conversation are asked for.
     pub fn pages(&self) -> usize {
         self.pages
@@ -1669,10 +1677,14 @@ impl SessionPage {
                 self.fetch_pictures(cx);
             }
             SessionUpdate::HistoryFailed(why) => {
-                // The first read is the skeleton's; only a page asked for is told.
-                if self.pages > 1 {
-                    self.conversation
-                        .update(cx, |view, cx| view.load_failed(why, cx));
+                // A page asked for says why at its line; the first read, in place of the rows.
+                match self.pages > 1 {
+                    true => self
+                        .conversation
+                        .update(cx, |view, cx| view.load_failed(why, cx)),
+                    false => self
+                        .conversation
+                        .update(cx, |view, cx| view.unread(why, cx)),
                 }
             }
             // One row added or drawn again: nothing else is looked at.
@@ -3025,6 +3037,8 @@ pub struct ConversationView {
     /// The user's messages recorded while one sent from here waits for the daemon's answer: not
     /// drawn until it says which is that one, which then becomes it in place.
     held: HashSet<usize>,
+    /// What it shows until its first page has arrived, over the list.
+    loading: Entity<ConversationLoading>,
     renders: usize,
 }
 
@@ -3127,6 +3141,7 @@ impl ConversationView {
     ) -> Self {
         let list = Self::list();
         let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let loading = cx.new(|cx| ConversationLoading::new(id, page.clone(), cx));
         let mut model = Conversation::new(me, parent);
         model.set_project(project);
         let this = Self {
@@ -3151,6 +3166,7 @@ impl ConversationView {
             pending: Vec::new(),
             in_place: HashMap::new(),
             held: HashSet::new(),
+            loading,
             renders: 0,
         };
         this.watch(cx);
@@ -3663,6 +3679,26 @@ impl ConversationView {
         Some(again)
     }
 
+    /// Whether its first page has arrived.
+    pub fn is_read(&self, cx: &gpui_kit::App) -> bool {
+        *self.loading.read(cx).opening() == Opening::Read
+    }
+
+    /// Its first page could not be read, with why: it says so, unless a page arrived before.
+    pub(crate) fn unread(&mut self, why: String, cx: &mut Context<Self>) {
+        self.loading.update(cx, |loading, cx| {
+            if *loading.opening() != Opening::Read {
+                loading.set(Opening::Unread(why), cx);
+            }
+        });
+    }
+
+    /// Its first page is asked again.
+    pub(crate) fn read_again(&mut self, cx: &mut Context<Self>) {
+        self.loading
+            .update(cx, |loading, cx| loading.set(Opening::Waiting, cx));
+    }
+
     /// The page asked for did not come, with why.
     pub(crate) fn load_failed(&mut self, why: String, cx: &mut Context<Self>) {
         if self.load == Load::Idle || self.load == Load::Failed(why.clone()) {
@@ -3833,6 +3869,8 @@ impl ConversationView {
         // A page of earlier events keeps the user where they were reading.
         let anchor = (!read.follow).then(|| self.anchor()).flatten();
         let had_head = self.head() == 1;
+        self.loading
+            .update(cx, |loading, cx| loading.set(Opening::Read, cx));
         self.model = self.model.restarted();
         self.model.place_approvals(read.placed);
         for event in read.events {
@@ -4493,25 +4531,39 @@ impl Render for ConversationView {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
         let id = SharedString::from(format!("conversation-{}", self.id));
         if self.rows.is_empty() && !self.earlier && self.pending.is_empty() {
+            // Nothing was said only once the history says so: until then it is being read.
+            let read = self.is_read(cx);
+            let empty = fade(
+                SharedString::from(format!("conversation-empty-fade-{}", self.id)),
+                read,
+                PANEL,
+                window,
+                cx,
+            );
             return div()
                 .id(id)
                 .size_full()
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "conversation-empty-{}",
-                            self.id
-                        )))
-                        .max_w(px(780.))
-                        .w_full()
-                        .mx_auto()
-                        .px(if narrow { space::LG } else { space::XXL })
-                        .pt(if narrow { space::XL } else { space::XXL })
-                        .text_color(p.faint)
-                        .aria_label("Nothing said yet.")
-                        .child("Nothing said yet.")
-                        .test_support(),
-                )
+                .relative()
+                .when(read || empty > 0.0, |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "conversation-empty-{}",
+                                self.id
+                            )))
+                            .max_w(px(780.))
+                            .w_full()
+                            .mx_auto()
+                            .px(if narrow { space::LG } else { space::XXL })
+                            .pt(if narrow { space::XL } else { space::XXL })
+                            .text_color(p.faint)
+                            .opacity(empty)
+                            .aria_label("Nothing said yet.")
+                            .child("Nothing said yet.")
+                            .test_support(),
+                    )
+                })
+                .child(self.loading.clone())
                 .into_any_element();
         }
         div()
@@ -4526,6 +4578,7 @@ impl Render for ConversationView {
                 .size_full(),
             )
             .child(self.to_end.clone())
+            .child(self.loading.clone())
             .test_support()
             .into_any_element()
     }
