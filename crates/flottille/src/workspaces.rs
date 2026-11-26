@@ -2718,38 +2718,20 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             Head::Detached(hash) => format!("on no branch (detached at {hash})"),
             head => format!("on its branch {}", head.branch_or(&workspace.branch)),
         };
-        let status = git::output(
-            &dir,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            Class::Work,
-        )
-        .await
-        .map_err(|error| cannot_check(&worktree.path, &error))?;
-        let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
-        while let Some(entry) = entries.next() {
-            let (code, path) = entry.split_at(3.min(entry.len()));
-            // A rename or a copy names where it came from next.
-            if code.starts_with(['R', 'C']) {
-                entries.next();
-            }
-            let file = dir.join(path).components().collect::<PathBuf>();
-            if code == "?? " {
-                // Another worktree standing in this one: checked, then removed, by itself.
-                if made.iter().any(|r| workspace.folder_of(&r.path) == file) {
-                    continue;
-                }
-                if made_link(workspace, &file) {
-                    ours.push(file);
-                    continue;
-                }
-            }
-            let snapshot = laid_with
-                .iter()
-                .find(|(path, _)| *path == worktree.path)
-                .map(|(_, snapshot)| snapshot.as_str());
-            if let Some(snapshot) = snapshot
-                && as_laid(&dir, snapshot, path).await
-            {
+        let (changes, links) = own_changes(workspace, &made, &dir)
+            .await
+            .map_err(|error| cannot_check(&worktree.path, &error))?;
+        ours.extend(links);
+        let snapshot = laid_with
+            .iter()
+            .find(|(path, _)| *path == worktree.path)
+            .map(|(_, snapshot)| snapshot.as_str());
+        let as_laid = match snapshot {
+            Some(snapshot) => as_laid(&dir, snapshot, &changes).await,
+            None => vec![false; changes.len()],
+        };
+        for ((_, path), as_laid) in changes.iter().zip(as_laid) {
+            if as_laid {
                 if !laid.contains(&worktree.path) {
                     laid.push(worktree.path.clone());
                 }
@@ -2855,31 +2837,134 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     })
 }
 
-/// Whether the file `path` of the worktree at `dir`, which git says changed, is as the snapshot
-/// `snapshot` laid it: the same content, or absent from both. A link, a snapshot git no longer
-/// has, or anything git cannot read, is not: without the snapshot nothing tells the change from
-/// work of the workspace's own.
-async fn as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
+/// What git counts as changed in the copy at `dir`, each entry's code (`XY `) and path, less the
+/// other copies of `made` standing in it, which are checked and removed by themselves, and the
+/// links Flottille made in it, given apart.
+async fn own_changes(
+    workspace: &Workspace,
+    made: &[&Worktree],
+    dir: &Path,
+) -> Result<(Vec<(String, String)>, Vec<PathBuf>), String> {
+    let status = git::output(
+        dir,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        Class::Work,
+    )
+    .await?;
+    let mut changes = Vec::new();
+    let mut links = Vec::new();
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        let (code, path) = entry.split_at(3.min(entry.len()));
+        // A rename or a copy names where it came from next.
+        if code.starts_with(['R', 'C']) {
+            entries.next();
+        }
+        let file = dir.join(path).components().collect::<PathBuf>();
+        if code == "?? " {
+            if made.iter().any(|r| workspace.folder_of(&r.path) == file) {
+                continue;
+            }
+            if made_link(workspace, &file) {
+                links.push(file);
+                continue;
+            }
+        }
+        changes.push((code.to_owned(), path.to_owned()));
+    }
+    Ok((changes, links))
+}
+
+/// For each of `changes`, which git says changed in the worktree at `dir`, whether it is as the
+/// snapshot `snapshot` laid it: unstaged, as `lay_snapshot` leaves the index at `HEAD`, and the
+/// same content, or absent from both. A staged change, a link, a snapshot git no longer has, or
+/// anything git cannot read, is not: without the snapshot nothing tells the change from work of
+/// the workspace's own. Three git processes for the whole worktree, not per file.
+async fn as_laid(dir: &Path, snapshot: &str, changes: &[(String, String)]) -> Vec<bool> {
+    let none = vec![false; changes.len()];
+    if changes.is_empty() {
+        return none;
+    }
     let commit = format!("{snapshot}^{{commit}}");
     let there = git::run(dir, &["cat-file", "-e", &commit], Class::Read).await;
     if !there.is_ok_and(|there| there.success) {
-        return false;
+        return none;
     }
-    let at = format!("{snapshot}:{path}");
-    let blob = git::run(dir, &["rev-parse", "--verify", "--quiet", &at], Class::Read).await;
-    let blob = match blob {
-        Ok(blob) if blob.success => Some(blob.stdout.trim().to_owned()),
-        Ok(_) => None,
-        Err(_) => return false,
+    let Ok(tree) = git::output(
+        dir,
+        &["ls-tree", "-r", "-z", "--full-tree", &commit],
+        Class::Read,
+    )
+    .await
+    else {
+        return none;
     };
-    match (std::fs::symlink_metadata(dir.join(path)), blob) {
-        (Err(error), None) => error.kind() == std::io::ErrorKind::NotFound,
-        (Ok(meta), Some(blob)) if meta.is_file() => {
-            git::output(dir, &["hash-object", "--", path], Class::Read)
-                .await
-                .is_ok_and(|hash| hash.trim() == blob)
-        }
-        _ => false,
+    let blobs: BTreeMap<&str, &str> = tree
+        .split('\0')
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            let mut meta = meta.split(' ');
+            let (_, kind, blob) = (meta.next()?, meta.next()?, meta.next()?);
+            (kind == "blob").then_some((path, blob))
+        })
+        .collect();
+    // `None`: a file of the worktree whose content is still to compare.
+    let seen: Vec<Option<bool>> = changes
+        .iter()
+        .map(|(code, path)| {
+            if !code.starts_with([' ', '?']) {
+                return Some(false);
+            }
+            match (
+                std::fs::symlink_metadata(dir.join(path)),
+                blobs.get(path.as_str()),
+            ) {
+                (Err(error), None) => Some(error.kind() == ErrorKind::NotFound),
+                (Ok(meta), Some(_)) if meta.is_file() => None,
+                _ => Some(false),
+            }
+        })
+        .collect();
+    let files: Vec<&str> = changes
+        .iter()
+        .zip(&seen)
+        .filter(|(_, seen)| seen.is_none())
+        .map(|((_, path), _)| path.as_str())
+        .collect();
+    let hashes = match files.is_empty() {
+        true => String::new(),
+        false => git::output(
+            dir,
+            &[&["hash-object", "--"][..], &files].concat(),
+            Class::Read,
+        )
+        .await
+        .unwrap_or_default(),
+    };
+    let mut hashes = hashes.lines();
+    changes
+        .iter()
+        .zip(seen)
+        .map(|((_, path), seen)| {
+            seen.unwrap_or_else(|| {
+                hashes
+                    .next()
+                    .is_some_and(|hash| blobs.get(path.as_str()) == Some(&hash.trim()))
+            })
+        })
+        .collect()
+}
+
+/// Whether the copy at `dir`, which `checked` found as the snapshot `snapshot` laid it, still is,
+/// read again right before it is removed with `--force`: a file written since is no longer
+/// forced away.
+async fn still_laid(workspace: &Workspace, made: &[&Worktree], dir: &Path, snapshot: &str) -> bool {
+    match own_changes(workspace, made, dir).await {
+        Ok((changes, _)) => as_laid(dir, snapshot, &changes)
+            .await
+            .into_iter()
+            .all(|as_laid| as_laid),
+        Err(_) => false,
     }
 }
 
@@ -2944,6 +3029,7 @@ async fn remove_held(
             Failure::refused(format!("cannot remove {}: {error}", link.display()))
         })?;
     }
+    let laid_with = crate::travel::laid(daemon, workspace);
     // The deepest first: the others may stand inside the root one.
     let mut order = made.clone();
     order.sort_by_key(|r| std::cmp::Reverse(depth(&r.path)));
@@ -2956,6 +3042,24 @@ async fn remove_held(
         } else {
             &[]
         };
+        // Forced for what was laid, not approved: what came since the check is refused.
+        if approved.is_none()
+            && !force.is_empty()
+            && let Some((_, snapshot)) = laid_with.iter().find(|(path, _)| *path == worktree.path)
+            && !still_laid(
+                workspace,
+                &made,
+                &workspace.folder_of(&worktree.path),
+                snapshot,
+            )
+            .await
+        {
+            return Err(Failure::refused(format!(
+                "cannot remove the copy of {}: it holds work that is not committed, written \
+                 since it was checked",
+                worktree.path
+            )));
+        }
         let line = [
             &["worktree", "remove"][..],
             force,
@@ -3682,6 +3786,19 @@ mod tests {
         done.stdout.trim().to_owned()
     }
 
+    /// [`as_laid`] for the one file `path`, with the code git gives it now.
+    async fn one_as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
+        let status = git::output(
+            dir,
+            &["status", "--porcelain=v1", "-z", "--", path],
+            Class::Read,
+        )
+        .await
+        .unwrap();
+        let code = status.get(..3).unwrap_or("   ").to_owned();
+        as_laid(dir, snapshot, &[(code, path.to_owned())]).await[0]
+    }
+
     #[tokio::test]
     async fn a_missing_snapshot_counts_every_change_as_a_loss() {
         let dir = tempfile::tempdir().unwrap();
@@ -3697,16 +3814,16 @@ mod tests {
         std::fs::write(repo.join("b.txt"), "changed\n").unwrap();
 
         // Without the snapshot nothing tells the change from the work of the workspace: a loss.
-        assert!(!as_laid(repo, gone, "a.txt").await);
-        assert!(!as_laid(repo, gone, "b.txt").await);
-        assert!(!as_laid(repo, "not-a-commit", "a.txt").await);
+        assert!(!one_as_laid(repo, gone, "a.txt").await);
+        assert!(!one_as_laid(repo, gone, "b.txt").await);
+        assert!(!one_as_laid(repo, "not-a-commit", "a.txt").await);
         // The snapshot there, a file it does not hold and the workspace deleted is as it laid it.
         let snapshot = git_ok(repo, &["rev-parse", "HEAD"]).await;
         git_ok(repo, &["rm", "--quiet", "--cached", "a.txt"]).await;
         git_ok(repo, &["commit", "--quiet", "-m", "without a"]).await;
         let without = git_ok(repo, &["rev-parse", "HEAD"]).await;
-        assert!(as_laid(repo, &without, "a.txt").await);
-        assert!(!as_laid(repo, &snapshot, "a.txt").await);
+        assert!(one_as_laid(repo, &without, "a.txt").await);
+        assert!(!one_as_laid(repo, &snapshot, "a.txt").await);
     }
 
     #[tokio::test]
@@ -3722,7 +3839,7 @@ mod tests {
         let snapshot = git_ok(repo, &["rev-parse", "HEAD"]).await;
         // Laid as `lay_snapshot` lays it: the file changed, the index left at `HEAD`.
         git_ok(repo, &["reset", "--quiet", "HEAD^"]).await;
-        assert!(as_laid(repo, &snapshot, "a.txt").await);
+        assert!(one_as_laid(repo, &snapshot, "a.txt").await);
 
         // The agent stages its own content, then puts the file back as it was laid: the index
         // holds work the snapshot never had, which a forced removal would lose.
@@ -3730,7 +3847,7 @@ mod tests {
         git_ok(repo, &["add", "a.txt"]).await;
         std::fs::write(repo.join("a.txt"), "laid\n").unwrap();
 
-        assert!(!as_laid(repo, &snapshot, "a.txt").await);
+        assert!(!one_as_laid(repo, &snapshot, "a.txt").await);
     }
 
     #[test]
