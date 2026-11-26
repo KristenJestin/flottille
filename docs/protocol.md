@@ -2669,8 +2669,9 @@ listing leaves out. `refused` when `before` is not a root agent. The pilot door'
 
 `{"agent", "after"?, "before"?}`. `{"agent", "events", "more"}`: the agent, and a page of its
 events, oldest first: at most 1000, the first ones (those numbered after `after` when it is given),
-or with `before` the last ones numbered before it. `more` says whether events remain past the
-page: newer ones, or with `before` older ones.
+or with `before` the last ones numbered before it, as many of them as hold at most 1 MB of data
+(one at least: a page of long tool outputs is not tens of megabytes). `more` says whether events
+remain past the page: newer ones, or with `before` older ones.
 
 ### The run methods
 
