@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::tree::{session_id, session_key_beside_id, session_key_id};
+use flottille_window::tree::{session_id, session_key_beside_id, session_runs_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -217,20 +217,28 @@ fn about_five<'a>(
     (id, shell, cx)
 }
 
+/// The first line's words, as the row draws them.
+fn title_bounds(cx: &mut VisualTestContext, session: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| {
+        window
+            .find(gpui_kit::ElementId::Name(
+                format!("{}-title", session_id(session)).into(),
+            ))
+            .bounds()
+    })
+}
+
 #[gpui_kit::test]
-fn a_row_says_the_ticket_its_session_is_about(cx: &mut TestAppContext) {
+fn a_row_says_the_ticket_its_session_is_about_on_its_second_line(cx: &mut TestAppContext) {
     let user = user();
     let (id, _shell, cx) = about_five(&user, cx);
+    let height = row_height(cx, &id);
 
-    assert_eq!(label(cx, session_key_id(&id)).as_deref(), Some("#5"));
-    assert!(
-        cx.update(|window, _| window.try_find(session_key_beside_id(&id)).is_none()),
-        "the key is on the first line only"
-    );
-    // The key comes before the title, on its line.
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#5"));
+    // The key is the mono word under the title, never a chip before it.
     let (key, title) = cx.update(|window, _| {
         (
-            window.find(session_key_id(&id)).bounds(),
+            window.find(session_key_beside_id(&id)).bounds(),
             window
                 .find(gpui_kit::ElementId::Name(
                     format!("{}-title", session_id(&id)).into(),
@@ -238,8 +246,110 @@ fn a_row_says_the_ticket_its_session_is_about(cx: &mut TestAppContext) {
                 .bounds(),
         )
     });
-    assert!(key.right() <= title.left(), "{key:?} {title:?}");
-    assert!(key.top() < title.bottom() && title.top() < key.bottom());
+    assert!(key.top() >= title.bottom() - px(1.), "{key:?} {title:?}");
+    assert!(key.size.height <= px(16.), "it fits its line: {key:?}");
+    assert_eq!(row_height(cx, &id), height);
+}
+
+#[gpui_kit::test]
+fn a_key_never_pushes_its_row_s_title(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    let with_key = title_bounds(cx, &id);
+
+    issues(
+        &user,
+        &[
+            issue(5, "The login fails", "CLOSED"),
+            issue(6, "The logout hangs", "OPEN"),
+        ],
+    );
+    eventually("free", || subject(&user, &id)["kind"] == "free");
+    until(&shell, cx, "the row says it holds nothing", |cx| {
+        label(cx, session_id(&id)).as_deref() == Some("Free · nothing in hand")
+    });
+    settle(cx);
+    let without = title_bounds(cx, &id);
+
+    assert_eq!(
+        (with_key.left(), with_key.right()),
+        (without.left(), without.right()),
+        "the first line is as wide with the key as without"
+    );
+}
+
+/// What the row of `session` is shown: its model on its second line, drawn or not.
+fn runs_drawn(cx: &mut VisualTestContext, session: &str) -> bool {
+    cx.update(|window, _| window.try_find(session_runs_id(session)).is_some())
+}
+
+#[gpui_kit::test]
+fn a_key_takes_the_model_s_place_on_the_second_line(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    let row = shell.read_with(cx, |shell, _| shell.session(&id).unwrap().clone());
+
+    row.update(cx, |row, cx| row.set_runs("Fake Large 5.5 · high", cx));
+    settle(cx);
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#5"));
+    assert!(!runs_drawn(cx, &id), "the model gives way to the key");
+}
+
+#[gpui_kit::test]
+fn a_session_about_no_ticket_keeps_its_model_on_the_second_line(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    issues(
+        &user,
+        &[
+            issue(5, "The login fails", "CLOSED"),
+            issue(6, "The logout hangs", "OPEN"),
+        ],
+    );
+    eventually("free", || subject(&user, &id)["kind"] == "free");
+    until(&shell, cx, "the row says it holds nothing", |cx| {
+        label(cx, session_id(&id)).as_deref() == Some("Free · nothing in hand")
+    });
+    settle(cx);
+    let row = shell.read_with(cx, |shell, _| shell.session(&id).unwrap().clone());
+
+    row.update(cx, |row, cx| row.set_runs("Fake Large 5.5 · high", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, session_runs_id(&id)).as_deref(),
+        Some("Fake Large 5.5 · high")
+    );
+    assert!(
+        cx.update(|window, _| window.try_find(session_key_beside_id(&id)).is_none()),
+        "no key"
+    );
+}
+
+#[gpui_kit::test]
+fn the_key_and_the_model_cross_fade_on_the_second_line(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    let row = shell.read_with(cx, |shell, _| shell.session(&id).unwrap().clone());
+    let about = row.read_with(cx, |row, _| row.subject().cloned());
+    // Free, with its model, then the ticket comes back: the key fades in as the model fades out.
+    row.update(cx, |row, cx| row.set_subject(None, false, cx));
+    row.update(cx, |row, cx| row.set_runs("Fake Large 5.5 · high", cx));
+    settle(cx);
+    assert!(runs_drawn(cx, &id));
+    assert_eq!(pending_frames(cx), 0, "at rest before");
+
+    row.update(cx, |row, cx| row.set_subject(about.as_ref(), false, cx));
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(
+        runs_drawn(cx, &id) && label(cx, session_key_beside_id(&id)).is_some(),
+        "both are there while they cross"
+    );
+    settle(cx);
+    assert!(!runs_drawn(cx, &id), "the model is gone");
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#5"));
+    assert_eq!(pending_frames(cx), 0, "then nothing moves");
 }
 
 #[gpui_kit::test]
@@ -259,10 +369,6 @@ fn a_renamed_session_keeps_its_title_and_shows_the_key_beside_it(cx: &mut TestAp
         label(cx, session_key_beside_id(&id)).as_deref(),
         Some("#5"),
         "the key moves to the second line"
-    );
-    assert!(
-        cx.update(|window, _| window.try_find(session_key_id(&id)).is_none()),
-        "and leaves the first"
     );
     let beside = cx.update(|window, _| window.find(session_key_beside_id(&id)).bounds());
     assert!(
@@ -313,7 +419,7 @@ fn a_free_session_says_it_holds_nothing(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(
-        cx.update(|window, _| window.try_find(session_key_id(&id)).is_none()),
+        cx.update(|window, _| window.try_find(session_key_beside_id(&id)).is_none()),
         "no key is left"
     );
     assert_eq!(row_height(cx, &id), height, "the row keeps its height");
@@ -346,7 +452,7 @@ fn the_subject_fades_in_when_it_changes(cx: &mut TestAppContext) {
         label(cx, session_id(&id)).as_deref() == Some("The logout hangs")
     });
     assert!(pending_frames(cx) > 0, "the new subject fades in");
-    assert_eq!(label(cx, session_key_id(&id)).as_deref(), Some("#6"));
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#6"));
     assert_eq!(row_height(cx, &id), height, "the row keeps its height");
     settle(cx);
     assert_eq!(pending_frames(cx), 0, "then nothing moves");
