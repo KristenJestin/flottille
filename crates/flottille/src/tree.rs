@@ -1097,7 +1097,9 @@ pub fn session_of(
             true => Relation::Started,
             false => Relation::NoLeave,
         }
-    } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
+    } else if caller.launched_by.as_deref() == Some(session.id.as_str())
+        || crate::across::launcher_here(daemon, &caller.id).as_deref() == Some(session.id.as_str())
+    {
         Relation::StartedYou
     } else if leave()? {
         Relation::Leave

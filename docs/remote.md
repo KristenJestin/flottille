@@ -1460,10 +1460,6 @@ parent, …`), each naming the ref they came into. A child that reported and end
 nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
 to be told.
 
-**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the removal runs as the
-same removal on one machine: what still exists on the launcher's machine is no loss, and nothing
-waits for the user, in Full or not, that would not wait there. Kept until the code follows.
-
 **The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
 workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
 tool's `remove` takes the same optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
@@ -1475,7 +1471,10 @@ of its own agents' removals (`tools.md`, "The workspace"), its caller stood in f
 workspace's project there, in its tree's mode: held for its user as a removal of its own agents'
 is, its card saying what would be lost, refused while an agent works in it, and done only with nothing lost or
 by the user's answer to discard. Commits that went back count as kept, as commits another branch
-holds do: what the card names is only what never reached the caller. Nothing of it is done, not
+holds do, and so does the caller's uncommitted work laid with the launch while it is as it was
+laid (#1512): it is the caller's, which its machine still has. What the card names is only the
+work of that workspace's own that never reached the caller, so nothing waits for the user, in Full
+or not, that would not wait on one machine. Nothing of it is done, not
 even the commits sent, before the call is found to be one that machine plays: its device's role
 (`refused: pc may only view: …` for a viewer), its words, its workspace that launch's. The user's
 answer comes back as an `approval` delivery, as any held call of another machine's, and is done for
@@ -2272,14 +2271,12 @@ on a real phone, by hand, and reported.
 give another machine a rule of its own, each kept until the code follows: a child of another
 machine without a parent and what is refused it (#1274's depth at every open, #1275's child
 counted as a session an agent started and session that cannot be detached, #1304's refusals and
-depth); the hollow stand-in (#1250's leave that the writer's end does not take, a led session asking leave to
-write to its pilot, a held call's `<caller>@<key>`, a stand-in's folder that does not exist;
+depth); the hollow stand-in (#1250's leave that the writer's end does not take, a held call's `<caller>@<key>`, a stand-in's folder that does not exist;
 #1263's reach to one machine only and stand-ins kept by an unread member list; #1361's cap of a
 pilot); the closed list of calls a caller may
 make, `review` for one call alone among them ("Across machines", #1279); #1272's led session whose
 pilot is a stand-in and a row under its pilot; the rows of another machine's launches (a reported
-child that stays under its pilot, rows of the tree that nothing offers to end, #1280); #1278's
-removal held in Full when it would lose what the launcher's machine still has; and #1441's phone
+child that stays under its pilot, rows of the tree that nothing offers to end, #1280); and #1441's phone
 row of a session led from another machine.
 
 - **Settings for all machines are sealed to the machines' own keys** (#1330): each machine's
@@ -2501,8 +2498,6 @@ row of a session led from another machine.
   live sessions that machine listed, an untitled one by the first line its list gives it. The
   name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
   a follow-up.
-- **A led session writing to its pilot on another machine** is asked the leave as any other pair
-  (#1250): the receiving machine does not stand its caller in as started by that pilot.
 - **A machine of before refuses a call of another session** with the link's own refusal of a
   message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
 - **A held call of a caller of another machine is that machine's user's request** (#1250), as a

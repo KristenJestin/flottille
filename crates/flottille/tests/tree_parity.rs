@@ -1002,22 +1002,25 @@ fn a_handed_session_writes_to_its_launcher() {
     parity(writes_to_its_launcher("handed"));
 }
 
-/// The root, in `mode`, with uncommitted work in its place, launches a led session, which ends;
-/// then removes its workspace: what it is answered, and what waits for the user.
+/// The root, in `mode`, with uncommitted work in its place, launches a led session in a workspace
+/// of its own, which ends; then removes that workspace: what it is answered, and what waits for
+/// the user. Here the session is given a new workspace; there it works in the copy of the root's
+/// place made for it, uncommitted work included, which is the root's and still on its machine.
 fn removes_the_workspace_of_its_led_session(mode: &'static str) -> impl Fn(Topology) -> Seen {
     move |topology| {
         let play = Play::new(topology, mode, json!([]));
-        let folder = play.pc.folder();
-        let tracked = play.pc.git(&folder, &["ls-files"]);
-        let file = folder.join(tracked.lines().next().expect("a tracked file"));
-        let mut text = std::fs::read_to_string(&file).unwrap();
-        text.push_str("A draft line, never committed.\n");
-        std::fs::write(&file, text).unwrap();
-        let (_, session) = play.started("led");
+        let mut args = json!({"kind": "led", "title": TITLE, "brief": BRIEF});
+        match topology {
+            Topology::Here => args["new_workspace"] = "feat-export".into(),
+            Topology::Across => args["machine"] = "server".into(),
+        }
+        let answer = play.mcp.call("agent_launch", args);
+        assert!(!answer.error, "{}", answer.text);
+        let session = play.titled(TITLE);
         play.idle(&session);
         let workspace = play.shown(&session)["workspace"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("no workspace: {:#}", play.shown(&session)))
             .to_owned();
         play.there()
             .user

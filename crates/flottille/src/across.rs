@@ -267,6 +267,19 @@ pub(crate) fn caller_of(daemon: &Daemon, agent: &Agent, kind: &str) -> Option<St
         .map(|launch| launch.caller)
 }
 
+/// The agent of this machine that launched the caller of another machine stood in for here as
+/// `stand_in` (`<agent>@<machine's key>`): the one it writes to as a session writes to the agent
+/// that started it on one machine. `None` for any other agent.
+pub(crate) fn launcher_here(daemon: &Daemon, stand_in: &str) -> Option<String> {
+    let (agent, machine) = stand_in.split_once('@')?;
+    daemon
+        .read(|store| store.launches("out", Some(machine), LaunchFilter::Agent(agent)))
+        .ok()?
+        .into_iter()
+        .find(|launch| launch.state != "refused")
+        .map(|launch| launch.caller)
+}
+
 /// This machine's name among the user's, as the member list says it.
 pub(crate) fn own_name(daemon: &Daemon) -> Option<String> {
     let remote = crate::link::remote_of(daemon).ok()?;
