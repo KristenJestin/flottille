@@ -771,7 +771,7 @@ fn a_file_that_cannot_be_read_is_said_in_its_row_alone() {
     });
     let config = server.user.path("config/flottille");
     std::fs::write(config.join("tool-results.toml"), "limit = [\n").unwrap();
-    std::fs::write(config.join("appearance.toml"), "colour = \"blue\"\n").unwrap();
+    std::fs::write(config.join("appearance.toml"), "shade = \"purple\"\n").unwrap();
 
     let shown = shared(&server);
 
