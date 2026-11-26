@@ -1315,16 +1315,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   all it held is closed or merged it is free: `Free · nothing in hand`, in faint ink, its page
   saying what it last held (`#5 done · #12 merged`). An ended session keeps the subject it had
   when it ended. A session that never held anything has no subject and shows
-  its title. The row's first line says the ticket's key as a chip, then its title (else `#12` and
+  its title. The row's first line says its title across the row's width (the ticket's title, else `#12` and
   the pull request's title, else `Free · nothing in hand`); the session's own title stays in the
-  line's tooltip and the page's header. A title the user gave (Rename…) wins: it keeps the first
-  line and the key goes to the second, before the place. The session's page says, under its
+  line's tooltip and the page's header. The ticket's key is never on the first line, where it
+  would push the title: it is the mono word of the second line, before the place, in place of the
+  model a led session runs on (a session about no ticket keeps its model there). A title the user
+  gave (Rename…) wins the first line the same way. The session's page says, under its
   header, the chips of its ticket and of its pull request with its checks' mark, then one faint
   line, `What it is about, from <where it comes from>.` (`the workspace's linked ticket`, `a ticket
   it changed`, `a pull request it opened`…), so that a wrong guess can be understood; its
   workspace stays in the header and its runs in the rail. A subject that changes fades in over
-  the old one, the key's chip unfolds and fades in, folds away and fades out, or goes from the
-  first line to the second with a fade, and the row's height never changes. The mark says its words under the pointer
+  the old one, the key unfolds and fades in on the second line as the model fades out, and back, and
+  the row's height never changes, nor does anything on its first line. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
   A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for
