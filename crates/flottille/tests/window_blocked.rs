@@ -1701,3 +1701,31 @@ fn under_a_pull_request_subject_a_wait_does_not_repeat_its_review(cx: &mut TestA
         flottille_window::session::blocked_line(&waiting_on(review_of(Some("."), 12)), false)
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_wait_under_its_pull_request_line(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user);
+    let id = blocked_in_a_workspace(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "its row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "its pull request and the wait under it", |cx| {
+        label(cx, "rail-pull-atlas").is_some() && label(cx, "rail-wait").is_some()
+    });
+    quiet(&shell, cx);
+
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        asked += step(&shell, Duration::from_millis(16), cx);
+        gone += Duration::from_millis(16);
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    assert_eq!((drawn, asked), (0, 0), "(frames drawn, frames asked)");
+}
