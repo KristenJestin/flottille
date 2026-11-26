@@ -1722,28 +1722,26 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the `away` ink, its line 1 what it is about as every row's, its line 2 `waits for Maya ·
   review of #123` (the words alone on the line, in the `away` ink, cut with an ellipsis inside
   the row and whole in a tooltip, fading as they change; a row that stops waiting gets its usual
-  line 2 back, the words swapped by a fade). A blocked **root** stays in its project, at its
-  foot, under a foldable row `N blocked by others` (the rail's `N ended`: the same row, the fold
-  over `PANEL`, its chevron turning), which unfolds and fades in with the project's first blocked
-  session and folds away with its last. It is folded by default and its fold is kept for each
-  project with the sidebar's folds. A session keeps its place in its project's order whatever its
-  state, so the foot holds the blocked ones in the order the project has them; the row slides
-  into the foot as the session becomes blocked and back to its place when the wait ends, the
-  count fading to its new number. It is the one state that moves a row, and only at rest, never
-  during a turn: what the user waits on someone else for is out of the way of what needs them,
-  and it comes back by itself when its subscription fires (the agent takes a turn) or the person
-  answers. A folded project shows its strongest mark: needs you, then a failure, running,
-  waiting, and last the person of a blocked session, which never counts as needing the user. A
-  **led** session that is blocked stays under its pilot, which speaks for it, and a blocked root
-  that leads a live session stays in its project with the sessions it leads, its mark saying it
-  is blocked. The page of a blocked session says nothing above its composer and nothing in its
-  header (title and place only): its Workspace section, in the right panel, holds a ticket line
-  under the workspace's (the key, its title or what it is about, and an icon button `Open
-  <key>`) and, under the ticket it waits on (or under the pull request's line when it waits on a
-  review), the wait: the person's mark and `Waits for Maya · since 14:02`, its tooltip `It comes
-  back by itself when Maya answers.`; both unfold and fade in and fold away and fade out. Its
-  row in the Agents panel takes the person's mark in place of the clock and keeps `waiting for
-  ticket <key>`. The phone follows in its own issue.
+  line 2 back, the words swapped by a fade). A blocked **root** stays a plain, visible row of its
+  project, moved to the foot of the project's sessions: after the others, which keep their
+  order, and the blocked ones in the order the project has them. There is no group, no fold and
+  no count for it, and nothing of it is kept with the sidebar's folds. The row slides into the
+  foot as the session becomes blocked and back to its place when the wait ends, the way a row
+  moves in any list. It is the one state that moves a row, and only at rest, never during a turn:
+  what the user waits on someone else for is out of the way of what needs them, and it comes back
+  by itself when its subscription fires (the agent takes a turn) or the person answers. A folded
+  project shows its strongest mark: needs you, then a failure, running, waiting, and last the
+  person of a blocked session, which never counts as needing the user. A **led** session that is
+  blocked stays under its pilot, which speaks for it, and a blocked root that leads a live
+  session stays in its project with the sessions it leads, its mark saying it is blocked. The
+  page of a blocked session says nothing above its composer and nothing in its header (title and
+  place only): its Workspace section, in the right panel, holds a ticket line under the
+  workspace's (the key, its title or what it is about, and an icon button `Open <key>`) and,
+  under the ticket it waits on (or under the pull request's line when it waits on a review), the
+  wait: the person's mark and `Waits for Maya · since 14:02`, its tooltip `It comes back by
+  itself when Maya answers.`; both unfold and fade in and fold away and fade out. Its row in the
+  Agents panel takes the person's mark in place of the clock and keeps `waiting for ticket
+  <key>`. The phone follows in its own issue.
   An ended session's page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
