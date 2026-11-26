@@ -500,6 +500,20 @@ fn keep(
     if !remote.on_link(key, generation) {
         return false;
     }
+    // Its role as of this frame, as `took_sessions` and `took_offers` check it for each message:
+    // a runner made a viewer on the same link writes nothing from then on.
+    let runner = remote.listed().is_ok_and(|(members, _)| {
+        members
+            .by_machine(key)
+            .is_some_and(|member| member.role == Role::Runner)
+    });
+    if !runner {
+        eprintln!(
+            "flottille daemon: {machine} is no runner: its ghost of {} is not kept",
+            news.session
+        );
+        return true;
+    }
     let part = flottille_core::store::GhostPart {
         session: &news.session,
         events: &news.events,
