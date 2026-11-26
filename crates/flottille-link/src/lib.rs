@@ -8,6 +8,7 @@
 //! and hands its keyring in.
 
 mod control;
+mod ghosts;
 mod hello;
 mod link;
 mod members;
@@ -38,6 +39,7 @@ pub use control::{
     Paired, Pairing, PresenceOf, Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream,
     Tls, ToDevice, Transcript, arrive, relays_in_memory,
 };
+pub use ghosts::{GHOST_EVENTS, GhostAsk, GhostNews};
 pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
@@ -51,9 +53,8 @@ pub use members::{
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use pairing::{PairCode, PairCodeError, PairSecret, Proposed};
 pub use request::{
-    Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, FULL_SWITCH_LASTS, NONCES_PER_DEVICE,
-    Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
-    runs_agents,
+    Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, NONCES_PER_DEVICE, Nonce,
+    REQUEST_WINDOW, Request, RequestError, Requests, Signed, kept_close, runs_agents,
 };
 pub use sessions::{
     LightPilot, LightProject, LightSession, MOST_SESSIONS, PilotList, ProjectList, STATES,

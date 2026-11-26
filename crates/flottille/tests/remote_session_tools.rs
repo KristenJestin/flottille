@@ -87,24 +87,6 @@ fn listed_as(machine: &Machine, id: &str, title: &str) {
     });
 }
 
-/// The root of pc's, in `mode`, switched by the user from a device when it is Full (a machine
-/// alone never raises another machine's calls to Full).
-fn caller(pc: &Machine, server: &Machine, mode: &str) -> (String, Mcp) {
-    let (root, mcp) = pc.root(if mode == "full" { "auto" } else { mode });
-    if mode == "full" {
-        let switched = server
-            .user
-            .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
-        assert!(
-            switched.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&switched.stderr),
-            pc.log()
-        );
-    }
-    (root, mcp)
-}
-
 /// The number of the request a held answer names.
 fn held(answer: &Answer) -> u64 {
     let text = done(answer);
@@ -138,9 +120,9 @@ fn approve(machine: &Machine, number: u64) {
 
 #[test]
 fn an_agent_lists_the_sessions_of_its_project_on_every_machine() {
-    let (_hub, pc, server, night) = night_lead("runner");
+    let (_hub, pc, _server, night) = night_lead("runner");
     let day = user_session(&pc, DAY);
-    let (_root, mcp) = caller(&pc, &server, "auto");
+    let (_root, mcp) = pc.root("auto");
 
     let answer = mcp.call("session_read", json!({"session": "No such session"}));
 
@@ -158,7 +140,7 @@ fn an_agent_reads_a_session_the_user_started_on_another_machine_as_on_this_one()
     let (_hub, pc, server, night) = night_lead("runner");
 
     // In Full, the read passes without anyone asked, as on one machine.
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
     let judged = server.user.judge_received().len();
     let answer = mcp.call("session_read", json!({"session": NIGHT}));
     let text = done(&answer);
@@ -174,7 +156,7 @@ fn an_agent_reads_a_session_the_user_started_on_another_machine_as_on_this_one()
 
     // In Ask, the same ask as on one machine: held for the user of the machine it runs on,
     // answered at once, and the page comes later as a delivery.
-    let (_asker, asking) = caller(&pc, &server, "ask");
+    let (_asker, asking) = pc.root("ask");
     let answer = asking.call("session_read", json!({"session": night}));
     let number = held(&answer);
     assert!(
@@ -196,7 +178,7 @@ fn an_agent_reads_a_session_the_user_started_on_another_machine_as_on_this_one()
 fn an_agent_writes_to_it_with_the_same_leave_as_on_one_machine() {
     let (_hub, pc, server, night) = night_lead("runner");
     // Full: the leave is asked all the same, as on one machine.
-    let (root, mcp) = caller(&pc, &server, "full");
+    let (root, mcp) = pc.root("full");
 
     let answer = mcp.call(
         "session_send",
@@ -244,7 +226,7 @@ fn an_agent_writes_to_it_with_the_same_leave_as_on_one_machine() {
 fn stopping_a_session_it_did_not_start_is_held_for_the_user_as_on_one_machine() {
     let (_hub, pc, server, night) = night_lead("runner");
     // Full: ending another session is the user's all the same, as on one machine.
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
 
     let answer = mcp.call("agent_stop", json!({"agent_id": NIGHT}));
 
@@ -273,7 +255,7 @@ fn held_stop(
     night: &str,
     waiting: &str,
 ) -> (u64, std::path::PathBuf) {
-    let (_root, mcp) = caller(pc, server, "full");
+    let (_root, mcp) = pc.root("full");
     let number = held(&mcp.call("agent_stop", json!({"agent_id": NIGHT})));
     assert_eq!(server.agent(night)["state"], "idle");
     let full = server.user.path("kept-full");
@@ -324,7 +306,7 @@ fn the_user_s_answer_to_a_held_call_past_the_hard_ceiling_is_dropped_with_its_in
 #[test]
 fn a_session_of_an_offline_machine_is_listed_with_its_state_and_a_call_says_why() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (_root, mcp) = caller(&pc, &server, "auto");
+    let (_root, mcp) = pc.root("auto");
     off(&server);
     eventually("server offline", || pc.seen("server")["state"] != "online");
 
@@ -346,7 +328,7 @@ fn a_session_of_an_offline_machine_is_listed_with_its_state_and_a_call_says_why(
 fn a_viewer_device_reads_and_cannot_write() {
     let (_hub, pc, server, night) = night_lead("viewer");
     // In Auto, the server's judge allows the read.
-    let (_root, mcp) = caller(&pc, &server, "auto");
+    let (_root, mcp) = pc.root("auto");
 
     let answer = mcp.call("session_read", json!({"session": NIGHT}));
     assert!(
@@ -402,9 +384,9 @@ fn the_session_tools_answer_a_session_on_another_machine_as_one_on_this_machine_
 /// The table of the session tools' calls, by id and by title, against a session on this machine
 /// and one on the other, from a caller in `mode`: the same answers.
 fn same_answers(mode: &str) {
-    let (_hub, pc, server, night) = night_lead("runner");
+    let (_hub, pc, _server, night) = night_lead("runner");
     let day = user_session(&pc, DAY);
-    let (_root, mcp) = caller(&pc, &server, mode);
+    let (_root, mcp) = pc.root(mode);
     // Each call of a scenario of one machine, with `{s}` the session it addresses.
     let calls: Vec<(&str, Value)> = vec![
         ("session_read", json!({"session": "{s}", "last": 1})),
@@ -581,7 +563,7 @@ fn a_secret_of_the_calling_machine_in_the_other_machine_s_answer_comes_back_mask
     eventually("the session's second turn", || {
         prompts_with(&server, "pc-only-token-7f3a9c") > 0 && server.agent(&night)["state"] == "idle"
     });
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
 
     let answer = mcp.call("session_read", json!({"session": NIGHT}));
 
@@ -666,7 +648,7 @@ fn a_machine_forgets_the_callers_of_a_machine_removed_from_the_members() {
 fn a_session_it_started_on_another_machine_named_by_its_title_is_called_as_by_its_id() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
     let started = launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Finish the export",
@@ -726,7 +708,7 @@ fn idle(machine: &Machine, id: &str) {
 fn the_session_tools_answer_a_session_it_started_on_another_machine_as_on_this_one() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
     // A led session and a child, each started here and on the server: their id and title.
     let started = |kind: &str, machine: Option<&str>, title: &str| -> (String, String) {
         let mut args = json!({"kind": kind, "title": title, "brief": "Finish the export."});
@@ -849,7 +831,7 @@ fn a_read_of_a_session_it_started_elsewhere_comes_back_masked() {
         &server,
         json!([{"when": "Say the token.", "do": [{"say": said}]}]),
     );
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
     let led = id_in(done(&launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Night lead",
@@ -884,7 +866,7 @@ fn a_read_of_a_session_it_started_elsewhere_comes_back_masked() {
 fn a_refusal_of_a_session_it_started_elsewhere_comes_back_masked() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = caller(&pc, &server, "full");
+    let (_root, mcp) = pc.root("full");
     let led = id_in(done(&launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Night lead",
@@ -938,7 +920,7 @@ fn started_on_server(
 ) {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (root, mcp) = caller(&pc, &server, "full");
+    let (root, mcp) = pc.root("full");
     let text = done(&launched(
         &mcp,
         json!({"kind": kind, "machine": "server", "title": "Night lead",
@@ -1043,15 +1025,9 @@ fn a_read_naming_its_launch_and_another_session_is_judged_as_by_a_caller_that_st
     );
 }
 
-/// A call of `caller` of pc to the session `night`, as pc's daemon would send it, in `mode`
-/// with `switch` for `tree`.
-fn forged_call(
-    caller: &str,
-    night: &str,
-    tree: &str,
-    mode: &str,
-    switch: Option<&str>,
-) -> MachineMessage {
+/// A call of `caller` of pc to the session `night`, as pc's daemon would send it, its tree `tree`
+/// in `mode`.
+fn forged_call(caller: &str, night: &str, tree: &str, mode: &str) -> MachineMessage {
     MachineMessage::Call(Box::new(Call {
         id: format!("call-{}", caller.replace('@', "-")),
         launch: String::new(),
@@ -1063,27 +1039,19 @@ fn forged_call(
         title: String::new(),
         tree: tree.into(),
         mode: mode.into(),
-        switch: switch.map(str::to_owned),
+        switch: None,
     }))
 }
 
 #[test]
-fn a_call_claiming_full_without_the_user_s_switch_for_its_tree_is_judged_in_auto() {
+fn a_call_of_a_tree_in_full_is_taken_in_full_with_no_switch_signed() {
     let ahead = tempfile::NamedTempFile::new().unwrap();
     let user = server_user(allowing()).with_env(
         "FLOTTILLE_TEST_WALL_AHEAD_FILE",
         ahead.path().to_str().unwrap(),
     );
     let (_hub, pc, server, night) = night_lead_of("runner", user);
-    let (root, _mcp) = caller(&pc, &server, "full");
-    let switch: String = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db"))
-        .unwrap()
-        .query_row(
-            "SELECT full_switch FROM agents WHERE id = ?1",
-            [&root],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let (root, _mcp) = pc.root("full");
     let pc_hex = hex_of(&pc);
     let key = pc.stand_in();
     let judged = server.user.judge_received().len();
@@ -1092,37 +1060,33 @@ fn a_call_claiming_full_without_the_user_s_switch_for_its_tree_is_judged_in_auto
         &key,
         &server,
         vec![
-            forged_call("noswitch", &night, "", "full", None),
-            forged_call("othertree", &night, "othertree", "full", Some(&switch)),
-            forged_call("intree", &night, &root, "full", Some(&switch)),
-            forged_call("evil@thing", &night, "", "auto", None),
+            forged_call("infull", &night, &root, "full"),
+            forged_call("inauto", &night, &root, "auto"),
+            forged_call("evil@thing", &night, "", "auto"),
         ],
     );
 
-    for answer in &answers[..3] {
+    for answer in &answers[..2] {
         assert!(answer.is_ok(), "{answer:?}");
     }
-    let refused = answers[3].clone().unwrap_err();
+    let refused = answers[2].clone().unwrap_err();
     assert!(refused.contains("short words"), "{refused}");
     let mode = |caller: &str| server.agent(&format!("{caller}@{pc_hex}"))["gate_mode"].clone();
-    assert_eq!(mode("noswitch"), "auto");
-    assert_eq!(mode("othertree"), "auto");
-    // The switch for its tree, fresh: Full, as a launch with it is.
-    assert_eq!(mode("intree"), "full");
-    // The judge is asked of the two in Auto (a judgement may take more than one exchange).
+    // A runner is the user: the mode of its tree is taken as it is, as one of this machine.
+    assert_eq!(mode("infull"), "full");
+    assert_eq!(mode("inauto"), "auto");
     let judged_then = server.user.judge_received().len();
-    assert!(judged_then > judged, "the judge was not asked");
+    assert!(judged_then > judged, "the judge was not asked in Auto");
 
-    // Thirteen hours later on the server's clock, the same switch counts no more.
+    // Thirteen hours later on the server's clock, Full still follows the tree.
     std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
     let answers = sent_with(
         &key,
         &server,
-        vec![forged_call("late", &night, &root, "full", Some(&switch))],
+        vec![forged_call("later", &night, &root, "full")],
     );
     assert!(answers[0].is_ok(), "{:?}", answers[0]);
-    assert_eq!(mode("late"), "auto");
-    assert!(server.user.judge_received().len() > judged_then);
+    assert_eq!(mode("later"), "full");
 
     // None of them is an agent of the server's, nor a session it lists.
     assert!(
@@ -1138,6 +1102,26 @@ fn a_call_claiming_full_without_the_user_s_switch_for_its_tree_is_judged_in_auto
         !lists.to_string().contains(&format!("@{pc_hex}")),
         "{lists:#}"
     );
+}
+
+#[test]
+fn a_controller_s_call_in_full_is_taken_in_auto() {
+    let (_hub, pc, server, night) = night_lead("controller");
+    let (root, _mcp) = pc.root("full");
+    let pc_hex = hex_of(&pc);
+    let key = pc.stand_in();
+
+    // A call that says its tree is in Full, as a forged one would.
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![forged_call("forged", &night, &root, "full")],
+    );
+
+    // A controller stays bounded by its role: never taken in Full, judged as Auto is.
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    let stand_in = server.agent(&format!("forged@{pc_hex}"));
+    assert_eq!(stand_in["gate_mode"], "auto", "{stand_in:#}");
 }
 
 /// The answer of request `number` of another machine, for pc's agent `agent`.
@@ -1159,7 +1143,7 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
     let laptop = Machine::of(server_user(None));
     pair(&hub, &laptop, "laptop", "runner");
     pc.wait_for("laptop");
-    let (asker, asking) = caller(&pc, &server, "ask");
+    let (asker, asking) = pc.root("ask");
     let number = held(&asking.call("session_read", json!({"session": night})));
 
     // From another machine than the one that holds it.
@@ -1205,7 +1189,7 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
 #[test]
 fn an_approval_answer_from_another_machine_is_masked_with_the_caller_s_env() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (asker, asking) = caller(&pc, &server, "ask");
+    let (asker, asking) = pc.root("ask");
     let number = held(&asking.call("session_read", json!({"session": night})));
     with_pc_secret(&pc);
 
@@ -1254,7 +1238,7 @@ fn a_session_id_two_machines_list_is_refused_naming_both() {
     );
     assert!(answers[0].is_ok(), "{:?}", answers[0]);
     listed_as(&pc, &night, "Impostor");
-    let (_root, mcp) = caller(&pc, &server, "auto");
+    let (_root, mcp) = pc.root("auto");
     let judged = server.user.judge_received().len();
 
     let answer = mcp.call("session_read", json!({"session": night}));
@@ -1268,7 +1252,7 @@ fn a_session_id_two_machines_list_is_refused_naming_both() {
 #[test]
 fn an_exception_asked_on_a_call_that_another_machine_answers_is_refused_with_why() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (_root, mcp) = caller(&pc, &server, "ask");
+    let (_root, mcp) = pc.root("ask");
 
     // Exceptions are each machine's own: the agent is told so, and nothing reaches the server.
     let answer = mcp.call(
@@ -1290,7 +1274,7 @@ fn an_exception_asked_on_a_call_that_another_machine_answers_is_refused_with_why
 #[test]
 fn a_stand_in_is_not_a_session_this_machine_s_agents_can_reach() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (root, mcp) = caller(&pc, &server, "full");
+    let (root, mcp) = pc.root("full");
     // The call stands pc's root in on the server.
     done(&mcp.call("session_read", json!({"session": night})));
     assert_eq!(stand_ins(&server), 1);
@@ -1371,11 +1355,7 @@ fn a_stand_in_never_relays_a_call_to_a_third_machine() {
     // pc's daemon is stopped: the test plays it, as it would send the call.
     let key = pc.stand_in();
 
-    let answers = sent_with(
-        &key,
-        &server,
-        vec![forged_call("c0", &far, "c0", "auto", None)],
-    );
+    let answers = sent_with(&key, &server, vec![forged_call("c0", &far, "c0", "auto")]);
 
     let answer = answers[0].clone().unwrap();
     let text = answer["text"].as_str().unwrap_or_default();
@@ -1397,7 +1377,7 @@ fn a_stand_in_never_relays_a_call_to_a_third_machine() {
 #[test]
 fn an_answer_before_its_wait_is_recorded_is_sent_again() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (_asker, asking) = caller(&pc, &server, "ask");
+    let (_asker, asking) = pc.root("ask");
     // pc takes its time to record what its agent waits for, once the server answered the call.
     let slow = pc.user.path("slow-call");
     std::fs::write(&slow, "").unwrap();
@@ -1424,11 +1404,11 @@ fn an_answer_before_its_wait_is_recorded_is_sent_again() {
 #[test]
 fn an_answer_nothing_awaits_holds_back_nothing_kept_behind_it() {
     let (_hub, pc, server, night) = night_lead("runner");
-    let (_waiting, waits) = caller(&pc, &server, "ask");
+    let (_waiting, waits) = pc.root("ask");
     let awaited = held(&waits.call("session_read", json!({"session": night})));
     // Another call is held there, and pc stops before it records the wait, as when the call's
     // answer is lost with the link: nothing will ever await that answer.
-    let (_gone, gone) = caller(&pc, &server, "ask");
+    let (_gone, gone) = pc.root("ask");
     let slow = pc.user.path("slow-call");
     std::fs::write(&slow, "").unwrap();
     std::thread::scope(|scope| {

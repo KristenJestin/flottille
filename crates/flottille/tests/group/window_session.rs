@@ -19,6 +19,8 @@ mod window_cards;
 mod window_commit_checks;
 #[path = "../window_conversation.rs"]
 mod window_conversation;
+#[path = "../window_conversation_loading.rs"]
+mod window_conversation_loading;
 #[path = "../window_ended_section.rs"]
 mod window_ended_section;
 #[path = "../window_message_checks.rs"]

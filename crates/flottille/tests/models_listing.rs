@@ -548,3 +548,37 @@ fn the_warning_goes_once_the_login_is_found_again() {
         "{codex}"
     );
 }
+
+#[test]
+fn provider_list_tells_the_kind_of_each_warning() {
+    // A Codex of another version the user allows, with no sign-in file, whose listing is refused
+    // for no login: three warnings, of two kinds, said in the same order as `warnings`.
+    let user = signed_out_codex();
+    user.write_providers(
+        "[claude]\nenabled = false\n[codex]\nenabled = true\nallow_unqualified_version = true\n",
+    );
+    user.codex_of_version("0.163.0");
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    eventually("the sign-in line among its warnings", || {
+        warnings_of(&listed(&user, "codex")).contains(&CODEX_SIGN_IN.to_owned())
+    });
+
+    let codex = listed(&user, "codex");
+    let warnings = warnings_of(&codex);
+    let kinds: Vec<&str> = codex["warning_kinds"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warning_kinds: {codex}"))
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(warnings.len(), kinds.len(), "{codex}");
+    let kind_of = |part: &str| {
+        let at = warnings.iter().position(|w| w.contains(part)).unwrap();
+        kinds[at]
+    };
+    assert_eq!(kind_of("0.163.0"), "version", "{codex}");
+    assert_eq!(kind_of("not signed in where"), "sign_in", "{codex}");
+    assert_eq!(kind_of(CODEX_SIGN_IN), "sign_in", "{codex}");
+    // The strings stay what older clients read.
+    assert!(warnings.iter().all(|w| !w.is_empty()), "{codex}");
+}

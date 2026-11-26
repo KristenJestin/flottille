@@ -595,3 +595,53 @@ fn a_run_is_started_by_its_uuid_and_read_by_it_or_by_its_number_with_its_state()
     assert_eq!(viewed["pipeline"], run);
     assert_eq!(viewed["steps"][0]["name"], "e2e");
 }
+
+#[test]
+fn a_login_without_its_host_fails_as_bkt_does_without_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // `bkt auth login --web` asks "Bitbucket base URL" on a terminal, and ends "host is required
+    // when not running in a TTY" (`pkg/cmd/auth/auth.go`) on a null input: #1529.
+    let asked = fake(dir.path())
+        .args(["auth", "login", "--kind", "cloud", "--web"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(asked.status.code(), Some(1), "{asked:?}");
+    assert!(
+        String::from_utf8_lossy(&asked.stderr).contains("host is required"),
+        "{asked:?}"
+    );
+    let log = std::fs::read_to_string(dir.path().join("sign-in.jsonl")).unwrap_or_default();
+    assert!(log.contains("refused"), "{log}");
+}
+
+#[test]
+fn a_login_given_its_host_goes_on_to_the_browser_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("refuse"), "").unwrap();
+
+    let refused = fake(dir.path())
+        .args([
+            "auth",
+            "login",
+            "https://bitbucket.org",
+            "--kind",
+            "cloud",
+            "--web",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    // It reached the browser step (the user's `refuse` ended it there), not the question.
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("Open this URL manually"),
+        "{refused:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stderr).contains("host is required"),
+        "{refused:?}"
+    );
+}

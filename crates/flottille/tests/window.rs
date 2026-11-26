@@ -3827,6 +3827,7 @@ fn an_answer_taken_before_a_page_has_read_its_conversation_finds_the_request_in_
     let user = team_user();
     let (lead, mcp, _) = lead_in_w(&user);
     let other = start(&user, "app", None, "another task");
+    let third = start(&user, "app", None, "a third task");
     // The daemon's answer to the click, and what a page reads of the conversation, reach the
     // window when the test lets them.
     let (connect, held) = holding_answers(&user, &["approval.approve", "agent.show"]);
@@ -3846,12 +3847,15 @@ fn an_answer_taken_before_a_page_has_read_its_conversation_finds_the_request_in_
     });
 
     // The session's page is opened again, its conversation not read yet; then the daemon's answer
-    // to the click reaches the window.
-    cx.update(|window, cx| window.click(session_id(&other), cx));
-    until(&shell, cx, "the other session's page", |cx| {
-        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
-    });
-    settle(cx);
+    // to the click reaches the window. Two other sessions shown meanwhile, the window no longer
+    // keeps its page.
+    for session in [&other, &third] {
+        cx.update(|window, cx| window.click(session_id(session), cx));
+        until(&shell, cx, "another session's page", |cx| {
+            session_page(&shell, cx).read_with(cx, |p, _| p.id() == *session)
+        });
+        settle(cx);
+    }
     held.lock().unwrap().insert("agent.show");
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     until(&shell, cx, "the session's page, not read", |cx| {
@@ -7535,6 +7539,7 @@ fn alt_left_with_the_tree_drawer_open_closes_it_and_goes_nowhere(cx: &mut TestAp
 fn going_back_to_an_agent_that_left_the_tree_shows_the_conversation(cx: &mut TestAppContext) {
     let user = team_user();
     let (lead, mcp, _) = lead_in_w(&user);
+    let other = start(&user, "app", None, "another task");
     let child = worker_doing(&mcp, "WRITE", "draft the notes");
     eventually("the child replied", || {
         user.call("agent.show", json!({"agent": child})).unwrap()["agent"]["state"] == "idle"
@@ -7555,10 +7560,18 @@ fn going_back_to_an_agent_that_left_the_tree_shows_the_conversation(cx: &mut Tes
         session_page(&shell, cx).read_with(cx, |p, _| p.shown() == child)
     });
 
-    // The child leaves the tree while the user is elsewhere.
+    // The child leaves the tree while the user is elsewhere, long enough for the window not to
+    // keep the session's page: another session was shown since.
     cx.update(|window, cx| window.click(project_id("app"), cx));
     settle(cx);
     hidden.lock().unwrap().insert(child.clone());
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other session's page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    settle(cx);
+    back(cx);
+    settle(cx);
     back(cx);
     assert_eq!(selected(&shell, cx), Some(Selection::Session(lead.clone())));
     let page = session_page(&shell, cx);

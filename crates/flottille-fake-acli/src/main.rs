@@ -400,6 +400,16 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
         }
         // Its documented web sign-in (`acli jira auth login --web`), the browser on the same
         // machine; the words it prints are assumed, `acli`'s source being closed.
+        // Without a terminal it cannot ask which site to sign in to (the picker "Select the site to
+        // login" of a terminal, seen on acli 1.3.39), so it ends with 1: `--site` answers it (#1529).
+        ["jira", "auth", "login", rest @ ..]
+            if !rest.iter().any(|arg| *arg == "--site" || *arg == "-s") =>
+        {
+            sign_in::record(dir, json!({"login": args, "pid": std::process::id()}));
+            eprintln!("Error: no terminal to ask the site to log in to: pass --site <site>");
+            sign_in::record(dir, json!({"ended": "refused"}));
+            1
+        }
         ["jira", "auth", "login", ..] => sign_in::login(dir, script, args, |address, _| {
             println!("Open this URL in your browser to authenticate: {address}");
         }),

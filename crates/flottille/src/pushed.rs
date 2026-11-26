@@ -138,6 +138,18 @@ struct Setting {
     file: PathBuf,
     /// Why no folder was kept for it at the start, which a relink is refused with.
     unkept: Option<String>,
+    /// What it held then, and the copy of it the daemon wrote in its runtime folder.
+    taken: Option<Taken>,
+}
+
+/// What a file of the user's git settings held at the daemon's start, copied where no run
+/// reaches: what a push reads instead of a file that holds the same since (`same_bytes`).
+struct Taken {
+    bytes: Vec<u8>,
+    copy: PathBuf,
+    /// The files it includes, as git read them in it then (`include_paths`): its bytes never
+    /// change, and the confined git that reads them reads the copy only where the daemon gives it.
+    includes: Vec<String>,
 }
 
 /// A setting whose links were moved since the daemon's start, to a file [`settle`] judged sound.
@@ -166,8 +178,10 @@ const RESTART: &str = "restart the daemon, or work in Full (`flottille daemon st
 /// Finds what a push reads, before anything runs, and makes a missing `~/.ssh` where `make` (the
 /// daemon's start; `0700`, as `ssh` would): a folder that is not there could not be kept
 /// read-only, and a run would make it. `work` are the folders runs work in, which no folder kept
-/// read-only holds or is in: each project's folder, the folders of its workspaces.
-pub fn find(make: bool, work: &[PathBuf]) {
+/// read-only holds or is in: each project's folder, the folders of its workspaces. `copies` is a
+/// folder of the daemon's runtime folder, out of every run's reach, where what the user's git
+/// settings hold is copied (`take`): the daemon's, not `flottille doctor`'s.
+pub fn find(make: bool, work: &[PathBuf], copies: Option<&Path>) {
     FOUND.get_or_init(|| {
         let account = account_home()?;
         let account = account.canonicalize().unwrap_or(account);
@@ -190,16 +204,20 @@ pub fn find(make: bool, work: &[PathBuf]) {
                     named,
                     file,
                     unkept: None,
+                    taken: None,
                 })
             })
             .collect();
+        let mut settings = settings;
+        if let Some(copies) = copies {
+            take(&mut settings, copies);
+        }
         let shared = shared_folders(
             &account,
             home.as_deref(),
             &|name| std::env::var_os(name),
             work,
         );
-        let mut settings = settings;
         let mut kept: Vec<PathBuf> = Vec::new();
         for setting in &mut settings {
             match keep_for(setting, &shared) {
@@ -245,6 +263,91 @@ pub fn find(make: bool, work: &[PathBuf]) {
             started: std::time::SystemTime::now(),
         })
     });
+}
+
+/// Copies what each of the user's git settings holds into `copies`, made anew (`0700`, its files
+/// `0600`): the settings a push reads when the file at their place is another since, holding the
+/// same (`same_bytes`). Not for a file larger than Flottille reads, nor one that names a file or a
+/// folder from its own place (a relative include, `gitdir:./`), which its copy would not.
+fn take(settings: &mut [Setting], copies: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let _ = std::fs::remove_dir_all(copies);
+    if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(copies) {
+        eprintln!(
+            "flottille daemon: cannot make {}: {error}",
+            copies.display()
+        );
+        return;
+    }
+    let Ok(copies) = copies.canonicalize() else {
+        return;
+    };
+    for (at, setting) in settings.iter_mut().enumerate() {
+        if !std::fs::metadata(&setting.file).is_ok_and(|m| m.len() <= CONFIG_MAX) {
+            continue;
+        }
+        // What it includes, unknown where git could not read it: no copy.
+        let Some(listed) = includes_read(&setting.file).filter(|listed| !from_its_place(listed))
+        else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&setting.file) else {
+            continue;
+        };
+        let copy = copies.join(at.to_string());
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&copy)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes));
+        match written {
+            Ok(()) => {
+                setting.taken = Some(Taken {
+                    bytes,
+                    copy,
+                    includes: listed.into_iter().map(|(_, value)| value).collect(),
+                })
+            }
+            Err(error) => eprintln!("flottille daemon: cannot write {}: {error}", copy.display()),
+        }
+    }
+}
+
+/// Whether git settings whose includes are `listed` name a file or a folder from their own place,
+/// which git reads from the folder that holds them: a relative `include.path` or
+/// `includeIf.<condition>.path`, a condition `gitdir:./`.
+fn from_its_place(listed: &[(String, String)]) -> bool {
+    listed.iter().any(|(key, value)| {
+        let condition = key
+            .strip_prefix("includeif.")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        !(value.starts_with('/') || value.starts_with("~/"))
+            || condition.starts_with("gitdir:./")
+            || condition.starts_with("gitdir/i:./")
+    })
+}
+
+/// The copy of what `setting` held at the daemon's start, where the file git reads for it now
+/// holds the same: the same settings, whatever file holds them (a dotfiles update that moved the
+/// link to a new version, an editor that wrote a new file). A push reads the copy, which no run
+/// reaches: a run that can write the file git reads now changes nothing of what the push gets.
+fn same_bytes(setting: &Setting, now: &Path) -> Option<PathBuf> {
+    let taken = setting.taken.as_ref()?;
+    let len = std::fs::metadata(now).ok()?.len();
+    (len == taken.bytes.len() as u64 && std::fs::read(now).ok()? == taken.bytes)
+        .then(|| taken.copy.clone())
+}
+
+/// The folder of the copies of what the user's git settings held at the daemon's start, where it
+/// took one: given read-only to every command it confines (`landlock::confine`), which the
+/// runtime folder it is in is kept from, as they read the settings themselves.
+pub fn copies() -> Option<PathBuf> {
+    found()?
+        .settings
+        .iter()
+        .find_map(|setting| setting.taken.as_ref()?.copy.parent().map(Path::to_owned))
 }
 
 /// The paths every confined command has read-only: those found at the daemon's start, and the
@@ -846,7 +949,9 @@ fn linked_elsewhere(file: &Path) -> Option<String> {
 }
 
 /// The file the user's settings at `setting.named` are read from now, judged: the one they lead
-/// to, which is the one a push reads. **The rule of the daemon's start, held again for what
+/// to, which is the one a push reads; or, where that is another file than at the start holding
+/// what the start's held, the copy taken then (`same_bytes`). **The rule of the daemon's start,
+/// held again for what
 /// changed since:** the settings are a file no run can write, because the daemon keeps it
 /// read-only to every confined command it starts (`find`), and no link on the way to it is one a
 /// run controls, because the folders that hold the links are kept the same. A settings file that
@@ -876,6 +981,10 @@ fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
         // No file there now: the settings the daemon found are gone from their place.
         return Ok(current);
     };
+    let same = now == current && changed(found, &current).is_none();
+    if !same && let Some(copy) = same_bytes(setting, &now) {
+        return Ok(copy);
+    }
     if now == current {
         // A file the settings were relinked to stays one name: another hard link made since is a
         // way to write it that is not kept.
@@ -886,28 +995,25 @@ fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
     }
     if let Some(why) = &setting.unkept {
         return Err(format!(
-            "{} now leads to {}, and nothing was kept read-only for it at the daemon's start: \
-             {why}: {RESTART}",
-            named.display(),
-            now.display()
+            "{} leads to another file than at the daemon's start, and nothing was kept \
+             read-only for it then: {why}: {RESTART}",
+            named.display()
         ));
     }
     let links = links_on_the_way(named)?;
     if links.is_empty() {
         return Err(format!(
             "{} is a file a run can write, and it is not the one the daemon found at its start \
-             (it led to {}, and no link on the way is kept): {RESTART}",
-            named.display(),
-            current.display()
+             (no link on the way is kept): {RESTART}",
+            named.display()
         ));
     }
     for (link, folder) in &links {
         if !held(found, folder) {
             return Err(format!(
-                "{} now leads to {} through {}, a link a run can replace (the folder {} is one a \
-                 run can write): {RESTART}",
+                "{} leads to another file than at the daemon's start through {}, a link a run \
+                 can replace (the folder {} is one a run can write): {RESTART}",
                 named.display(),
-                now.display(),
                 link.display(),
                 folder.display()
             ));
@@ -920,11 +1026,10 @@ fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
         .is_some_and(|folder| root_only(&now) || under_kept(found, folder));
     if !kept {
         return Err(format!(
-            "{} now leads to {}, a file a run can write: it is not in a folder kept read-only \
-             since the daemon's start, and a command may have written it before this push: \
-             {RESTART}",
-            named.display(),
-            now.display()
+            "{} leads to another file than at the daemon's start, a file a run can \
+             write: it is not in a folder kept read-only since the daemon's start, \
+             and a command may have written it before this push: {RESTART}",
+            named.display()
         ));
     }
     if let Some(why) = linked_elsewhere(&now) {
@@ -1255,12 +1360,32 @@ fn git_unlent(found: &Found) -> Option<String> {
         Ok(files) => files,
         Err(why) => return Some(why),
     };
-    for file in &files {
-        if let Some(why) = changed(found, file).or_else(|| aliased(file)) {
-            return Some(why);
+    for (setting, file) in found.settings.iter().zip(&files) {
+        let taken = setting.taken.as_ref().filter(|taken| taken.copy == *file);
+        if taken.is_none() {
+            if changed(found, file).is_some() {
+                return Some(format!(
+                    "{} is not the file the daemon found at its start (removed, or replaced), \
+                     and a file a run can write: {RESTART}",
+                    setting.named.display()
+                ));
+            }
+            if let Some(why) = aliased(file) {
+                return Some(why);
+            }
         }
         let mut seen = Vec::new();
-        if let Err(why) = included(file, found.home.as_deref(), &mut seen) {
+        // A copy's includes are those of the file it copied, judged as that file's.
+        let listed = match taken {
+            Some(taken) => included_from(
+                &setting.named,
+                &taken.includes,
+                found.home.as_deref(),
+                &mut seen,
+            ),
+            None => included(file, found.home.as_deref(), &mut seen),
+        };
+        if let Err(why) = listed {
             return Some(why);
         }
         for path in seen {
@@ -1301,7 +1426,17 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
             file.display()
         ));
     }
-    for value in include_paths(file) {
+    included_from(file, &include_paths(file), home, seen)
+}
+
+/// [`included`], of the include values `listed` that `file` holds.
+fn included_from(
+    file: &Path,
+    listed: &[String],
+    home: Option<&Path>,
+    seen: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for value in listed {
         let path = match value.strip_prefix("~/") {
             Some(rest) => match home {
                 Some(home) => home.join(rest),
@@ -1313,7 +1448,7 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
                     file.display()
                 ));
             }
-            None => file.parent().unwrap_or(Path::new("/")).join(&value),
+            None => file.parent().unwrap_or(Path::new("/")).join(value),
         };
         // Missing, git reads it as nothing: one made since the start is not protected, which
         // the judgement of each push finds (`git_unlent`).
@@ -1332,19 +1467,31 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
 /// The values of `include.path` and `includeIf.<condition>.path` in `file` itself, as git reads
 /// them (`git config --file`, not what they include).
 fn include_paths(file: &Path) -> Vec<String> {
-    let listed = crate::git::start_read(&[
+    includes_read(file)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect()
+}
+
+/// [`include_paths`], each with its key (`includeif.gitdir:~/work/.path`); None where git could
+/// not read the file.
+fn includes_read(file: &Path) -> Option<Vec<(String, String)>> {
+    let listed = crate::git::start_listed(&[
         OsStr::new("config"),
         OsStr::new("--null"),
         OsStr::new("--file"),
         file.as_os_str(),
         OsStr::new("--get-regexp"),
         OsStr::new(r"^include(if\..*)?\.path$"),
-    ]);
-    listed
-        .split('\0')
-        .filter_map(|entry| entry.split_once('\n'))
-        .map(|(_, value)| value.to_owned())
-        .collect()
+    ])?;
+    Some(
+        listed
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\n'))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+    )
 }
 
 /// The `ssh` a push signs in with, read for the repository at `folder`: the daemon's own
@@ -1821,6 +1968,7 @@ mod tests {
                 named: link.to_path_buf(),
                 file: leads(link).unwrap(),
                 unkept: None,
+                taken: None,
             });
         }
         for folder in kept {
@@ -1928,6 +2076,7 @@ mod tests {
                 named: link.clone(),
                 file: a.clone(),
                 unkept: None,
+                taken: None,
             };
             assert_eq!(
                 keep_for(&setting, &shared).unwrap(),
@@ -1953,6 +2102,7 @@ mod tests {
             named: link,
             file: old.to_owned(),
             unkept: None,
+            taken: None,
         }
     }
 
@@ -2144,11 +2294,168 @@ mod tests {
 
         let why = settle(&found, &found.settings[0]).unwrap_err();
         assert!(why.contains("a file a run can write"), "{why}");
-        assert!(why.contains(&b.display().to_string()), "{why}");
+        assert!(why.contains(&link.display().to_string()), "{why}");
         assert!(why.contains("flottille daemon stop"), "{why}");
         // Nothing was recorded: it is read by nothing.
         assert_eq!(recorded(&found, &b), None);
         assert!(git_unlent(&found).is_some());
+    }
+
+    #[test]
+    fn a_retargeted_git_config_holding_the_same_is_read_from_the_copy_taken_at_the_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let mut found = found_settings(&home, &[&link], &[&kept]);
+        let runtime = tempfile::tempdir().unwrap();
+        let copies = runtime.path().join("git-settings");
+        take(&mut found.settings, &copies);
+
+        // An update in a folder a run can write: a new version holding the same, the old removed.
+        let b = home.join("dots/b/config");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::copy(&a, &b).unwrap();
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+
+        let read = git_now(&found).unwrap();
+        assert_eq!(read, [copies.join("0")]);
+        assert!(git_unlent(&found).is_none());
+        // A run that writes the file git reads now writes nothing a push reads, and the next
+        // judgement refuses it.
+        std::fs::write(&b, "[core]\n\tsshCommand = ./run-me\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&read[0]).unwrap(),
+            "[user]\n\tname = a\n"
+        );
+        assert!(git_unlent(&found).is_some());
+    }
+
+    #[test]
+    fn a_git_config_that_names_a_file_from_its_own_place_is_not_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let mut found = found_now(&home);
+        for (name, text) in [
+            ("relative", "[include]\n\tpath = local.gitconfig\n"),
+            (
+                "here",
+                "[includeIf \"gitdir:./work/\"]\n\tpath = ~/work.gitconfig\n",
+            ),
+            (
+                "here, whatever the case",
+                "[includeIf \"gitdir/i:./work/\"]\n\tpath = ~/work.gitconfig\n",
+            ),
+            (
+                "anchored",
+                "[include]\n\tpath = ~/.config/git/config.local\n",
+            ),
+        ] {
+            let file = home.join(name);
+            std::fs::write(&file, text).unwrap();
+            found.settings.push(Setting {
+                named: file.clone(),
+                file,
+                unkept: None,
+                taken: None,
+            });
+        }
+        let runtime = tempfile::tempdir().unwrap();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
+
+        let taken: Vec<bool> = found.settings.iter().map(|s| s.taken.is_some()).collect();
+        assert_eq!(taken, [false, false, false, true]);
+    }
+
+    #[test]
+    fn a_moved_config_with_an_include_changed_since_the_start_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let included = home.join("included.gitconfig");
+        std::fs::write(&included, "[user]\n\temail = a@example.invalid\n").unwrap();
+        let a = home.join("dots/a/config");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        let text = format!("[include]\n\tpath = {}\n", included.display());
+        std::fs::write(&a, &text).unwrap();
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let mut found = found_settings(&home, &[&link], &[&kept]);
+        found
+            .read_only
+            .push((included.clone(), identity(&included).unwrap()));
+        let runtime = tempfile::tempdir().unwrap();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
+        assert!(found.settings[0].taken.is_some());
+        // The update: a new version holding the same, the old removed.
+        let b = home.join("dots/b/config");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&b, &text).unwrap();
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+        assert!(git_unlent(&found).is_none());
+
+        // The file it includes, replaced as a run could, with what a push must not be given.
+        let new = home.join("included.new");
+        std::fs::write(&new, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+        std::fs::rename(&new, &included).unwrap();
+
+        let why = git_unlent(&found).unwrap();
+        assert!(why.contains(&included.display().to_string()), "{why}");
+    }
+
+    #[test]
+    fn a_git_config_git_cannot_read_at_the_start_is_not_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let mut found = found_now(&home);
+        // A relative include git would read, past a line it cannot: what it includes is unknown.
+        let file = home.join("config");
+        std::fs::write(&file, "[include]\n\tpath = local.gitconfig\n[broken\n").unwrap();
+        found.settings.push(Setting {
+            named: file.clone(),
+            file,
+            unkept: None,
+            taken: None,
+        });
+        let runtime = tempfile::tempdir().unwrap();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
+
+        assert!(found.settings[0].taken.is_none());
+    }
+
+    #[test]
+    fn a_git_config_that_really_changed_is_refused_naming_the_file_the_user_knows() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let version = |hash: &str, text: &str| {
+            let file = home.join(format!(
+                ".local/share/desk/versions/{hash}/config/.config/git/config"
+            ));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, text).unwrap();
+            file
+        };
+        let a = version("aaa", "[user]\n\tname = a\n");
+        let kept = home.join(".config/git");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let found = found_settings(&home, &[&link], &[&kept]);
+
+        // An update whose settings say something else, in a folder a run can write.
+        let b = version("bbb", "[core]\n\tsshCommand = ./run-me\n");
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+
+        let why = git_unlent(&found).unwrap();
+        assert!(why.contains(&link.display().to_string()), "{why}");
+        assert!(!why.contains("versions/"), "{why}");
     }
 
     #[test]

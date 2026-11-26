@@ -1884,10 +1884,19 @@ fn a_connection_request_of_a_removed_machine_closes(cx: &mut TestAppContext) {
     settle(&shell, cx);
     let dialog = shell.read_with(cx, |s, _| s.connection_request().clone());
     assert!(dialog.read_with(cx, |d, _| d.is_open()));
-    assert_eq!(
-        asked_of_the_server(&relay, "7"),
-        vec!["connection.proposed".to_owned()]
-    );
+    // What names the request 7, not an id that holds a 7: the page's own link may still be
+    // reading its session there, its conversation shown from its ghost first.
+    let asked: Vec<String> = relay
+        .take()
+        .into_iter()
+        .filter(|(_, params)| {
+            params
+                .as_object()
+                .is_some_and(|params| params.values().any(|value| *value == json!(7)))
+        })
+        .map(|(method, _)| method)
+        .collect();
+    assert_eq!(asked, vec!["connection.proposed".to_owned()]);
 
     let removed = pc.user.run(&["remote", "remove", "server"]);
     assert!(
@@ -2811,4 +2820,96 @@ fn another_machine_s_notices_reach_the_bell_while_its_providers_are_being_read(
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Whether this machine's ghost of the server's session `agent` holds `text` (#1527).
+fn ghost_holds(pc: &Machine, agent: &str, text: &str) -> bool {
+    pc.user
+        .call(
+            "remote.ghost",
+            json!({"machine": "server", "session": agent}),
+        )
+        .is_ok_and(|kept| kept["events"].to_string().contains(text))
+}
+
+/// Each request to the server takes this long, a slow link: opening must not wait for one.
+const SLOW_LINK: u64 = 2000;
+
+#[gpui_kit::test]
+fn a_session_of_another_machine_opens_from_its_ghost_without_asking_that_machine(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    // The ghost is filled as soon as the session is listed: waited for (without failing here,
+    // so that a build without ghosts still says how long it opens in), so that only the open is
+    // timed.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ghost_holds(&pc, &there, REPLY) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    until(&shell, cx, "the server's session is listed", |cx| {
+        present(cx, row_there(&there))
+    });
+    settle(&shell, cx);
+    relay.take();
+    relay.delay.store(SLOW_LINK, Ordering::SeqCst);
+
+    let started = Instant::now();
+    click(cx, row_there(&there));
+    until(&shell, cx, "the server's session is drawn", |cx| {
+        shows_reply(&shell, cx, &there)
+    });
+    let took = started.elapsed();
+    eprintln!(
+        "a session of another machine opened in {} ms, each request to it taking {SLOW_LINK} ms",
+        took.as_millis()
+    );
+    let asked = relay.take();
+    assert!(
+        took < Duration::from_millis(SLOW_LINK),
+        "the open waited for the link: {} ms, asked {asked:?}",
+        took.as_millis()
+    );
+    assert!(
+        !asked.iter().any(|(method, _)| method == "agent.show"),
+        "its conversation was read there: {asked:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn what_is_written_in_a_ghost_goes_to_the_session_s_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    eventually("pc's ghost holds the reply", || {
+        ghost_holds(&pc, &there, REPLY)
+    });
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    relay.take();
+
+    send(cx, "Cover the docs too");
+    // Sent to the server, signed for it, and taken there.
+    eventually("the server's session got the message", || {
+        conversation_holds(&server.user, &there, "Cover the docs too")
+    });
+    assert!(
+        asked_of_the_server(&relay, "Cover the docs too").contains(&"agent.send".to_owned()),
+        "the message went to the server"
+    );
+    // What the server stored comes back to the ghost, and to the page.
+    eventually("the ghost holds what the server took", || {
+        ghost_holds(&pc, &there, "Cover the docs too")
+    });
+    until(&shell, cx, "the page shows the message", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|page| {
+                page.read(cx).conversation().read(cx).blocks().iter().any(
+                    |block| matches!(block, Block::Message { text, .. } if text == "Cover the docs too"),
+                )
+            })
+        })
+    });
 }

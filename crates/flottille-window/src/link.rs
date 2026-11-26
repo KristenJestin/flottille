@@ -66,6 +66,8 @@ pub enum Update {
         crate::kept::Folds,
         crate::arrange::Arrangement,
         std::collections::HashSet<String>,
+        // The projects this machine hides (`window.get`, `hidden`), in the order they were hidden.
+        Vec<String>,
     ),
     /// The connection broke, with why, and the generation of the machine shown it was made for;
     /// the link is connecting again.
@@ -494,6 +496,12 @@ fn follow(
             crate::kept::Folds::of(&state["state"]),
             crate::arrange::Arrangement::of(&state["state"]["arrangement"]),
             drafts,
+            state["state"]["hidden"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect(),
         );
         if updates.unbounded_send(kept).is_err() {
             return Ok(());

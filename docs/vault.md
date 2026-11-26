@@ -748,8 +748,9 @@ doctor` says it in its warnings with how to fix it (`sandbox.ssh_lent` false in 
 - the git settings include a file that was not there at the daemon's start (a missing include is
   nothing, for git and for this judgement, until it is made), or one with a hard link; a file of
   them is no longer the one found at the
-  start (git replaces the file it edits: `git config --global` is followed by a restart of the
-  daemon);
+  start and holds other settings than it did then (git replaces the file it edits: `git config
+  --global` is followed by a restart of the daemon), the refusal naming the file where git looks
+  for it (`~/.config/git/config`), not the one a link led to;
 - another mount of the same files (a bind mount of the home elsewhere, the top of a Btrfs volume
   mounted beside its subvolumes), or a mount below them, which stays writable;
 - the kernel gives no user namespace to the commands Flottille confines (above), or no Landlock
@@ -928,7 +929,25 @@ The gaps, where the platform does not allow more:
 - a file protected at the daemon's start is protected at the path it had then: a command started
   before the user replaced it (an editor that writes a new file, `git config --global`) still sees
   the new one writable, so the push is lent nothing until the daemon restarts, which ends every
-  run (`flottille daemon stop`: the next command starts another, which finds the settings again).
+  run (`flottille daemon stop`: the next command starts another, which finds the settings again:
+  nothing of them is kept from one daemon to the next). **Unless the file git reads now holds
+  what the file found at the start held, byte for byte**: the same settings, whatever file holds
+  them (a desktop or dotfiles update that moved `~/.config/git/config`'s link to a new version, an
+  editor that wrote the same back). At its start the daemon copies what each settings file holds
+  into its runtime folder (`$XDG_RUNTIME_DIR/flottille/git-settings/<n>`, the folder `0700`, each
+  copy `0600`, made anew at each start and removed when the daemon stops: a copy may hold what
+  the settings say, a token in `http.extraHeader` or an `insteadOf` among them), and such a push
+  reads the copy, not the file. Every command the daemon confines is given that folder back
+  read-only, in the runtime folder it is otherwise kept from (Landlock lets it read there and
+  nothing more, the namespace mounts it read-only), as it has the settings themselves: the git
+  that reads them for a push among them, never one that can write it. A run that can write the
+  new file, between the judgement and the read or after, changes nothing a push gets, and the
+  next push judges what it wrote. The files a copy includes are those git listed in the file at
+  the start, judged as that file's (found at the start, not replaced since). Not for a file that
+  names a file or a folder from its own place (a relative include, a `gitdir:./` or `gitdir/i:./`
+  condition), which its copy would read elsewhere, one git could not read at the start (what it
+  includes is then unknown), nor one larger than Flottille reads (above): those are judged as
+  below.
   **A settings file that leads elsewhere** is judged again at each push (`pushed::settle`). The
   start and the push share the judgement of **the links** (which folder may hold one: the same
   functions); the file itself is kept read-only at the start, whatever it is, and judged at the

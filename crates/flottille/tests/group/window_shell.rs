@@ -49,6 +49,8 @@ mod window_first_frame;
 mod window_folds;
 #[path = "../window_health_check.rs"]
 mod window_health_check;
+#[path = "../window_hidden_projects.rs"]
+mod window_hidden_projects;
 #[path = "../window_instance.rs"]
 mod window_instance;
 #[path = "../window_link.rs"]

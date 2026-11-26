@@ -945,11 +945,12 @@ impl VaultSection {
             .shell
             .upgrade()
             .map(|shell| {
+                let shell = shell.read(cx);
                 shell
-                    .read(cx)
                     .snapshot()
                     .projects
                     .iter()
+                    .filter(|project| !shell.is_hidden(&project.name))
                     .map(|project| project.name.clone())
                     .collect()
             })

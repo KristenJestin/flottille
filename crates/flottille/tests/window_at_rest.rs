@@ -447,6 +447,33 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_commit_checks_and_their_prop
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_settings_with_a_hidden_project(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call("project.hide", json!({"name": "app"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+    until(&shell, cx, "the hidden project is listed", |cx| {
+        cx.update(|window, _| window.try_find("hidden-project-row-app").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_task_s_copy_dialog(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);

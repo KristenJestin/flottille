@@ -728,7 +728,7 @@ fn the_receiving_machine_s_gate_judges_the_launch_in_ask_and_auto() {
 }
 
 #[test]
-fn full_needs_the_user_s_signed_switch_otherwise_auto() {
+fn full_follows_the_tree_with_no_switch_signed() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
     // Full, switched on the caller's machine itself: no device signed it.
@@ -736,40 +736,26 @@ fn full_needs_the_user_s_signed_switch_otherwise_auto() {
 
     done(&launched(
         &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Unsigned", "brief": "One."}),
+        json!({"kind": "led", "machine": "server", "title": "In Full", "brief": "One."}),
     ));
 
-    let session = titled(&server, "Unsigned");
-    assert_eq!(session["gate_mode"], "auto", "{session:#}");
-    let judged = server.user.judge_received().len();
-    assert!(judged > 0, "the judge was not asked");
-
-    // Full, switched by the user from a device, signed: kept and sent with the launch.
-    let switched = server
-        .user
-        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
-    assert!(
-        switched.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&switched.stderr),
-        pc.log()
-    );
-    done(&launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Signed", "brief": "Two."}),
-    ));
-    let session = titled(&server, "Signed");
+    // As a launch of the tree here: Full, and no judge asked.
+    let session = titled(&server, "In Full");
     assert_eq!(session["gate_mode"], "full", "{session:#}");
-    assert_eq!(
-        server.user.judge_received().len(),
-        judged,
+    assert!(
+        server.user.judge_received().is_empty(),
         "the judge was asked in Full"
     );
 
-    // Switched again on the caller's machine: the signed switch is no longer kept.
+    // The tree put back in Auto here: the next launch is in Auto there.
     pc.user
         .call("agent.mode", json!({"agent": root, "mode": "auto"}))
         .unwrap();
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "In Auto", "brief": "Two."}),
+    ));
+    assert_eq!(titled(&server, "In Auto")["gate_mode"], "auto");
     pc.user
         .call("agent.mode", json!({"agent": root, "mode": "full"}))
         .unwrap();
@@ -777,7 +763,7 @@ fn full_needs_the_user_s_signed_switch_otherwise_auto() {
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Again", "brief": "Three."}),
     ));
-    assert_eq!(titled(&server, "Again")["gate_mode"], "auto");
+    assert_eq!(titled(&server, "Again")["gate_mode"], "full");
 }
 
 /// A link to `to` dialled through the hub with the key in the key folder `key`, as the daemon
@@ -833,7 +819,7 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         model: None,
         effort: None,
         role: None,
-        mode: "full".into(),
+        mode: "auto".into(),
         switch: None,
         branch: "feat/export".into(),
         repositories: vec![".".into()],
@@ -843,6 +829,25 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         depth: 0,
         copied: Vec::new(),
     }
+}
+
+#[test]
+fn a_controller_s_launch_starts_nothing() {
+    let (_hub, pc, server) = pc_and_server_as("controller", server_user(allowing()), Some(""));
+    let (root, _mcp) = pc.root("full");
+    let key = pc.stand_in();
+    let mut asked = launch_ask("l1", &root);
+    asked.mode = "full".into();
+
+    let answers = sent_with(&key, &server, vec![MachineMessage::Launch(Box::new(asked))]);
+
+    // A controller runs no agent, so no agent of it launches, refused before its mode is read.
+    let refused = answers[0].clone().unwrap_err();
+    assert!(
+        refused.contains("pc is a controller: it runs no agent, so no agent of it launches"),
+        "{refused}"
+    );
+    assert!(server.agents().is_empty(), "{:#?}", server.agents());
 }
 
 #[test]
@@ -892,8 +897,6 @@ fn a_forged_launch_without_a_recorded_caller_is_refused() {
         server.user.call("workspace.list", json!({})).unwrap(),
         workspaces
     );
-    // A full mode asked without the user's signed switch is not taken either: see
-    // `full_needs_the_user_s_signed_switch_otherwise_auto`.
 }
 
 #[test]
@@ -977,7 +980,7 @@ fn a_machine_leaves_a_bounded_number_of_launches_waiting_for_their_code() {
             .collect(),
     );
 
-    // Held for the server's user (no signed switch: Auto, and no judge there asks the user).
+    // Held for the server's user (Auto, and no judge there asks the user).
     for answer in &answers[..4] {
         assert!(answer.is_ok(), "{answer:?}");
     }
@@ -1585,7 +1588,7 @@ fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
 }
 
 #[test]
-fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
+fn full_still_follows_the_tree_more_than_twelve_hours_after_the_switch() {
     // The server's clock is thirteen hours ahead from its start: moved forward while it runs, it
     // would be taken for a sleep, which loses its session to the hub and its links with it.
     let ahead = tempfile::NamedTempFile::new().unwrap();
@@ -1596,31 +1599,21 @@ fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
     );
     let (_hub, pc, server) = pc_and_server(user, Some(""));
     pc.wait_for_offer("server", 12);
-    let (root, mcp) = pc.root("auto");
-    let switched = server
-        .user
-        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
-    assert!(switched.status.success(), "{}", pc.log());
-    done(&launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
-    ));
-    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
+    let (_root, mcp) = pc.root("full");
 
-    // The server's clock set back to the hour: the same switch counts there.
-    std::fs::write(ahead.path(), "0").unwrap();
     done(&launched(
         &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Fresh", "brief": "One."}),
+        json!({"kind": "led", "machine": "server", "title": "Later", "brief": "One."}),
     ));
-    assert_eq!(titled(&server, "Fresh")["gate_mode"], "full");
+
+    assert_eq!(titled(&server, "Later")["gate_mode"], "full");
 }
 
 #[test]
-fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
+fn full_set_from_a_child_counts_for_its_tree() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = pc.root("full");
+    let (_root, mcp) = pc.root("auto");
     let child = done(&launched(
         &mcp,
         json!({"kind": "child", "title": "Local child", "brief": "Here."}),
@@ -1632,16 +1625,10 @@ fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
         .find(|agent| agent["title"] == "Local child")
         .unwrap_or_else(|| panic!("no child: {child}"));
 
-    // The user switches the tree from its child, on a device: the switch names the child.
-    let switched = server.user.run(&[
-        "--machine",
-        "pc",
-        "agent",
-        "mode",
-        child["id"].as_str().unwrap(),
-        "full",
-    ]);
-    assert!(switched.status.success(), "{}", pc.log());
+    // The user switches the tree from its child, here: the tree is in Full.
+    pc.user
+        .call("agent.mode", json!({"agent": child["id"], "mode": "full"}))
+        .unwrap();
     done(&launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "From the child", "brief": "One."}),
@@ -1882,14 +1869,13 @@ fn a_led_session_from_another_machine_launches_back_only_with_the_user() {
 }
 
 #[test]
-fn a_chain_launch_under_the_user_s_signed_full_starts_as_it_does_here() {
+fn a_chain_launch_in_full_starts_as_it_does_here() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, second, mcp) = handed_on_pc(&pc);
-    let switched = server
-        .user
-        .run(&["--machine", "pc", "agent", "mode", &second, "full"]);
-    assert!(switched.status.success(), "{}", pc.log());
+    pc.user
+        .call("agent.mode", json!({"agent": second, "mode": "full"}))
+        .unwrap();
 
     done(&launched(
         &mcp,

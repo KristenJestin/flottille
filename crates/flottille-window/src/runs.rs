@@ -1262,8 +1262,16 @@ impl Render for CommandList {
                 move |_| body,
             ))
             .test_support();
-        // Before the first listing the section is a skeleton: a run's row, which folds away when
-        // the session ran nothing.
+        // Before the first listing the section is a skeleton: a run's row, its mark, its line and
+        // what it says under it, each bar of its text's size in a line of its height; it folds
+        // away when the session ran nothing.
+        let bar = |id: &'static str, width: f32, size: f32| {
+            div()
+                .h(px((size * 1.4).round()))
+                .flex()
+                .items_center()
+                .child(Skeleton::new(id).w(px(width)).h(px(size)))
+        };
         let waiting = div()
             .id("rail-runs-skeleton")
             .flex()
@@ -1273,17 +1281,29 @@ impl Render for CommandList {
             .pt(space::SM)
             .pb(space::MD)
             .child(
-                div().h(px(32.)).flex().items_center().child(
-                    Skeleton::new("rail-runs-skeleton-title")
-                        .w(px(40.))
-                        .h(px(10.)),
-                ),
+                div()
+                    .h(px(32.))
+                    .px(space::SM)
+                    .flex()
+                    .items_center()
+                    .child(bar("rail-runs-skeleton-title", 40., 11.)),
             )
             .child(
                 div()
-                    .px(space::SM)
-                    .py(space::XS)
-                    .child(Skeleton::new("rail-runs-skeleton-row").h(px(40.))),
+                    .id("rail-runs-skeleton-row")
+                    .p(space::SM)
+                    .flex()
+                    .items_start()
+                    .gap(space::SM)
+                    .child(bar("rail-runs-skeleton-mark", 14., 14.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(bar("rail-runs-skeleton-line", 150., 12.5))
+                            .child(bar("rail-runs-skeleton-meta", 90., 11.)),
+                    )
+                    .test_support(),
             )
             .test_support();
         awaiting(

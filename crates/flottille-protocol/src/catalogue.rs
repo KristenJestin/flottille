@@ -132,6 +132,10 @@ pub const METHODS: &[(&str, Class)] = &[
     ("draft.list", Local),
     ("window.get", Local),
     ("window.set", Local),
+    // Which projects this machine's window hides: its user's view of this machine alone.
+    ("project.hide", Local),
+    ("project.unhide", Local),
+    ("project.hidden", Local),
     ("vault.list", Read),
     ("vault.set", Drive),
     ("vault.remove", Drive),
@@ -144,6 +148,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.members", Read),
     ("remote.launches", Read),
     ("remote.sessions", Read),
+    ("remote.ghost", Read),
     ("remote.change", Drive),
     // It points this machine at a hub, with the code its host printed: the machine's user only.
     ("remote.pair", Local),
@@ -372,6 +377,9 @@ mod tests {
             "draft.list",
             "window.get",
             "window.set",
+            "project.hide",
+            "project.unhide",
+            "project.hidden",
         ] {
             assert_eq!(class(method), Some(Local), "{method}");
         }

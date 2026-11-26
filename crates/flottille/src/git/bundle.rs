@@ -44,7 +44,8 @@ pub fn outgoing_ref(launch: &str) -> String {
 }
 
 /// The ref that holds the snapshot of the launch `launch` of `machine` on the receiving side,
-/// until its workspace is made: two machines' launches of one name are two refs.
+/// until its workspace is removed (or its making failed): two machines' launches of one name are
+/// two refs.
 pub fn incoming_ref(machine: &str, launch: &str) -> String {
     format!("refs/flottille/incoming/{machine}/{launch}")
 }

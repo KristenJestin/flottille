@@ -113,7 +113,7 @@ fn html_escaped(value: &str, escapes: &[(char, &str)]) -> String {
 const SECRET_NAMES: [&str; 6] = ["TOKEN", "SECRET", "PASS", "CREDENTIAL", "KEY", "AUTH"];
 
 /// How the tokens of the usual forges, registries and providers start.
-const TOKEN_PREFIXES: [&str; 14] = [
+const TOKEN_PREFIXES: [&str; 17] = [
     "ghp_",
     "gho_",
     "ghu_",
@@ -128,6 +128,10 @@ const TOKEN_PREFIXES: [&str; 14] = [
     "npm_",
     "pypi-",
     "AIza",
+    // Atlassian's API tokens, and Bitbucket's and Cloud's opaque ones.
+    "ATATT",
+    "ATBB",
+    "ATCTT",
 ];
 
 /// `text` with the secrets it holds replaced by `[masked]`: the values of the variables of `env`
@@ -715,6 +719,11 @@ enum Place {
     Query,
     /// After a connection string's `;` or a `docker run -e` (`--env`), which starts at its byte.
     Pair(usize),
+    /// After a whitespace or a `(`, in the middle of a line: only as `key=value` with no space, which
+    /// reads as it does at a line's start, so a text cut before it reads the same
+    /// (`login failed, token=…`). A password's value, which runs to a line's end there, is the
+    /// exception: streamed, it masks more than whole, never less.
+    Word,
 }
 
 /// Where the key that starts after `before` is written, if it is where a setting is.
@@ -753,6 +762,7 @@ fn place(before: &str) -> Option<Place> {
     line.chars()
         .all(|c| matches!(c, ' ' | '\t'))
         .then_some(Place::Line)
+        .or_else(|| line.ends_with([' ', '\t', '(']).then_some(Place::Word))
 }
 
 /// Whether `text` is a name of code: a letter or `_` first, then letters, digits, `_`, `.` or `:`.
@@ -791,6 +801,19 @@ fn expression(value: &str) -> bool {
         && ((head.contains('.') && !head.ends_with('.'))
             || code(value)
             || matches!(&value[head.len()..], "(" | "["))
+}
+
+/// Whether the tight value of a `key=value` in the middle of a line is code, read back from a
+/// diff, a file or a command's output (`Client(url, token=self.token)`, `local token=$(gh auth
+/// token)`, `--token=$GH_TOKEN`): a variable's expansion, a dotted name or a call (`expression`),
+/// with or without the `)`, `,` or `;` that ends it. That end alone makes no code: an opaque
+/// value followed by punctuation (`token=AbC123…,`) is masked, and so is a bare name
+/// (`token=token)`, `let token=foo_bar;`), which no shape tells from one.
+fn in_code(value: &str) -> bool {
+    let core = value.strip_suffix([')', ',', ';']).unwrap_or(value);
+    [value, core]
+        .into_iter()
+        .any(|part| part.starts_with('$') || expression(part) || code(part))
 }
 
 /// Whether a value set to a password with spaces around its `=` is plainly code, for an ini
@@ -881,7 +904,7 @@ fn settings(text: &str) -> Vec<LoginField> {
         let from = match place {
             Place::Line => text[..key_start].rfind('\n').map_or(0, |at| at + 1),
             Place::Pair(at) => at,
-            Place::Query => key_start,
+            Place::Query | Place::Word => key_start,
         };
         let mut field = LoginField {
             at: from,
@@ -936,7 +959,7 @@ fn settings(text: &str) -> Vec<LoginField> {
             (true, ..) | (false, false, _) => b"\r\n\"'",
             (false, true, Place::Query) => b"\"'&#",
             (false, true, Place::Pair(_)) => b"\"'&;",
-            (false, true, Place::Line) => b"\r\n\"'",
+            (false, true, Place::Line | Place::Word) => b"\r\n\"'",
         };
         // At a line's start, a password's value runs to the line's end (`.env`, `- PASSWORD=a b`,
         // `password = my secret phrase`), but for a `; ` that ends a connection string's pair
@@ -976,7 +999,8 @@ fn settings(text: &str) -> Vec<LoginField> {
         // number (`token: str`, `max_token: 100`). Punctuation alone is no secret (`token=<>`).
         let clear = !value.contains(char::is_alphanumeric)
             || (!quoted
-                && (value.strip_suffix(',') == Some(key)
+                && (place == Place::Word && in_code(value)
+                    || value.strip_suffix(',') == Some(key)
                     || if password {
                         let statement = value.strip_suffix(';');
                         !tight
@@ -986,7 +1010,7 @@ fn settings(text: &str) -> Vec<LoginField> {
                     } else {
                         (!tight && (value.contains([' ', '\t']) || value.ends_with(';')))
                             || (bytes[sign] == b'=' && !tight && expression(value))
-                            || value.ends_with(',')
+                            || (place != Place::Word && value.ends_with(','))
                             || code(value)
                             || value.chars().all(|c| c.is_alphabetic())
                             || value.chars().all(|c| c.is_ascii_digit())
@@ -1591,6 +1615,141 @@ mod tests {
             "token=[masked] ok"
         );
         assert_eq!(mask("risk-taking sk-short", &env), "risk-taking sk-short");
+    }
+
+    #[test]
+    fn the_opaque_tokens_of_atlassian_are_masked() {
+        let env = BTreeMap::new();
+        // Invented: the shapes of the prefixes of Atlassian's and Bitbucket's tokens, no more.
+        for prefix in ["ATATT", "ATBB", "ATCTT"] {
+            let token = format!("{prefix}3xExampleOnlyFake-0000_aaaa-bbbb-cccc");
+            assert_eq!(
+                mask(&format!("sign-in with {token} failed"), &env),
+                "sign-in with [masked] failed",
+                "{prefix}"
+            );
+        }
+        // A word that only starts alike is kept.
+        assert_eq!(
+            mask("ATBB is short, ATATTENTION", &env),
+            "ATBB is short, ATATTENTION"
+        );
+    }
+
+    #[test]
+    fn a_token_set_in_the_middle_of_a_line_is_masked() {
+        let env = BTreeMap::new();
+        let table = [
+            (
+                "login failed, token=example-opaque-0000 and more",
+                "login failed, token=[masked] and more",
+            ),
+            (
+                "login failed with access_token=example-opaque-0000 and more",
+                "login failed with access_token=[masked] and more",
+            ),
+            (
+                "run --token=example-opaque-0000 again",
+                "run --token=[masked] again",
+            ),
+            // Prose, a word or a number after a token's name, code: kept.
+            ("an invalid token: expired", "an invalid token: expired"),
+            (
+                "the token: a short-lived credential",
+                "the token: a short-lived credential",
+            ),
+            ("max token: 100", "max token: 100"),
+            ("then token = self.token", "then token = self.token"),
+            ("a token is needed", "a token is needed"),
+        ];
+        for (text, masked) in table {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_token_set_by_code_in_the_middle_of_a_line_is_kept() {
+        let env = BTreeMap::new();
+        // Code read back from a diff, a file or a command's output: an agent that sees
+        // `[masked]` in it may write it back.
+        for text in [
+            "client = Client(url, token=self.token)",
+            "local token=$(gh auth token)",
+            "run --token=$GH_TOKEN now",
+            "set(a, token=cfg.token, b)",
+            "max_token=4096 and max_token=4096",
+            "set token=None here",
+            "see https://example.org/api?token= for it",
+        ] {
+            assert_eq!(mask(text, &env), text, "{text}");
+        }
+        // A real opaque value stays masked.
+        for (text, masked) in [
+            (
+                "then token=AbC123xyz987QwErTy now",
+                "then token=[masked] now",
+            ),
+            (
+                "then token=example-opaque-0000 now",
+                "then token=[masked] now",
+            ),
+            // A bare name, with or without its end, reads as an opaque value.
+            ("api(url, token=token)", "api(url, token=[masked]"),
+            ("let token=foo_bar;", "let token=[masked]"),
+        ] {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_opaque_token_followed_by_punctuation_is_still_masked() {
+        let env = BTreeMap::new();
+        // The `)`, `,` or `;` after a value alone makes it no code.
+        for (text, masked) in [
+            (
+                "login failed, token=AbC123xyz987QwErTy, retry",
+                "login failed, token=[masked] retry",
+            ),
+            ("(token=AbC123xyz987QwErTy)", "(token=[masked]"),
+            ("then token=example-opaque-0000;", "then token=[masked]"),
+        ] {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_token_in_the_middle_of_a_line_streams_as_it_reads_whole() {
+        let text = "login failed, token=example-opaque-0000 then access_token=example-0000-fake \
+                    and ATATT3xExampleOnlyFake-0000_aaaa-bbbb done";
+        let whole = mask(text, &BTreeMap::new());
+        assert!(!whole.contains("example-"), "{whole}");
+        assert!(!whole.contains("ATATT"), "{whole}");
+        for at in (1..text.len()).filter(|&at| text.is_char_boundary(at)) {
+            assert_eq!(
+                streamed(text, &[at], &BTreeMap::new()),
+                whole,
+                "cut at {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_password_in_the_middle_of_a_line_streams_masking_no_less_than_whole() {
+        // Read whole, its value is one word (`password=a b c` masks `a`); streamed, a cut before
+        // its key leaves the key at the start of the text left, which reads it as a line's and
+        // masks the line to its end. Holding every last word of a text to avoid it would settle
+        // no prose at once: the stream masks more, and never lets a part of the value out.
+        let text = "login failed, password=aaaa bbbb cccc done";
+        let whole = mask(text, &BTreeMap::new());
+        assert_eq!(whole, "login failed, password=[masked] bbbb cccc done");
+        for at in (1..text.len()).filter(|&at| text.is_char_boundary(at)) {
+            let out = streamed(text, &[at], &BTreeMap::new());
+            assert!(
+                out.starts_with("login failed, password=[masked]"),
+                "{at}: {out}"
+            );
+            assert!(!out.contains("aaaa"), "{at}: {out}");
+        }
     }
 
     /// A Claude login file and a Codex one, their tokens invented and of no known prefix.
