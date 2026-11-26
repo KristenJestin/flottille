@@ -120,7 +120,7 @@ fn approve(machine: &Machine, number: u64) {
 
 #[test]
 fn an_agent_lists_the_sessions_of_its_project_on_every_machine() {
-    let (_hub, pc, server, night) = night_lead("runner");
+    let (_hub, pc, _server, night) = night_lead("runner");
     let day = user_session(&pc, DAY);
     let (_root, mcp) = pc.root("auto");
 
@@ -255,7 +255,7 @@ fn held_stop(
     night: &str,
     waiting: &str,
 ) -> (u64, std::path::PathBuf) {
-    let (_root, mcp) = caller(pc, server, "full");
+    let (_root, mcp) = pc.root("full");
     let number = held(&mcp.call("agent_stop", json!({"agent_id": NIGHT})));
     assert_eq!(server.agent(night)["state"], "idle");
     let full = server.user.path("kept-full");
@@ -384,7 +384,7 @@ fn the_session_tools_answer_a_session_on_another_machine_as_one_on_this_machine_
 /// The table of the session tools' calls, by id and by title, against a session on this machine
 /// and one on the other, from a caller in `mode`: the same answers.
 fn same_answers(mode: &str) {
-    let (_hub, pc, server, night) = night_lead("runner");
+    let (_hub, pc, _server, night) = night_lead("runner");
     let day = user_session(&pc, DAY);
     let (_root, mcp) = pc.root(mode);
     // Each call of a scenario of one machine, with `{s}` the session it addresses.
@@ -1335,11 +1335,7 @@ fn a_stand_in_never_relays_a_call_to_a_third_machine() {
     // pc's daemon is stopped: the test plays it, as it would send the call.
     let key = pc.stand_in();
 
-    let answers = sent_with(
-        &key,
-        &server,
-        vec![forged_call("c0", &far, "c0", "auto", None)],
-    );
+    let answers = sent_with(&key, &server, vec![forged_call("c0", &far, "c0", "auto")]);
 
     let answer = answers[0].clone().unwrap();
     let text = answer["text"].as_str().unwrap_or_default();
