@@ -977,3 +977,23 @@ fn the_daemon_s_restart_reads_the_git_config_again() {
     let (lent, warnings) = lent(&user);
     assert!(lent, "{warnings}");
 }
+
+#[test]
+fn the_copies_of_the_git_settings_are_removed_at_the_daemon_s_stop() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = desktop_settings(User::with_fake_agent(), "aaa");
+    started(&user);
+    let copies = user.path("runtime/flottille/git-settings");
+    assert!(copies.join("0").is_file());
+
+    assert!(user.run(&["daemon", "stop"]).status.success());
+
+    // The daemon removes them on its way out, after its socket.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while copies.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!copies.exists(), "{}", copies.display());
+}

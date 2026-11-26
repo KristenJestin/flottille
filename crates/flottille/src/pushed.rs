@@ -2274,8 +2274,8 @@ mod tests {
         let link = kept.join("config");
         std::os::unix::fs::symlink(&a, &link).unwrap();
         let mut found = found_settings(&home, &[&link], &[&kept]);
-        let copies = home.join("runtime/git-settings");
-        std::fs::create_dir_all(copies.parent().unwrap()).unwrap();
+        let runtime = in_runtime();
+        let copies = runtime.path().join("git-settings");
         take(&mut found.settings, &copies);
 
         // An update in a folder a run can write: a new version holding the same, the old removed.
@@ -2310,6 +2310,10 @@ mod tests {
                 "[includeIf \"gitdir:./work/\"]\n\tpath = ~/work.gitconfig\n",
             ),
             (
+                "here, whatever the case",
+                "[includeIf \"gitdir/i:./work/\"]\n\tpath = ~/work.gitconfig\n",
+            ),
+            (
                 "anchored",
                 "[include]\n\tpath = ~/.config/git/config.local\n",
             ),
@@ -2323,10 +2327,89 @@ mod tests {
                 taken: None,
             });
         }
-        take(&mut found.settings, &home.join("copies"));
+        let runtime = in_runtime();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
 
         let taken: Vec<bool> = found.settings.iter().map(|s| s.taken.is_some()).collect();
-        assert_eq!(taken, [false, false, true]);
+        assert_eq!(taken, [false, false, false, true]);
+    }
+
+    /// A folder of the runtime folder, as the daemon's copies are (`daemon.rs`): kept out of the
+    /// commands it confines, the git that reads the settings among them. A temporary one where
+    /// the machine has none.
+    fn in_runtime() -> tempfile::TempDir {
+        // SAFETY: getuid cannot fail.
+        let uid = unsafe { libc::getuid() };
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain([PathBuf::from(format!("/run/user/{uid}"))])
+            .filter_map(|folder| folder.canonicalize().ok())
+            .find_map(|folder| {
+                tempfile::Builder::new()
+                    .prefix("flottille-test-")
+                    .tempdir_in(folder)
+                    .ok()
+            })
+            .unwrap_or_else(|| tempfile::tempdir().unwrap())
+    }
+
+    #[test]
+    fn a_moved_config_with_an_include_changed_since_the_start_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let included = home.join("included.gitconfig");
+        std::fs::write(&included, "[user]\n\temail = a@example.invalid\n").unwrap();
+        let a = home.join("dots/a/config");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        let text = format!("[include]\n\tpath = {}\n", included.display());
+        std::fs::write(&a, &text).unwrap();
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let mut found = found_settings(&home, &[&link], &[&kept]);
+        found
+            .read_only
+            .push((included.clone(), identity(&included).unwrap()));
+        let runtime = in_runtime();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
+        assert!(found.settings[0].taken.is_some());
+        // The update: a new version holding the same, the old removed.
+        let b = home.join("dots/b/config");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&b, &text).unwrap();
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+        assert!(git_unlent(&found).is_none());
+
+        // The file it includes, replaced as a run could, with what a push must not be given.
+        let new = home.join("included.new");
+        std::fs::write(&new, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+        std::fs::rename(&new, &included).unwrap();
+
+        let why = git_unlent(&found).unwrap();
+        assert!(why.contains(&included.display().to_string()), "{why}");
+    }
+
+    #[test]
+    fn a_git_config_git_cannot_read_at_the_start_is_not_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let mut found = found_now(&home);
+        // A relative include git would read, past a line it cannot: what it includes is unknown.
+        let file = home.join("config");
+        std::fs::write(&file, "[include]\n\tpath = local.gitconfig\n[broken\n").unwrap();
+        found.settings.push(Setting {
+            named: file.clone(),
+            file,
+            unkept: None,
+            taken: None,
+        });
+        let runtime = in_runtime();
+        take(&mut found.settings, &runtime.path().join("git-settings"));
+
+        assert!(found.settings[0].taken.is_none());
     }
 
     #[test]

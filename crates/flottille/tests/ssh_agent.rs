@@ -2660,6 +2660,49 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
     );
 }
 
+/// The user's settings as a desktop keeps them: `~/.config/git/config` a link to its version
+/// `hash`, which holds `text` (`GIT_CONFIG_GLOBAL`: the tests' `XDG_CONFIG_HOME` is not in their
+/// home).
+fn desktop_settings(user: User, hash: &str, text: &str) -> User {
+    let version = user.path(&format!(
+        "home/.local/share/desk/versions/{hash}/git/config"
+    ));
+    std::fs::create_dir_all(version.parent().unwrap()).unwrap();
+    std::fs::write(&version, text).unwrap();
+    let link = user.path("home/.config/git/config");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&version, &link).unwrap();
+    user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap())
+}
+
+#[test]
+fn a_push_after_the_git_config_moved_to_the_same_bytes_goes_through() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = credential_helper(user);
+    let text = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
+    let user = desktop_settings(user, "aaa", &text);
+    let mcp = session(&user, &url);
+    // The desktop's update: a new version holding the same, the link renamed onto it, the old
+    // version removed.
+    let version = user.path("home/.local/share/desk/versions/bbb/git/config");
+    std::fs::create_dir_all(version.parent().unwrap()).unwrap();
+    std::fs::write(&version, &text).unwrap();
+    let new = user.path("home/.config/git/config.new");
+    std::os::unix::fs::symlink(&version, &new).unwrap();
+    std::fs::rename(&new, user.path("home/.config/git/config")).unwrap();
+    std::fs::remove_dir_all(user.path("home/.local/share/desk/versions/aaa")).unwrap();
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/moved");
+
+    assert!(remote_has(&user, "moved"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
 #[test]
 fn an_include_made_after_the_daemon_s_start_gives_a_lifted_push_none_of_its_settings() {
     let (user, _agent, _bus) = user();
