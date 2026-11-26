@@ -414,11 +414,37 @@ pub(crate) fn laid(
     daemon: &Daemon,
     workspace: &flottille_core::workspace::Workspace,
 ) -> Vec<(String, String)> {
+    launched(daemon, workspace)
+        .into_iter()
+        .map(|(_, travel)| (travel.repository, travel.snapshot))
+        .collect()
+}
+
+/// Removes the refs that kept the snapshots laid in `workspace` ([`laid`]), once it is gone.
+pub(crate) async fn forget_laid(daemon: &Daemon, workspace: &flottille_core::workspace::Workspace) {
+    for (launch, travel) in launched(daemon, workspace) {
+        let folder = Path::new(&travel.folder);
+        let reference = bundle::incoming_ref(&launch.machine, &launch.launch);
+        if let Err(error) = bundle::remove_ref(folder, &reference).await {
+            eprintln!(
+                "flottille daemon: the snapshot of launch {} in {} is kept: {error}",
+                launch.launch,
+                folder.display()
+            );
+        }
+    }
+}
+
+/// The launches `workspace` was made for, each with its travels.
+fn launched(
+    daemon: &Daemon,
+    workspace: &flottille_core::workspace::Workspace,
+) -> Vec<(flottille_core::store::Launch, Travel)> {
     let launches = daemon
         .read(|store| store.launches("in", None, flottille_core::store::LaunchFilter::All))
         .unwrap_or_default();
     launches
-        .iter()
+        .into_iter()
         .filter(|launch| {
             launch.workspace_id == Some(workspace.id) && launch.project == workspace.project
         })
@@ -426,8 +452,9 @@ pub(crate) fn laid(
             daemon
                 .read(|store| store.travels("in", Some(&launch.machine), &launch.launch))
                 .unwrap_or_default()
+                .into_iter()
+                .map(move |travel| (launch.clone(), travel))
         })
-        .map(|travel| (travel.repository, travel.snapshot))
         .collect()
 }
 
@@ -865,8 +892,11 @@ async fn placed(
     let _placing = PLACING.lock().await;
     let travels = stored(daemon.read(|store| store.travels("in", Some(&machine), &place.launch)))?;
     let made = place_travels(daemon, &machine, name, &place, &travels, launch.as_ref()).await;
-    // What came is in the workspace now, or is of no use: its refs go, either way.
-    for travel in &travels {
+    // The snapshot of a launch's workspace is what tells its work from what was laid
+    // (`workspaces::as_laid`): its refs stay until the workspace is removed. What came for no
+    // workspace is of no use: its refs go.
+    let kept = launch.is_some() && made.is_ok();
+    for travel in travels.iter().filter(|_| !kept) {
         let folder = Path::new(&travel.folder);
         if let Err(error) =
             bundle::remove_ref(folder, &bundle::incoming_ref(&machine, &place.launch)).await

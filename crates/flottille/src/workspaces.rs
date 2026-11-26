@@ -2856,9 +2856,15 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
 }
 
 /// Whether the file `path` of the worktree at `dir`, which git says changed, is as the snapshot
-/// `snapshot` laid it: the same content, or absent from both. A link, or anything git cannot
-/// read, is not.
+/// `snapshot` laid it: the same content, or absent from both. A link, a snapshot git no longer
+/// has, or anything git cannot read, is not: without the snapshot nothing tells the change from
+/// work of the workspace's own.
 async fn as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
+    let commit = format!("{snapshot}^{{commit}}");
+    let there = git::run(dir, &["cat-file", "-e", &commit], Class::Read).await;
+    if !there.is_ok_and(|there| there.success) {
+        return false;
+    }
     let at = format!("{snapshot}:{path}");
     let blob = git::run(dir, &["rev-parse", "--verify", "--quiet", &at], Class::Read).await;
     let blob = match blob {
@@ -2990,6 +2996,8 @@ async fn remove_held(
             workspace.folder.display()
         )));
     }
+    // What was laid in it is gone with it: the snapshots it was told from may go too.
+    crate::travel::forget_laid(daemon, workspace).await;
     for worktree in &workspace.repositories {
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let list = git::output(&main, &["worktree", "list", "--porcelain"], Class::Read)

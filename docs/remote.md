@@ -3064,7 +3064,9 @@ row of a session led from another machine.
   about submodules and remotes, not a file of Flottille's; and `fetch.fsckObjects` and
   `transfer.fsckObjects`: an object git finds malformed fetches nothing.
 - The snapshot's ref on the sending side is removed once the travel ends, placed or failed; the
-  incoming refs on the receiving side once its workspace is made, or its making failed. A launch
+  incoming refs on the receiving side once its making failed, or once the workspace made for the
+  launch is removed: until then the snapshot tells what was laid from work of the workspace's own,
+  and a snapshot git no longer has makes every change of it a loss. A launch
   whose code never came whole (the sender gone mid-way) is forgotten an hour after it was asked,
   with its incoming refs, when its machine next asks a launch; and a machine may leave 4 launches
   at most waiting for their code, its next refused until they are placed or forgotten.
