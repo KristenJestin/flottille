@@ -2613,6 +2613,7 @@ async fn played_whole(
     key: Option<&str>,
     cancelled: CancellationToken,
 ) -> Played {
+    let given_up = cancelled.clone();
     let started = Instant::now();
     let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
@@ -2930,8 +2931,9 @@ async fn played_whole(
         ) => (masked(&text, &grant.place), RESULT_LIMIT),
         (false, outcome) => shown(outcome, &grant.place),
     };
-    // Notes left for the session that replaced this one are its own, not this late call's.
-    let notes = if is_replaced(daemon, grant) {
+    // Notes left for the session that replaced this one are its own, not this late call's; a
+    // call given up has no one to read them.
+    let notes = if is_replaced(daemon, grant) || given_up.is_cancelled() {
         Vec::new()
     } else {
         deliveries::take_notes(
