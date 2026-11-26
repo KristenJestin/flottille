@@ -230,14 +230,25 @@ fn all(daemon: &Daemon) -> Option<BTreeMap<String, String>> {
 
 /// The names this machine holds itself among those all machines have a value of: each of its
 /// connections of its own that differs from the shared one is `connections.<name>`. A choice
-/// Flottille picked is none of the user's.
-fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, Failure> {
+/// Flottille picked is none of the user's. Beside them, why each value whose file of this
+/// machine's cannot be read is ignored here: that file fails its value alone.
+fn own(
+    daemon: &Daemon,
+    all: &BTreeMap<String, String>,
+) -> Result<(Vec<String>, Map<String, Value>), Failure> {
     let paths = &daemon.paths;
     let invalid = |why| Failure::new("invalid-config", why);
     let providers = Settings::own(paths).map_err(invalid)?;
     let compaction = compaction::Settings::own(paths).map_err(invalid)?;
     let sessions = inactive::own(paths).map_err(invalid)?;
     let mut own = Vec::new();
+    let mut unread = Map::new();
+    let mut read = |name: &str, holds: Result<bool, String>| {
+        holds.unwrap_or_else(|why| {
+            unread.insert(name.to_owned(), json!(format!("{why}: it is ignored here")));
+            false
+        })
+    };
     for name in all.keys() {
         let holds = match name.as_str() {
             provider::NEW_SESSION => providers.new_session.is_some(),
@@ -260,9 +271,9 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
                 .is_some(),
             judge::SHARED => written(&paths.judge()),
             compaction::SHARED_GUIDANCE => written(&compaction::guidance_file(paths)),
-            results::SHARED_LIMIT => results::own_keys(paths).map_err(invalid)?.0,
-            results::SHARED_UNCHANGED => results::own_keys(paths).map_err(invalid)?.1,
-            appearance::SHARED_SHADE => appearance::own_shade(paths).map_err(invalid)?,
+            results::SHARED_LIMIT => read(name, results::own_keys(paths).map(|keys| keys.0)),
+            results::SHARED_UNCHANGED => read(name, results::own_keys(paths).map(|keys| keys.1)),
+            appearance::SHARED_SHADE => read(name, appearance::own_shade(paths)),
             name if TEXTS.contains(&name) => {
                 let (extension, part) = guidance_of(name).expect("a guidance's name");
                 written(&extensions::guidance::file_of(paths, extension, part))
@@ -284,7 +295,7 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
             own.push(name.clone());
         }
     }
-    Ok(own)
+    Ok((own, unread))
 }
 
 /// Whether a guidance file holds a text: one blank is no guidance.
@@ -328,8 +339,8 @@ fn shown(daemon: &Daemon) -> Result<Value, Failure> {
     let Some(all) = all(daemon) else {
         return Ok(json!({"all": null, "own": [], "ignored": {}, "defaults": defaults()}));
     };
-    let own = own(daemon, &all)?;
-    let ignored: Map<String, Value> = all
+    let (own, unread) = own(daemon, &all)?;
+    let mut ignored: Map<String, Value> = all
         .iter()
         .filter(|(name, _)| !own.contains(name))
         .filter_map(|(name, value)| {
@@ -338,6 +349,7 @@ fn shown(daemon: &Daemon) -> Result<Value, Failure> {
             Some((name.clone(), json!(format!("{why}: it is ignored here"))))
         })
         .collect();
+    ignored.extend(unread);
     Ok(json!({"all": all, "own": own, "ignored": ignored, "defaults": defaults()}))
 }
 
