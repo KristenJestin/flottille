@@ -1696,6 +1696,22 @@ mod tests {
     }
 
     #[test]
+    fn an_opaque_token_followed_by_punctuation_is_still_masked() {
+        let env = BTreeMap::new();
+        // The `)`, `,` or `;` after a value alone makes it no code.
+        for (text, masked) in [
+            (
+                "login failed, token=AbC123xyz987QwErTy, retry",
+                "login failed, token=[masked] retry",
+            ),
+            ("(token=AbC123xyz987QwErTy)", "(token=[masked]"),
+            ("then token=example-opaque-0000;", "then token=[masked]"),
+        ] {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
     fn a_token_in_the_middle_of_a_line_streams_as_it_reads_whole() {
         let text = "login failed, token=example-opaque-0000 then access_token=example-0000-fake \
                     and ATATT3xExampleOnlyFake-0000_aaaa-bbbb done";
