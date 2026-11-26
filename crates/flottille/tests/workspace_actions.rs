@@ -554,6 +554,47 @@ fn its_running_commands_are_stopped_first_and_the_card_names_them() {
     assert!(!folder.exists());
 }
 
+/// Stopped by the removal its agent asked for, not by the user: its result says so, and the
+/// agent that removed it is not told as if the user had stopped it.
+#[test]
+fn its_commands_stopped_by_the_removal_say_so() {
+    let user = user();
+    project(&user);
+    login(&user);
+    let (id, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "sleep 300", "timeout": 1})));
+    answer(&user, "approve", number);
+    let running = || {
+        store(&user)
+            .running_runs()
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.agent.as_deref() == Some(id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    eventually("the run", || running().len() == 1);
+    let run = running()[0].id.clone();
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+    answer(&user, "approve", number);
+
+    let shown = user.call("run.output", json!({"run": run})).unwrap();
+    assert_eq!(shown["stopped_by"], "workspace", "{shown}");
+    let said = done(mcp.call("run_status", json!({"run": run})));
+    assert!(
+        said.contains("was stopped because its workspace was removed"),
+        "{said}"
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    let prompts = user.received_requests("session/prompt");
+    assert!(
+        !prompts
+            .iter()
+            .any(|p| p.to_string().contains("stopped by the user")),
+        "{prompts:?}"
+    );
+}
+
 #[test]
 fn the_session_goes_on_in_main_after_the_removal() {
     let user = user();

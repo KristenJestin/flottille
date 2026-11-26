@@ -1522,6 +1522,13 @@ fn the_seed_goes_on_to_its_end(user: &User, agent: &str, workspace: &std::path::
     let prompt = prompted(user, &["[flottille:command-ended]", &run]);
     assert!(prompt.contains("exited with code 0"), "{prompt}");
     assert!(prompt.contains("seeded"), "{prompt}");
+    // Once: neither the call given up nor a second delivery says it again.
+    std::thread::sleep(Duration::from_millis(800));
+    let told = prompts(user)
+        .iter()
+        .filter(|p| p.contains("[flottille:command-ended]") && p.contains(&run))
+        .count();
+    assert_eq!(told, 1, "{:?}", prompts(user));
 }
 
 /// A session whose first turn runs the seed through Flottille's MCP server, as Claude Code
@@ -1664,4 +1671,128 @@ fn a_stopped_run_says_who_stopped_it() {
         .until(|event| event["name"] == "run.ended" && event["data"]["run"] == session_s.as_str());
     let ended = events.last().unwrap();
     assert_eq!(ended["data"]["stopped_by"], "session", "{ended}");
+    // Read back by its session once the user resumed it.
+    let mcp = resumed(&user, &agent);
+    assert!(
+        said_by(&mcp, &session_s).contains("was stopped because its session ended"),
+        "{}",
+        said_by(&mcp, &session_s)
+    );
+}
+
+fn said_by(mcp: &Mcp, run: &str) -> String {
+    ok(mcp.call("run_status", json!({"run": run})))
+}
+
+/// The session resumed by the user: its MCP session, the one its new process was given.
+fn resumed(user: &User, agent: &str) -> Mcp {
+    let reopened = || {
+        ["session/resume", "session/load"]
+            .iter()
+            .flat_map(|method| user.received_requests(method))
+            .collect::<Vec<Value>>()
+    };
+    user.resume(agent);
+    user.call("agent.send", json!({"agent": agent, "message": "go on"}))
+        .unwrap();
+    eventually("the session reopened", || !reopened().is_empty());
+    let server = &reopened()[0]["params"]["mcpServers"][0];
+    let authorization = server["headers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|h| h["name"] == "Authorization")
+        .and_then(|h| h["value"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    Mcp::initialize(server["url"].as_str().unwrap(), &authorization)
+}
+
+/// What the daemon gives the user of a run: `run.output`, which reads an ended one from the store.
+fn shown(user: &User, run: &str) -> Value {
+    user.call("run.output", json!({"run": run})).unwrap()
+}
+
+#[test]
+fn a_stopped_run_says_who_stopped_it_to_the_user() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, _) = session(&user);
+
+    let own = start(&mcp, "server");
+    ok(mcp.call("run_status", json!({"run": own, "action": "stop"})));
+    let users = start(&mcp, "server");
+    user.call("run.stop", json!({"run": users})).unwrap();
+    let running = start(&mcp, "server");
+
+    assert_eq!(shown(&user, &own)["stopped_by"], "agent");
+    assert_eq!(shown(&user, &users)["stopped_by"], "user");
+    assert_eq!(listed_run(&user, &agent, &users)["stopped_by"], "user");
+    assert_eq!(shown(&user, &running)["stopped_by"], Value::Null);
+}
+
+#[test]
+fn the_user_s_stop_on_a_turn_stops_the_run_it_waits_on() {
+    let user = User::with_fake_agent();
+    let (agent, _mcp, _) = seeding_session(&user);
+    eventually("the seed to run", || !listed(&user, &agent).is_empty());
+    let run = listed(&user, &agent)[0]["run"].as_str().unwrap().to_owned();
+
+    user.call("agent.cancel", json!({"agent": agent})).unwrap();
+
+    eventually("the seed stopped", || {
+        state_of(&user, &agent, &run) == "stopped"
+    });
+    assert_eq!(shown(&user, &run)["stopped_by"], "user");
+    // The user stopped the agent: no turn starts by itself to tell it.
+    never_prompted(&user, &run);
+}
+
+#[test]
+fn a_run_stopped_by_flottille_stopping_says_so() {
+    let user = User::with_fake_agent();
+    let (_, mcp, _) = session(&user);
+    let run = start(&mcp, "server");
+
+    let stop = user.run(&["daemon", "stop"]);
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+
+    // Read through the daemon the next command starts.
+    let shown = shown(&user, &run);
+    assert_eq!(shown["state"], "interrupted", "{shown}");
+    assert_eq!(shown["stopped_by"], "daemon", "{shown}");
+}
+
+/// A note pinned while the session's call waits is not taken into the answer of that call once
+/// given up (a message sent at once): no one reads it, and the note would be lost.
+#[test]
+fn a_call_given_up_takes_no_note() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, _) = seeding_session(&user);
+    eventually("the seed to run", || !listed(&user, &agent).is_empty());
+    let other = start(&mcp, "ends");
+    eventually("the other command's end", || {
+        state_of(&user, &agent, &other) == "exited"
+    });
+    let delivery = user
+        .call(
+            "agent.send",
+            json!({"agent": agent, "message": "Look at this first."}),
+        )
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    user.call(
+        "agent.send_now",
+        json!({"agent": agent, "delivery": delivery}),
+    )
+    .unwrap();
+
+    let prompt = prompted(&user, &["[flottille:command-ended]", &other]);
+    assert!(prompt.contains("exited with code 3"), "{prompt}");
 }
