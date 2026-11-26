@@ -118,7 +118,11 @@ fn derive(
         (!done).then_some(item)
     };
     let of_ticket = |key: &str, item: Option<Item>, from: &str| {
-        json!({"kind": "ticket", "key": key, "title": item.map(|item| item.title),
+        let (title, url) = match item {
+            Some(item) => (Some(item.title), item.url),
+            None => (None, None),
+        };
+        json!({"kind": "ticket", "key": key, "title": title, "url": url,
             "from": from, "pull_request": pull_request})
     };
     for (key, from) in &tickets {

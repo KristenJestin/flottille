@@ -527,7 +527,7 @@ fn n_blocked_by_others_is_folded_by_default_and_keeps_its_fold(cx: &mut TestAppC
     settle(cx);
 
     let open = shell.read_with(cx, |s, cx| {
-        s.project("atlas").unwrap().read(cx).blocked_open()
+        s.project("atlas").unwrap().read(cx).blocked_open(cx)
     });
     assert!(!open, "folded by default");
     assert!(group_height(cx) < 1., "its rows are folded away");
@@ -583,7 +583,7 @@ fn n_blocked_by_others_opens_as_the_user_left_it(cx: &mut TestAppContext) {
 
     // Made unfolded, it never animates from the other: its row is there at once.
     let open = shell.read_with(cx, |s, cx| {
-        s.project("atlas").unwrap().read(cx).blocked_open()
+        s.project("atlas").unwrap().read(cx).blocked_open(cx)
     });
     assert!(open, "unfolded as it was left");
     assert!(group_height(cx) > 1., "its rows are drawn");

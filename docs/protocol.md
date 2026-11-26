@@ -1409,9 +1409,11 @@ pictures decoded and written off the runtime's threads.
   "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
-  "leads": {<agent>: <unfolded>}, "ended": <unfolded>, "blocked": <unfolded>}`, each node as the
-  user left it; one that is not in it keeps its default (a project and a lead unfolded, the "Ended"
-  and "Blocked by others" groups folded). Beside
+  "leads": {<agent>: <unfolded>}, "ended": <unfolded>, "blocked": {<project node>: true}}`, each
+  node as the user left it; one that is not in it keeps its default (a project and a lead
+  unfolded, the "Ended" group and each project's `N blocked by others` folded: `blocked` holds
+  only the ones unfolded, by the key of the project's node, its name, `<name>-on-<machine>` in a
+  machine's section). Beside
   them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
   start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
   arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
@@ -2304,10 +2306,10 @@ it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `au
 (`agent.mode`). `subject` (in `agent.list` and the tree) is what the session is about, derived
 from what it took in hand (`docs/design.md` §10, "What a session is about") and kept as its last
 `agent.updated` said it, so that a list derives nothing: `null` while it
-never held anything, else `{"kind", "key", "title", "from", "last", "pull_request"}`, `kind`
+never held anything, else `{"kind", "key", "title", "url", "from", "last", "pull_request"}`, `kind`
 being `ticket`, `pull_request` or `free`; `key` the ticket's (`#5`, `ABC-12`) or the pull
 request's (`#12`), `null` when free; `title` as the items last read it, `null` when unknown or
-free; `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
+free; `url` a ticket's page on its tracker as the items last read it, `null` when unknown; `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
 changed`, `a ticket it subscribed to`, `a ticket it read`, `a pull request it opened`, `what it
 last held`); `last`, only when free, what it last held (`#5 done · #12 merged`); `pull_request`
 the pull request it opened or its branch's, from the items the daemon keeps (`details.head`),
