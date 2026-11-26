@@ -715,7 +715,6 @@ fn pilot_stops_its_led_session() {
 }
 
 #[test]
-#[ignore = "#1277: a pilot's end does not end its led sessions on other machines"]
 fn pilot_ends_and_its_led_sessions_end() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -822,7 +821,6 @@ fn unsubscribe_from_a_led_session() {
 // The children.
 
 #[test]
-#[ignore = "#1274: a child launched across is a root there: a root's tools, depth 0, no parent"]
 fn child_tools_and_depth() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -854,7 +852,6 @@ fn child_does(steps: Value) -> impl Fn(Topology) -> Seen {
 }
 
 #[test]
-#[ignore = "#1274: the report of a child launched across lands in that machine's inbox: it is a root there"]
 fn child_reports() {
     parity(child_does(json!([report("The export tests are written.")])));
 }
@@ -877,7 +874,6 @@ fn child_goes_idle() {
 }
 
 #[test]
-#[ignore = "#1277: stopping a parent does not stop its children on other machines"]
 fn parent_stops_and_its_child_stops() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -916,7 +912,6 @@ fn handed_tells_nothing() {
 }
 
 #[test]
-#[ignore = "#1274: a child launched across is a root there, and starts a session"]
 fn a_child_starts_a_session() {
     parity(|topology| {
         let play = Play::new(
@@ -933,6 +928,123 @@ fn a_child_starts_a_session() {
             seen("child's launch: requests", play.requests().to_string()),
         ]
     });
+}
+
+// Machines are one (#1512): what one machine would do, the other does.
+
+/// A launch of `kind` by a root the user put in Full from this machine, with no switch signed
+/// from a device: the mode the launched session runs in, and what waits for the user.
+fn in_full(kind: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, "full", json!([]));
+        let (_, session) = play.started(kind);
+        play.idle(&session);
+        vec![
+            seen("full: mode", play.shown(&session)["gate_mode"].to_string()),
+            seen("full: requests", play.requests().to_string()),
+            seen("full: inbox", play.inbox()),
+        ]
+    }
+}
+
+#[test]
+fn full_follows_the_tree_to_a_child() {
+    parity(in_full("child"));
+}
+
+#[test]
+fn full_follows_the_tree_to_a_led_session() {
+    parity(in_full("led"));
+}
+
+#[test]
+fn full_follows_the_tree_to_a_handed_session() {
+    parity(in_full("handed"));
+}
+
+/// A session of `kind` whose first turn writes to the root that launched it, with
+/// `session_send`: what it is answered, whether the root got it, and what waits for the user.
+fn writes_to_its_launcher(kind: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            first_turn(json!([{"mcp": {"tool": "session_send", "arguments": {
+                "session": play.root, "text": "The export is half done."}}}])),
+        );
+        let (_, session) = play.started(kind);
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        soon(|| {
+            play.root_deliveries()
+                .iter()
+                .any(|delivery| delivery.contains("The export is half done."))
+        });
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("write back: its answer", list(play.tool_answers())),
+            seen("write back: reached the launcher", reached.to_string()),
+            seen("write back: requests", play.requests().to_string()),
+        ]
+    }
+}
+
+#[test]
+fn a_led_session_writes_to_its_launcher() {
+    parity(writes_to_its_launcher("led"));
+}
+
+#[test]
+fn a_handed_session_writes_to_its_launcher() {
+    parity(writes_to_its_launcher("handed"));
+}
+
+/// The root, in `mode`, with uncommitted work in its place, launches a led session, which ends;
+/// then removes its workspace: what it is answered, and what waits for the user.
+fn removes_the_workspace_of_its_led_session(mode: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, mode, json!([]));
+        let folder = play.pc.folder();
+        let tracked = play.pc.git(&folder, &["ls-files"]);
+        let file = folder.join(tracked.lines().next().expect("a tracked file"));
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("A draft line, never committed.\n");
+        std::fs::write(&file, text).unwrap();
+        let (_, session) = play.started("led");
+        play.idle(&session);
+        let workspace = play.shown(&session)["workspace"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        play.there()
+            .user
+            .call("agent.stop", json!({"agent": session}))
+            .unwrap();
+        soon(|| play.shown(&session)["state"] == "ended");
+        let mut args = json!({"action": "remove", "name": workspace});
+        if topology == Topology::Across {
+            args["machine"] = "server".into();
+        }
+        let answer = play.mcp.call("workspace", args);
+        a_while();
+        vec![
+            seen("removal: answer", said(&answer)),
+            seen("removal: requests", play.requests().to_string()),
+        ]
+    }
+}
+
+#[test]
+fn the_pilot_removes_the_workspace_of_its_led_session() {
+    parity(removes_the_workspace_of_its_led_session("auto"));
+}
+
+#[test]
+fn in_full_the_pilot_removes_the_workspace_of_its_led_session() {
+    parity(removes_the_workspace_of_its_led_session("full"));
 }
 
 #[test]
