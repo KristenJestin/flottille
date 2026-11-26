@@ -369,7 +369,7 @@ fn opening_it_shows_that_machine_s_page_of_it(cx: &mut TestAppContext) {
         })
     });
     // The page arrives: its header and its composer enter, one after the other.
-    for section in ["0", "2"] {
+    for section in ["0", "1"] {
         let id = gpui_kit::ElementId::Name(format!("session-section-{agent}-{section}").into());
         assert!(present(cx, id), "section {section} enters");
     }
