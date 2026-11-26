@@ -219,6 +219,17 @@ machines"). Each setting's own change is said too, but the judge's.
 |---|---|
 | `names` | The values' names (`about.name`, `new_session`, `connections`, …). |
 
+### `settings.share_refused`
+
+The hub refused a value of all machines the user changed on this machine, after `about.share` or
+`settings.share` answered it `sent` (`docs/remote.md`, "Settings for all machines"): the value stays
+this machine's, and is given again at the next session to the hub. The window shows it as a toast.
+
+| Field | |
+|---|---|
+| `name` | The value's name (`about.name`, `new_session`, …). |
+| `why` | The hub's reason. |
+
 ### `sessions.changed`
 
 The user chose after how many days an inactive session is ended, or switched that off

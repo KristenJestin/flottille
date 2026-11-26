@@ -259,3 +259,27 @@ pub fn took(
         .collect();
     (changed, again)
 }
+
+/// The copies of `hub` that are void: sealed for this machine, of a name it knows, the user's
+/// change signed by a device the list says was removed, or may only view. Every machine refuses
+/// them; this one tells the hub to drop them (`Ask::Unshare`), so that the name is free again.
+/// A copy this machine cannot open or read, or of a device its list does not know yet (a machine
+/// whose list is behind), is no proof of anything, and is left.
+pub fn void(hub: &[Sealed], key: &MachineKey, members: &Members) -> Vec<(String, u64)> {
+    hub.iter()
+        .filter(|sealed| {
+            method_of(&sealed.name).is_some()
+                && sealed.open(key).is_some_and(|plain| {
+                    serde_json::from_slice::<flottille_link::Request>(&plain).is_ok_and(|request| {
+                        let device = &request.signed.device;
+                        request.is_signed()
+                            && match members.get(device) {
+                                Some(member) => member.role == flottille_link::Role::Viewer,
+                                None => members.was_removed(device),
+                            }
+                    })
+                })
+        })
+        .map(|sealed| (sealed.name.clone(), sealed.at))
+        .collect()
+}

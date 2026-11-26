@@ -564,12 +564,17 @@ impl<C: Clock> Hub<C> {
         match shared.iter().position(|kept| kept.name == sealed.name) {
             Some(at) if shared[at].at > sealed.at => return Ok(false),
             // A copy of the same time is the same value sealed again: kept only when it is
-            // sealed for a machine the kept one is not, a machine paired since.
+            // sealed for every machine the kept one is and one more, a machine paired since.
+            // While two machines see different member lists, a copy that drops a machine would
+            // swing between them before it settles.
             Some(at)
                 if shared[at].at == sealed.at
-                    && sealed
+                    && !(shared[at]
                         .recipients()
-                        .all(|to| shared[at].recipients().any(|kept| kept == to)) =>
+                        .all(|kept| sealed.recipients().any(|to| to == kept))
+                        && sealed
+                            .recipients()
+                            .any(|to| shared[at].recipients().all(|kept| kept != to))) =>
             {
                 return Ok(false);
             }
@@ -581,6 +586,32 @@ impl<C: Clock> Hub<C> {
             }
             None => shared.push(sealed),
         }
+        self.stored.setup_code = None;
+        write(&self.file, &self.stored)?;
+        Ok(true)
+    }
+
+    /// The copy of `name` sealed at `at` dropped, as `machine` asks: it found it void, the device
+    /// that signed the change inside having left the members or become a viewer. The hub, which
+    /// cannot open it, takes a member's machine at its word, as it takes the copies it seals; a
+    /// viewer's is refused. Whether a copy was dropped: none when the hub keeps another by then.
+    pub fn unshare(&mut self, machine: &PublicKey, name: &str, at: u64) -> Result<bool, HubError> {
+        let member = self
+            .checked
+            .as_ref()
+            .and_then(|members| members.by_machine(machine))
+            .ok_or_else(|| refused("only a member's machine drops a value of all machines"))?;
+        if member.role == Role::Viewer {
+            return Err(refused(format!("{} may only view", member.name)));
+        }
+        let shared = &mut self.stored.shared;
+        let Some(kept) = shared
+            .iter()
+            .position(|kept| kept.name == name && kept.at == at)
+        else {
+            return Ok(false);
+        };
+        shared.remove(kept);
         self.stored.setup_code = None;
         write(&self.file, &self.stored)?;
         Ok(true)

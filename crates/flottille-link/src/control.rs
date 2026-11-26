@@ -598,6 +598,10 @@ pub enum Ask {
     Share { sealed: Sealed },
     /// This session takes the values of all machines: the hub sends them now and at each change.
     Shared {},
+    /// The hub's copy of the value `name` sealed at `at` is void, the device that signed the
+    /// change inside having left the members or become a viewer: a member's machine, which alone
+    /// can open it, tells the hub to drop it. Asked only of a hub whose welcome said `unshare`.
+    Unshare { name: String, at: u64 },
 }
 
 /// What a runner tells the user's phones through the hub: a kind and ids, never a title, an
@@ -705,6 +709,10 @@ pub enum ToDevice {
         /// nothing, and would close a session that asks it.
         #[serde(default)]
         shared: bool,
+        /// The hub drops a copy a machine says is void (`Ask::Unshare`); a hub of before #1500
+        /// says nothing, and would close a session that asks it.
+        #[serde(default)]
+        unshare: bool,
     },
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
     /// any more, the hub having been set up again. At the end of the handshake, `proof` is the
@@ -1223,6 +1231,8 @@ pub struct Session {
     notices: bool,
     /// Whether the hub said it keeps the values of all machines.
     shared: bool,
+    /// Whether the hub said it drops a copy a machine says is void.
+    unshare: bool,
 }
 
 impl fmt::Debug for Session {
@@ -1243,6 +1253,7 @@ pub struct Asker {
     ended: Arc<Mutex<Option<String>>>,
     notices: bool,
     shared: bool,
+    unshare: bool,
 }
 
 impl Asker {
@@ -1256,6 +1267,11 @@ impl Asker {
         self.shared
     }
 
+    /// Whether the hub said it drops a copy a machine says is void (`Ask::Unshare`).
+    pub fn takes_unshare(&self) -> bool {
+        self.unshare
+    }
+
     /// Asks the hub, and waits for its answer. `Ask::Notify` is never sent to a hub that did not
     /// say it takes it: such a hub would close the session.
     pub async fn ask(&self, ask: Ask) -> Result<(), ControlError> {
@@ -1264,6 +1280,12 @@ impl Asker {
                 hub: self.authority.clone(),
                 reason: "it keeps no value of all machines, being of before them: update it"
                     .to_owned(),
+            });
+        }
+        if matches!(ask, Ask::Unshare { .. }) && !self.unshare {
+            return Err(ControlError::Refused {
+                hub: self.authority.clone(),
+                reason: "it drops no copy, being of before it: update it".to_owned(),
             });
         }
         if matches!(ask, Ask::Notify { .. }) && !self.notices {
@@ -1446,10 +1468,16 @@ impl Session {
         let (relay, carried) = relay_ends();
         let mut takes_notices = false;
         let mut takes_shared = false;
+        let mut takes_unshare = false;
         let refused = match welcome {
-            ToDevice::Welcome { notices, shared } => {
+            ToDevice::Welcome {
+                notices,
+                shared,
+                unshare,
+            } => {
                 takes_notices = notices;
                 takes_shared = shared;
+                takes_unshare = unshare;
                 tokio::spawn(drive(
                     reader,
                     writer,
@@ -1503,6 +1531,7 @@ impl Session {
             relay: Some(relay),
             notices: takes_notices,
             shared: takes_shared,
+            unshare: takes_unshare,
         })
     }
 
@@ -1534,6 +1563,7 @@ impl Session {
             ended: self.ended.clone(),
             notices: self.notices,
             shared: self.shared,
+            unshare: self.unshare,
         }
     }
 
@@ -1846,6 +1876,7 @@ impl Arriving {
             &ToDevice::Welcome {
                 notices: true,
                 shared: true,
+                unshare: true,
             },
         )
         .await?;
