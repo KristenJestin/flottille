@@ -342,3 +342,33 @@ fn a_question_to_a_compacting_pilot_is_delivered_after() {
     });
     assert_eq!(wakes(&user, &pilot).len(), 1);
 }
+
+/// The skip of "one wake a turn" is for a turn whose last message went to the pilot. One whose last
+/// message went to another session, after an earlier one to the pilot, is not: the pilot was told
+/// something in the turn, never its end.
+#[test]
+fn a_turn_whose_last_message_went_to_another_session_wakes_its_pilot() {
+    let user = User::with_fake_agent();
+    let (pilot, mcp) = pilot(&user);
+    script(
+        &user,
+        json!([{"when": "Fix the login.", "do": [
+            {"mcp": {"tool": "session_send",
+                "arguments": {"session": pilot, "text": "Starting with the form."}}},
+            {"mcp": {"tool": "agent_launch", "keep": "docs",
+                "arguments": {"kind": "handed", "title": "Docs", "brief": "Write the docs."}}},
+            {"mcp": {"tool": "session_send",
+                "arguments": {"session": "{kept:docs}", "text": "The form is coming."}}},
+            {"say": "The form is done; the docs are told."}]}]),
+    );
+
+    let session = led(&user, &mcp, "Fix the login.");
+
+    eventually("the led session's turn", || turns(&user, &session) == 1);
+    eventually("the pilot woken", || !wakes(&user, &pilot).is_empty());
+    let (woken, _) = wakes(&user, &pilot).remove(0);
+    assert!(
+        woken.contains("The form is done; the docs are told."),
+        "{woken}"
+    );
+}
