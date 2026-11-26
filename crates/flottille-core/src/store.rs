@@ -4104,16 +4104,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Forgets each ghost of the machine of key `machine` but those of `sessions`: the others
-    /// left its list.
-    pub fn forget_ghosts_except(&mut self, machine: &str, sessions: &[String]) -> Result<()> {
-        self.connection.execute(
-            "DELETE FROM ghosts WHERE machine = ?1 AND session NOT IN (SELECT value FROM json_each(?2))",
-            params![machine, serde_json::to_string(sessions)?],
-        )?;
-        Ok(())
-    }
-
     /// Each other machine's list as it last told it: its key, its name, the list, and when.
     pub fn machine_sessions(&self) -> Result<Vec<(String, String, Value, u64)>> {
         let mut statement = self
@@ -10752,7 +10742,12 @@ mod tests {
                 3,
             )
             .unwrap();
-        store.forget_ghosts_except("aa", &[]).unwrap();
+        let gone = GhostPart {
+            session: "s1",
+            gone: true,
+            ..GhostPart::default()
+        };
+        store.keep_ghost("aa", &gone, 5, 2, 3).unwrap();
         assert_eq!(store.ghost("aa", "s1").unwrap(), None);
         let events: i64 = store
             .connection
