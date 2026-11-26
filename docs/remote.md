@@ -2217,7 +2217,8 @@ by each setting's own loader under the machine's own file:
 - **A file of before**: `tool-results.toml` and `appearance.toml` held every key whatever the user
   chose; such a file's default (the 8,000 characters, the dark shade) is no choice of the
   machine's, and all machines' value applies over it. What this version writes holds only what
-  the user chose there.
+  the user chose there. So a machine that chose Dark, or the 8,000 characters, before it was
+  updated follows all machines once one shares another: choosing it again there keeps it.
 - **The rules, and each guidance, say where they come from**: `source: "all"` while the machine
   follows all machines', which a project's own rules still follow or replace as before.
 

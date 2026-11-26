@@ -774,7 +774,8 @@ name the entry instead"), and a machine that receives one drops it.
   (`null` without a hub), the names among them this machine holds itself (a connection it
   declares otherwise as `connections.<name>`; a judge or compactor Flottille picked is none; a
   guidance file of only spaces is none; a `rules.md`, even empty, is this machine's "no rules"), why each value it cannot follow is ignored here, by name
-  (a provider not ready, a model it does not offer), and Flottille's default of each value of the
+  (a provider not ready, a model it does not offer, a `tool-results.toml` or `appearance.toml` of
+  its own it cannot read, which fails that value alone), and Flottille's default of each value of the
   guidance and the rest, as its value says it (what the window's All machines shows while none
   is shared).
 - `settings.check {values: {<name>: <text>}}` answers `{}` when `settings.share` would take each
