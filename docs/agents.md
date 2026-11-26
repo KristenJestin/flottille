@@ -113,7 +113,8 @@ in the dialog's hidden field and sent once (`signin.code`): written to the progr
 line's end, which then closes, and kept nowhere. When the program ends, its own status says
 whether it is signed in now; `signin.changed` says the program and the state, and for a sign-in that
 ended with an error code the last three lines the program said on its error output, masked, without
-a line that holds an address or a one-time code (the toast says them: #1529). **A sign-in run never
+a line that holds an address, a one-time code or the code the user pasted, a token said after its
+name masked and an email address masked as an account is (the toast says them: #1529). **A sign-in run never
 stops on a question**: it has no terminal, so each program is given everything it would ask (the
 host, the site) on its command line, or the row says the line to type in a terminal. A sign-in is
 cut after 15 minutes (a device code lasts that long); Cancel kills its process group.

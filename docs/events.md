@@ -148,7 +148,7 @@ rest.
 | `program` | `claude`, `codex`, `gh`, `glab`, `acli` or `bkt`. |
 | `host` | The host it signs in to, `null` for an agent. |
 | `state` | `started`, `signed_in`, `failed`, `cancelled` or `signed_out`. |
-| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed) and, when the program ended with a code, its last three lines of error output, masked, without any line holding an address or a one-time code (#1529). |
+| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed) and, when the program ended with a code, its last three lines of error output, masked, without any line holding an address, a one-time code or the code the user pasted, a token said after its name masked and an email address masked as an account is (#1529). |
 
 ### `judge.changed`
 
