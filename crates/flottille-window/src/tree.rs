@@ -2389,6 +2389,11 @@ impl SessionRow {
         cx.notify();
     }
 
+    /// What it is about, as the row last read it.
+    pub fn subject(&self) -> Option<&crate::model::Subject> {
+        self.subject.as_ref()
+    }
+
     /// The key of what it is about: `SHOP-60`, `#12`; none for a free session.
     fn key(&self) -> Option<SharedString> {
         let subject = self.subject.as_ref()?;
