@@ -301,6 +301,9 @@ pub struct Follow {
     pub connect: Connect,
     pub updates: Updates,
     pub opener: Opener,
+    /// For a page of another machine: where its sessions' ghosts are read, at once and while
+    /// that machine is off (`docs/remote.md`, "Machines are one").
+    pub ghost: Option<crate::session_link::Ghosted>,
 }
 
 /// What the shell knows of the session when it opens it.
@@ -1292,6 +1295,7 @@ impl SessionPage {
                 workspace: self.opened.place.clone(),
             },
             self.pages,
+            self.follow.ghost.clone(),
         ));
         if let Some(link) = &self.link {
             link.watch(self.watching.clone());

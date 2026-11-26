@@ -504,6 +504,7 @@ fn a_reconnect_keeps_the_known_pull_requests_and_ticket() {
             workspace: Some("login".into()),
         },
         1,
+        None,
     );
     let mut seen = Vec::new();
     let first = next_place(&mut updates, &mut seen);

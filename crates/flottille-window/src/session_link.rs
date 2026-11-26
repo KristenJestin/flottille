@@ -602,8 +602,17 @@ fn request_of_a_followed(name: &str, data: &Value, followed: &HashSet<String>) -
                 .is_some_and(|joined| joined.iter().any(of)))
 }
 
+/// Where the ghost of a session of another machine is read (`docs/remote.md`, "Machines are
+/// one"): this machine's own daemon, which keeps it, and that machine's name.
+#[derive(Clone)]
+pub struct Ghosted {
+    pub local: Connect,
+    pub machine: String,
+}
+
 /// Starts the link of the session of `root`, showing the last `pages` pages of `shown`'s
-/// conversation.
+/// conversation. A session of another machine whose ghost this machine keeps (`ghost`) shows it
+/// first, read from this machine's daemon, then follows that machine from where its ghost stops.
 pub fn spawn(
     connect: Connect,
     updates: impl Into<Updates>,
@@ -611,6 +620,7 @@ pub fn spawn(
     shown: String,
     place: Where,
     pages: usize,
+    ghost: Option<Ghosted>,
 ) -> SessionLink {
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(AtomicBool::new(false));
@@ -624,6 +634,7 @@ pub fn spawn(
         shown,
         place,
         pages: pages.max(1),
+        ghost,
         stop: stop.clone(),
         stream: stream.clone(),
         watched: watched.clone(),
@@ -648,6 +659,7 @@ struct Link {
     shown: String,
     place: Where,
     pages: usize,
+    ghost: Option<Ghosted>,
     stop: Arc<AtomicBool>,
     stream: Arc<Mutex<Option<UnixStream>>>,
     watched: Arc<Mutex<Option<String>>>,
@@ -714,6 +726,12 @@ impl Link {
     fn run(self) {
         let mut retry = FIRST_RETRY;
         let mut resume = Resume::default();
+        // Its ghost first, from this machine: nothing waits for the link to the session's own.
+        if self.shown == self.root
+            && let Some(ghost) = &self.ghost
+        {
+            self.read_ghost(ghost, &mut resume);
+        }
         while !self.stopped() {
             let began = Instant::now();
             let broke = match (self.connect)().and_then(|s| Ok((s.try_clone()?, s))) {
@@ -909,6 +927,70 @@ impl Link {
             if agent == self.shown && !self.send(SessionUpdate::Live(event.clone())) {
                 return Ok(());
             }
+        }
+    }
+
+    /// The ghost this machine keeps of the session, sent as the session's own machine would
+    /// have answered it: its tree, its waits, its conversation. The link to that machine then
+    /// resumes its events after the ghost's last one, and reads no conversation again. A ghost
+    /// that cannot be read, or holds no event yet, changes nothing: the session is read there.
+    fn read_ghost(&self, ghost: &Ghosted, resume: &mut Resume) {
+        let Ok(stream) = (ghost.local)() else {
+            return;
+        };
+        let Ok(mut conn) = Conn::new(stream) else {
+            return;
+        };
+        let kept = conn.ask(
+            "remote.ghost",
+            json!({"machine": ghost.machine, "session": self.root}),
+        );
+        let Ok(Ok(kept)) = kept else {
+            return;
+        };
+        let Some(last) = kept["last"].as_u64() else {
+            return;
+        };
+        let view = &kept["view"];
+        let tree: Vec<TreeAgent> = view["tree"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(TreeAgent::of)
+            .collect();
+        let ids: HashSet<String> = tree.iter().map(|agent| agent.id.clone()).collect();
+        let requests = view["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Request::of)
+            .collect();
+        let asks = view["asks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|ask| {
+                ask["agent"]
+                    .as_str()
+                    .is_some_and(|agent| ids.contains(agent))
+            })
+            .map(|ask| VaultAsk::of(ask["ask"].as_u64().unwrap_or_default(), ask))
+            .collect();
+        let events: Vec<Event> = kept["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|event| serde_json::from_value(event.clone()).ok())
+            .collect();
+        if !tree.is_empty() {
+            self.send(SessionUpdate::Tree(tree));
+        }
+        self.send(SessionUpdate::Requests(requests));
+        self.send(SessionUpdate::VaultAsks(asks));
+        let earlier = kept["more"] == true;
+        if self.send(SessionUpdate::History { events, earlier }) {
+            resume.last = Some(last);
+            resume.read = true;
         }
     }
 

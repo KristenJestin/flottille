@@ -753,6 +753,7 @@ impl Shell {
             connect: local.clone(),
             updates: sender.clone().into(),
             opener: crate::open::system(),
+            ghost: None,
         };
         let actions = Actions::spawn(local.clone(), sender.clone());
         let this = cx.entity().downgrade();
@@ -1824,7 +1825,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let to = machine.clone();
-        self.reach_then(machine, window, cx, move |shell, window, cx| {
+        // A session of a machine that is off opens from its ghost (`docs/remote.md`, "Machines
+        // are one"): its page says the machine is off, and what is sent waits for it.
+        let off_too = matches!(selection, Selection::Session(_));
+        self.reach_with(machine, off_too, window, cx, move |shell, window, cx| {
             shell.bring(to, window, cx);
             shell.select(selection, window, cx);
         });
@@ -1841,6 +1845,18 @@ impl Shell {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
     ) {
+        self.reach_with(machine, false, window, cx, then);
+    }
+
+    /// [`Shell::reach_then`], that runs `then` for a machine that is off too when `off_too`.
+    fn reach_with(
+        &mut self,
+        machine: Option<String>,
+        off_too: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+    ) {
         self.choosing = None;
         let Some(name) = machine else {
             then(self, window, cx);
@@ -1848,7 +1864,7 @@ impl Shell {
         };
         let read: Option<Machines> = self.machines.read(cx).machines().cloned();
         let found = read.as_ref().and_then(|read| read.machine(&name)).cloned();
-        if let Some(found) = found.filter(|found| !found.online()) {
+        if let Some(found) = found.filter(|found| !off_too && !found.online()) {
             let detail = found
                 .reason
                 .clone()
@@ -1969,6 +1985,10 @@ impl Shell {
                     connect,
                     updates,
                     opener: self.follow.opener.clone(),
+                    ghost: Some(crate::session_link::Ghosted {
+                        local: self.local.clone(),
+                        machine: name.to_owned(),
+                    }),
                 };
                 (actions, follow)
             }
@@ -1977,6 +1997,7 @@ impl Shell {
                     connect: self.local.clone(),
                     updates: updates.clone(),
                     opener: self.follow.opener.clone(),
+                    ghost: None,
                 };
                 let mut actions = Actions::spawn(self.local.clone(), updates);
                 if let Some(sign) = self.sign.clone() {
