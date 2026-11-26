@@ -3780,11 +3780,12 @@ impl Store {
 
     /// The led session of the launch `launch` (`way`, with the machine of key `machine`) was
     /// detached by the user: it is theirs, as a session handed over is, and its caller reaches it
-    /// no more as the session it started.
+    /// no more as the session it started. `asked.detached` tells it from a session handed over at
+    /// its launch, which still writes to its launcher as the session it started.
     pub fn hand_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE launches SET kind = 'handed' WHERE way = ?1 AND machine = ?2 AND launch = ?3 \
-             AND kind = 'led'",
+            "UPDATE launches SET kind = 'handed', asked = json_set(asked, '$.detached', \
+             json('true')) WHERE way = ?1 AND machine = ?2 AND launch = ?3 AND kind = 'led'",
             params![way, machine, launch],
         )?;
         Ok(())

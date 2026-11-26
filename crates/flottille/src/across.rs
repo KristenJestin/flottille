@@ -270,14 +270,17 @@ pub(crate) fn caller_of(daemon: &Daemon, agent: &Agent, kind: &str) -> Option<St
 /// The agent of this machine that launched the caller of another machine stood in for here as
 /// `stand_in` (`<agent>@<machine's key>`): the one it writes to as a session writes to the agent
 /// that started it on one machine. `None` for any other agent, a child among them: a child writes
-/// to its parent with its own tools, never as a session writes to its starter.
+/// to its parent with its own tools, never as a session writes to its starter; and a session the
+/// user detached, theirs alone, as one machine clears its `launched_by`.
 pub(crate) fn launcher_here(daemon: &Daemon, stand_in: &str) -> Option<String> {
     let (agent, machine) = stand_in.split_once('@')?;
     daemon
         .read(|store| store.launches("out", Some(machine), LaunchFilter::Agent(agent)))
         .ok()?
         .into_iter()
-        .find(|launch| launch.state != "refused" && launch.kind != "child")
+        .find(|launch| {
+            launch.state != "refused" && launch.kind != "child" && launch.asked["detached"] != true
+        })
         .map(|launch| launch.caller)
 }
 
