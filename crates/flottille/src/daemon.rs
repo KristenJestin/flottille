@@ -183,6 +183,9 @@ pub fn run(paths: &Paths) -> Result<()> {
     let served = runtime.block_on(serve(paths, store, projects, machine_key));
     // Everything it held is let go before another daemon takes its place.
     drop(runtime);
+    // What the user's git settings held, which may say a token (`http.extraHeader`): nothing a
+    // daemon that no longer runs needs, the next one copies them again.
+    let _ = std::fs::remove_dir_all(paths.runtime.join("git-settings"));
     if served.is_ok() && crate::updates::restart_asked() {
         drop(_store_lock);
         drop(_lock);
