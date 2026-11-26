@@ -77,66 +77,27 @@ fn agent_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// The mode of `caller`'s tree as another machine is told it, with a launch or a call: the agent
-/// of the tree a switch names (its root otherwise), the mode's word, and the user's signed switch
-/// to Full, the only way another machine takes Full.
-pub(crate) fn mode_sent(daemon: &Daemon, caller: &Agent) -> (String, &'static str, Option<String>) {
-    let mut tree = crate::tree::root_of(daemon, &caller.id);
-    let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
-        GateMode::Ask => ("ask", None),
-        GateMode::Auto => ("auto", None),
-        GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
-            Some(switch) => {
-                // Kept on the root, it may name any agent of the tree: the tree is named by
-                // that agent, which the other machine checks the switch against.
-                if let Some(named) = switched(&switch) {
-                    tree = named;
-                }
-                ("full", Some(switch))
-            }
-            // Only the user's signed switch raises a launch on another machine to Full.
-            None => ("auto", None),
-        },
+/// The mode of `caller`'s tree as another machine is told it, with a launch or a call: its root,
+/// and the mode's word, Full included (`docs/remote.md`, "Machines are one").
+pub(crate) fn mode_sent(daemon: &Daemon, caller: &Agent) -> (String, &'static str) {
+    let tree = crate::tree::root_of(daemon, &caller.id);
+    let mode = match crate::judge::mode(daemon, &caller.id) {
+        GateMode::Ask => "ask",
+        GateMode::Auto => "auto",
+        GateMode::Full => "full",
     };
-    (tree, mode, switch)
+    (tree, mode)
 }
 
-/// The mode another machine's launch or call is taken in: the one it says, except Full, taken
-/// only with the user's switch signed by a device for `tree`, less than 12 hours old here; Auto
-/// otherwise. A machine alone cannot raise a mode.
-pub(crate) fn mode_taken(
-    mode: &str,
-    switch: Option<&str>,
-    sender: &str,
-    tree: &str,
-    members: &flottille_link::Members,
-) -> GateMode {
+/// The mode another machine's launch or call is taken in: the one its tree has there, as a
+/// launch or a call of that tree here takes it. A runner is the user: its Full is taken as it is.
+/// A device of another role stays bounded by it: never Full.
+pub(crate) fn mode_taken(mode: &str, role: Role) -> GateMode {
     match mode {
         "ask" => GateMode::Ask,
-        "full" => match switch {
-            Some(switch)
-                if flottille_link::full_switch(
-                    switch,
-                    sender,
-                    tree,
-                    members,
-                    crate::link::wall_now(),
-                )
-                .is_ok() =>
-            {
-                GateMode::Full
-            }
-            _ => GateMode::Auto,
-        },
+        "full" if role == Role::Runner => GateMode::Full,
         _ => GateMode::Auto,
     }
-}
-
-/// The agent a switch to Full the user signed names: one of the tree it switched.
-fn switched(switch: &str) -> Option<String> {
-    let request: flottille_link::Request = serde_json::from_str(switch).ok()?;
-    let params: Value = serde_json::from_str(&request.signed.params).ok()?;
-    params["agent"].as_str().map(str::to_owned)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -233,7 +194,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
             crate::travelled::LONGEST_SETTINGS / 1024
         )));
     }
-    let (tree, mode, switch) = mode_sent(daemon, caller);
+    let (tree, mode) = mode_sent(daemon, caller);
     let launch = flottille_core::agent::new_id().map_err(|error| refused(error.to_string()))?;
     let repositories: Vec<String> = place.iter().map(|(path, _)| path.clone()).collect();
     let message = LaunchAsk {
@@ -249,7 +210,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         effort: asked.effort.clone(),
         role: Some(asked.role.clone()),
         mode: mode.to_owned(),
-        switch,
+        switch: None,
         branch: branch.clone(),
         repositories: repositories.clone(),
         identities,
@@ -566,6 +527,8 @@ pub(crate) async fn serve(
 /// Who the launch's sender is, and this machine's name, by the checked member list.
 struct Names {
     from: String,
+    /// The sender's role, as the member list says it: the mode its launch is taken in hangs on it.
+    role: Role,
     here: String,
     members: flottille_link::Members,
 }
@@ -585,6 +548,7 @@ fn names(remote: &Remote, from: &PublicKey) -> Result<Names, String> {
     flottille_link::runs_agents(&members, &here, "agent.start").map_err(|why| why.to_string())?;
     Ok(Names {
         from: member.name.clone(),
+        role: member.role,
         here,
         members,
     })
@@ -604,6 +568,7 @@ async fn judged(
     };
     let Names {
         from: sender,
+        role,
         here,
         members,
     } = &names;
@@ -739,13 +704,7 @@ async fn judged(
         ),
         _ => None,
     };
-    let mode = mode_taken(
-        &asked.mode,
-        asked.switch.as_deref(),
-        sender,
-        &asked.tree,
-        members,
-    );
+    let mode = mode_taken(&asked.mode, *role);
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
     let mut classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
@@ -1815,6 +1774,20 @@ pub(crate) fn started_here(daemon: &Daemon, agent: &str) -> bool {
 mod tests {
     use super::*;
     use flottille_core::workspace::{Base, Workspace, Worktree};
+
+    #[test]
+    fn a_runner_s_full_is_taken_and_no_other_role_s() {
+        // A runner is the user: the mode of its tree is taken as it is, Full included.
+        assert_eq!(mode_taken("full", Role::Runner), GateMode::Full);
+        assert_eq!(mode_taken("auto", Role::Runner), GateMode::Auto);
+        assert_eq!(mode_taken("ask", Role::Runner), GateMode::Ask);
+        // A device of another role stays bounded by it.
+        assert_eq!(mode_taken("full", Role::Controller), GateMode::Auto);
+        assert_eq!(mode_taken("full", Role::Viewer), GateMode::Auto);
+        assert_eq!(mode_taken("ask", Role::Controller), GateMode::Ask);
+        // A word no machine sends is no mode of its own.
+        assert_eq!(mode_taken("root", Role::Runner), GateMode::Auto);
+    }
 
     #[test]
     fn a_refusal_before_waiting_is_never_answered_as_waiting() {

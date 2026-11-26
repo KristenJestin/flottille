@@ -570,3 +570,108 @@ fn an_unlinked_ticket_folds_away_instead_of_vanishing(cx: &mut TestAppContext) {
     assert!(!present(cx, "rail-ticket"), "it is gone once folded");
     assert!(!present(cx, "rail-line-ticket"));
 }
+
+/// A lead in the workspace `login` of `app`, its one repository `api` on GitHub, with no ticket
+/// and no pull request: a workspace of one line.
+fn one_line_lead(user: &User) -> String {
+    let folder = user.path("work/app");
+    let dir = folder.join("api");
+    user.git_init(&dir);
+    std::fs::write(dir.join("README.md"), "api\n").unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    let remote = user.path("remotes/api.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    user.git(&dir, &["push", "--quiet", "origin", "main"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login"}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    user.git(
+        &dir,
+        &["remote", "set-url", "origin", "git@github.com:acme/api.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}]}),
+    )
+    .unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.gh_script(json!({"pulls": {}, "issues": {}}));
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its first turn", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    id
+}
+
+fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .map_or(0., |found| f32::from(found.bounds().size.height))
+    })
+}
+
+#[gpui_kit::test]
+fn a_skeleton_has_the_shape_and_height_of_what_replaces_it(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = one_line_lead(&user);
+    // The page's own connection waits while `held`: its rail stays a skeleton.
+    let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let connector = user.connector();
+    let waits = held.clone();
+    let connect: flottille_window::link::Connect = Arc::new(move || {
+        while waits.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        connector()
+    });
+    let env = Environment {
+        os_release: user.path("os-release"),
+        state_home: user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    until(&shell, cx, "the session is in the tree", |cx| {
+        listed(cx, &lead)
+    });
+    held.store(true, std::sync::atomic::Ordering::SeqCst);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    settle(cx);
+    assert!(present(cx, "rail-workspace-skeleton"), "Workspace waits");
+    let waiting = height(cx, "rail-workspace-wait");
+
+    held.store(false, std::sync::atomic::Ordering::SeqCst);
+    until(&shell, cx, "the workspace's line", |cx| {
+        present(cx, "rail-workspace-read") && present(cx, "rail-status-api")
+    });
+    for _ in 0..4 {
+        until(&shell, cx, "a frame", |_| true);
+        settle(cx);
+    }
+    assert!(!present(cx, "rail-workspace-skeleton"));
+    let read = height(cx, "rail-workspace-wait");
+    assert!(waiting > 0.0);
+    assert!(
+        (waiting - read).abs() < 0.5,
+        "the section is {waiting} px as a skeleton and {read} px once read: the swap moves it"
+    );
+}

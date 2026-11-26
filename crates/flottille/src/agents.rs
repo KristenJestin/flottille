@@ -47,6 +47,10 @@ const IDLE_RELEASE: Duration = Duration::from_secs(5 * 60);
 const STOP_GRACE: Duration = Duration::from_secs(2);
 /// The events `agent.show` gives at once.
 const PAGE: usize = 1000;
+/// What a page read backwards (`before`, the window's) holds at most, in bytes of its events'
+/// data: a thousand events of long tool outputs are tens of megabytes, which the window waited
+/// for to open a conversation (#1531).
+const PAGE_BYTES: usize = 1_000_000;
 
 /// `agent.unqueue`'s and `agent.send_now`'s parameters: a message that waits for the root.
 /// `images` asks for its pictures back.
@@ -422,15 +426,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             }
             let agent = find(daemon, &root)?;
             let was = agent.gate_mode;
-            // A switch to Full the user signed from a device is kept, for a launch on another
-            // machine to start in Full there; any other switch forgets it.
-            let signed = match mode {
-                GateMode::Full => crate::daemon::asked().map(|asked| asked.signed.clone()),
-                _ => None,
-            };
             // Only the user's door reaches this method: no tool of an agent changes a mode.
             daemon.write(|store| {
-                store.set_full_switch(&agent.id, signed.as_deref())?;
                 let (_, event) = store.change_agent(
                     &agent.id,
                     flottille_core::store::AgentChange {
@@ -548,11 +545,27 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Some(before) => store.agent_events_before(&agent.id, before, PAGE + 1),
                 None => store.agent_events(&agent.id, asked.after.unwrap_or(0), PAGE + 1),
             })?;
-            let more = events.len() > PAGE;
+            let mut more = events.len() > PAGE;
             if more && asked.before.is_some() {
                 events.remove(0);
             }
             events.truncate(PAGE);
+            if asked.before.is_some() {
+                // The newest events that fit, one at least.
+                let (mut from, mut bytes) = (events.len(), 0);
+                while from > 0 {
+                    let size = events[from - 1].data.to_string().len();
+                    if from < events.len() && bytes + size > PAGE_BYTES {
+                        break;
+                    }
+                    bytes += size;
+                    from -= 1;
+                }
+                if from > 0 {
+                    events.drain(..from);
+                    more = true;
+                }
+            }
             let mut shown = agent.to_json();
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();

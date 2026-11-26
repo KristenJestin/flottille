@@ -65,10 +65,11 @@ const AGENTS_BLOCKS: [&str; 6] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 7] = [
+const GENERAL_BLOCKS: [&str; 8] = [
     "about",
     "appearance",
     "workspaces",
+    "hidden",
     "travelled",
     "developer",
     "check",
@@ -81,10 +82,11 @@ const LEADING_CHILDREN: usize = 1;
 
 /// The blocks of a machine that are its own alone, with a hub: each says it once
 /// (`docs/remote.md`, "Settings for all machines").
-const MACHINE_ONLY: [&str; 6] = [
+const MACHINE_ONLY: [&str; 7] = [
     "providers",
     "forges",
     "vault",
+    "hidden",
     "travelled",
     "developer",
     "check",
@@ -414,6 +416,8 @@ pub struct SettingsPage {
     appearance_unread: Option<String>,
     /// The programs' sign-ins: the forges' section, and what each provider's row offers.
     sign_in: Entity<crate::sign_in::SignInSection>,
+    /// The projects this machine hides: this machine's own, whichever machine's page this is.
+    hidden: Entity<crate::hidden_projects::HiddenProjects>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
     /// The row of Features whose page is open, by its key: kept while another tab is shown.
@@ -487,6 +491,7 @@ impl SettingsPage {
         machines: Entity<crate::machines_page::MachinesSection>,
         version: Entity<crate::version::VersionSection>,
         sign_in: Entity<crate::sign_in::SignInSection>,
+        hidden: Entity<crate::hidden_projects::HiddenProjects>,
         filing: Entity<crate::findings::Filing>,
         check: Entity<crate::check::CheckSection>,
         all_settings: Entity<AllSettings>,
@@ -495,6 +500,7 @@ impl SettingsPage {
             all_settings,
             of: None,
             sign_in,
+            hidden,
             check,
             machines,
             version,
@@ -1069,6 +1075,11 @@ impl SettingsPage {
 
     pub fn sign_in(&self) -> &Entity<crate::sign_in::SignInSection> {
         &self.sign_in
+    }
+
+    /// The section of the projects this machine hides.
+    pub fn hidden(&self) -> &Entity<crate::hidden_projects::HiddenProjects> {
+        &self.hidden
     }
 
     pub fn vault(&self) -> &Entity<VaultSection> {
@@ -2815,12 +2826,18 @@ impl Render for SettingsPage {
                 ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
+                ("hidden", self.hidden.clone().into_any_element()),
                 ("travelled", self.travelled.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
                 ("check", self.check.clone().into_any_element()),
                 ("version", self.version.clone().into_any_element()),
             ],
         };
+        // What this machine hides is its own: another machine's page does not draw it.
+        let blocks: Vec<(&str, AnyElement)> = blocks
+            .into_iter()
+            .filter(|(part, _)| *part != "hidden" || self.of.is_none())
+            .collect();
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
         let this = cx.entity().downgrade();
         // All machines has the tabs that hold a section every machine may share: General.

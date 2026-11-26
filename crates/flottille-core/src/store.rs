@@ -2137,7 +2137,7 @@ impl Store {
 
     /// The latest sign of activity of these agents, from what is recorded: their events (but
     /// those the daemon says on its own, `agent.tools_outdated`, `agent.tools_reload`,
-    /// `agent.released` and `agent.requests_said`), their
+    /// `agent.released`, `agent.requests_said` and `agent.questions_said`), their
     /// deliveries made and sent, their runs started and ended, their requests asked and decided,
     /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
     pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
@@ -2149,7 +2149,7 @@ impl Store {
                UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
                  WHERE a.agent IN tree \
                  AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', \
-                   'agent.released', 'agent.requests_said') \
+                   'agent.released', 'agent.requests_said', 'agent.questions_said') \
                UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
                  WHERE agent IN tree \
                UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
@@ -3829,11 +3829,12 @@ impl Store {
 
     /// The led session of the launch `launch` (`way`, with the machine of key `machine`) was
     /// detached by the user: it is theirs, as a session handed over is, and its caller reaches it
-    /// no more as the session it started.
+    /// no more as the session it started. `asked.detached` tells it from a session handed over at
+    /// its launch, which still writes to its launcher as the session it started.
     pub fn hand_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE launches SET kind = 'handed' WHERE way = ?1 AND machine = ?2 AND launch = ?3 \
-             AND kind = 'led'",
+            "UPDATE launches SET kind = 'handed', asked = json_set(asked, '$.detached', \
+             json('true')) WHERE way = ?1 AND machine = ?2 AND launch = ?3 AND kind = 'led'",
             params![way, machine, launch],
         )?;
         Ok(())
@@ -4208,29 +4209,6 @@ impl Store {
             params![way, machine, launch],
         )?;
         Ok(())
-    }
-
-    /// Keeps the user's switch of the tree of `agent` to Full as the device signed it, or forgets
-    /// it (`None`).
-    pub fn set_full_switch(&mut self, agent: &str, signed: Option<&str>) -> Result<()> {
-        self.connection.execute(
-            "UPDATE agents SET full_switch = ?2 WHERE id = ?1",
-            params![agent, signed],
-        )?;
-        Ok(())
-    }
-
-    /// The user's switch of the tree of `agent` to Full, as the device signed it, when kept.
-    pub fn full_switch(&self, agent: &str) -> Result<Option<String>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT full_switch FROM agents WHERE id = ?1",
-                params![agent],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten())
     }
 
     /// The keys of the drafts the composers hold.

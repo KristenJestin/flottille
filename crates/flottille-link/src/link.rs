@@ -201,12 +201,14 @@ pub struct Call {
     pub project: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
-    /// The agent of the caller's tree a switch to Full names (its root otherwise), and that
-    /// tree's mode, `ask`, `auto` or `full`: Full taken only with `switch`, as a launch's.
+    /// The root of the caller's tree, and that tree's mode, `ask`, `auto` or `full`, which the
+    /// call is taken in, as a launch's.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tree: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
+    /// A switch to Full a device signed, which a machine of before sends with Full and none
+    /// reads any more: Full follows the tree (`docs/remote.md`, "Machines are one").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch: Option<String>,
 }
@@ -233,10 +235,10 @@ pub struct LaunchAsk {
     pub effort: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
-    /// The mode of the caller's tree: `ask`, `auto` or `full`, Full taken only with `switch`.
+    /// The mode of the caller's tree: `ask`, `auto` or `full`, which the launch takes.
     pub mode: String,
-    /// The user's switch of the tree to Full, as the device signed it (a signed request, kept by
-    /// the caller's machine): the only way a launch starts in Full.
+    /// A switch to Full a device signed, which a machine of before sends with Full and none
+    /// reads any more: Full follows the tree (`docs/remote.md`, "Machines are one").
     #[serde(default)]
     pub switch: Option<String>,
     /// The caller's branch, which the new workspace takes.

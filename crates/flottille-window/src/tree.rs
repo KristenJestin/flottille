@@ -106,6 +106,23 @@ pub fn project_remove_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-remove-{name}").into())
 }
 
+/// The menu of the row of a project that has its settings file: Hide on this machine. `key` is
+/// what the row's ids are made from (its name, and its machine in a machine's section); it is
+/// not [`project_menu_id`], the menu of a project with no file, which one of its name may sit
+/// beside.
+pub fn project_options_id(key: &str) -> ElementId {
+    ElementId::Name(format!("project-options-{key}").into())
+}
+
+/// Hide on this machine, in the menu of a project's row (`key` is what the row's ids are made
+/// from: its name, and its machine in a machine's section).
+pub fn project_hide_id(key: &str) -> ElementId {
+    ElementId::Name(format!("project-hide-{key}").into())
+}
+
+/// What the menu of a project's row says of hiding it.
+pub const HIDE_LABEL: &str = "Hide on this machine";
+
 /// The element id of a machine's section header (Group by machine).
 pub fn machine_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-{machine}").into())
@@ -282,14 +299,8 @@ pub fn session_pull_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-pull-{id}").into())
 }
 
-/// The element id of the chip of the key of what a session is about, before its title on its
-/// row's first line.
-pub fn session_key_id(id: &str) -> ElementId {
-    ElementId::Name(format!("session-key-{id}").into())
-}
-
-/// The element id of the same chip on the second line, where it goes when the user named the
-/// session: their title keeps the first.
+/// The element id of the key of what a session is about, on its row's second line: it never goes
+/// on the first, which the title keeps whole.
 pub fn session_key_beside_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-key-beside-{id}").into())
 }
@@ -1362,6 +1373,25 @@ impl ProjectNode {
             None => name.clone(),
         };
         let fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions.clone(), open));
+        // Hiding works on any project of the list, whichever machine has it: one entry, the row's.
+        let menu = {
+            let (shell, name, key) = (shell.clone(), name.clone(), key.clone());
+            cx.new(|cx| {
+                Menu::new(project_options_id(&key), "Project actions", cx).entry(
+                    project_hide_id(&key),
+                    HIDE_LABEL,
+                    Some(glyphs::HIDE),
+                    move |window, cx| {
+                        let name = name.clone();
+                        shell
+                            .update(cx, |shell, cx| shell.hide_project(&name, window, cx))
+                            .ok();
+                    },
+                )
+            })
+        };
+        // The row keeps the menu in sight while it is open: it draws again as it changes.
+        let watch = cx.observe(&menu, |_, _, cx| cx.notify());
         Self {
             title: name.clone().into(),
             name,
@@ -1374,7 +1404,7 @@ impl ProjectNode {
             commands: 0,
             unconfigured: false,
             removal: None,
-            menu: None,
+            menu: Some((menu, watch)),
             sessions,
             fold,
             shell,
@@ -2389,6 +2419,11 @@ impl SessionRow {
         cx.notify();
     }
 
+    /// What it is about, as the row last read it.
+    pub fn subject(&self) -> Option<&crate::model::Subject> {
+        self.subject.as_ref()
+    }
+
     /// The key of what it is about: `SHOP-60`, `#12`; none for a free session.
     fn key(&self) -> Option<SharedString> {
         let subject = self.subject.as_ref()?;
@@ -2407,54 +2442,42 @@ impl SessionRow {
         }
     }
 
-    /// The key's chip, fading in as it comes and out as it goes over `PANEL`, `beside` on the
-    /// second line.
+    /// The key's mono word on the second line, fading in as it comes and out as it goes over
+    /// `PANEL`. A key never goes on the first line: it would push the title.
     fn key_chip(
         &self,
-        beside: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        let on = self.key().is_some() && self.renamed == beside;
-        let fade_id = match beside {
-            false => format!("session-key-fade-{}", self.id),
-            true => format!("session-key-beside-fade-{}", self.id),
-        };
-        let t = fade(ElementId::Name(fade_id.into()), on, PANEL, window, cx);
+        let t = fade(
+            ElementId::Name(format!("session-key-beside-fade-{}", self.id).into()),
+            self.key().is_some(),
+            PANEL,
+            window,
+            cx,
+        );
         if t <= 0.0 || self.key_shown.is_empty() {
             return None;
         }
-        let (key, gap) = match beside {
-            false => (
-                gpui_design_system::Tag::new(session_key_id(&self.id), self.key_shown.clone())
-                    .into_any_element(),
-                px(ROW_GAP),
-            ),
-            // The second line is 16 px high, a tag is taller: there the key is its mono word,
-            // which fades to a new one as a tag's does and says itself whole when cut.
-            true => {
-                let id = session_key_beside_id(&self.id);
-                let opacity = changed(&id, &self.key_shown, window, cx);
-                (
-                    tipped_when_cut(
-                        div()
-                            .id(id)
-                            .aria_label(self.key_shown.clone())
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .mono(11.)
-                            .opacity(opacity)
-                            .child(self.key_shown.clone()),
-                        self.key_shown.clone(),
-                        window,
-                        cx,
-                    ),
-                    space::SM,
-                )
-            }
-        };
+        // The second line is 16 px high, a tag is taller: the key is a mono word, which fades to
+        // a new one as the kit's `changing` fades words and says itself whole when cut.
+        let id = session_key_beside_id(&self.id);
+        let opacity = changed(&id, &self.key_shown, window, cx);
+        let key = tipped_when_cut(
+            div()
+                .id(id)
+                .aria_label(self.key_shown.clone())
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .mono(11.)
+                .opacity(opacity)
+                .child(self.key_shown.clone()),
+            self.key_shown.clone(),
+            window,
+            cx,
+        );
         Some(
             div()
                 .flex_none()
@@ -2462,7 +2485,7 @@ impl SessionRow {
                 .overflow_hidden()
                 .max_w(px(KEY_WIDTH * t))
                 // The gap after it comes and goes with it.
-                .mr(-gap * (1.0 - t))
+                .mr(-space::SM * (1.0 - t))
                 .opacity(t)
                 .child(key)
                 .into_any_element(),
@@ -2986,9 +3009,6 @@ impl Render for SessionRow {
                 meta(when, cx),
             ))
             .into_any_element();
-        if let Some(key) = self.key_chip(false, window, cx) {
-            row = row.leading(key);
-        }
         if self.scope.is_none() || self.blocked_line() {
             row = row.second(self.second_line(window, cx));
         }
@@ -3071,10 +3091,8 @@ impl SessionRow {
 /// How wide what a session waits for may unfold on its row, more than the sidebar holds: the
 /// row cuts it.
 const WAITS_WIDTH: f32 = 400.;
-/// How wide the chip of a key may unfold: a tag is cut at 160 px.
+/// How wide the key may unfold on the second line.
 const KEY_WIDTH: f32 = 160.;
-/// The gap a session's row puts between its key and its title (the kit's `TreeRow`).
-const ROW_GAP: f32 = 7.;
 /// The height of a session's second line.
 const LINE: f32 = 16.;
 /// The height of a row's first line, above its second.
@@ -3102,6 +3120,8 @@ impl SessionRow {
             .overflow_hidden()
             .text_size(px(11.5))
             .text_color(p.away)
+            .gap(space::SM)
+            .children(self.key_chip(window, cx))
             .child(
                 div()
                     .id(session_waits_id(&self.id))
@@ -3185,7 +3205,8 @@ impl SessionRow {
         // as they change.
         let running = fade(
             ElementId::Name(format!("session-runs-fade-{}", self.id).into()),
-            !self.runs.is_empty(),
+            // The key takes the model's place on this line: the model fades out as it fades in.
+            !self.runs.is_empty() && self.key().is_none(),
             PANEL,
             window,
             cx,
@@ -3261,7 +3282,7 @@ impl SessionRow {
                     .min_w_0()
                     .max_w_full()
                     .h(px(LINE))
-                    .children(self.key_chip(true, window, cx))
+                    .children(self.key_chip(window, cx))
                     .child(place)
                     .children(waits.map(|waits| {
                         div()
@@ -3291,7 +3312,7 @@ impl SessionRow {
                             ))
                             .test_support()
                     }))
-                    .children(runs.map(|runs| {
+                    .children(runs.filter(|_| running > 0.0).map(|runs| {
                         div()
                             .id(session_runs_id(&self.id))
                             .aria_label(runs.clone())

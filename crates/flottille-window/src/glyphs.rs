@@ -8,6 +8,10 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 /// The agents: a network of nodes.
 pub const AGENTS: Icon = Icon::Lucide("network");
+/// Hides a project on this machine.
+pub const HIDE: Icon = Icon::Lucide("eye-off");
+/// Shows a hidden project again.
+pub const SHOW: Icon = Icon::Lucide("eye");
 /// What confines the agents' commands.
 pub const SHIELD: Icon = Icon::Lucide("shield-check");
 /// A pull request.
