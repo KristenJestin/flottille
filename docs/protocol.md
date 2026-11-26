@@ -744,8 +744,9 @@ them, one line) and `notes` (anything every agent should know). Each is optional
   hub of before the values of all machines, which keeps none).
 
 A change emits `about.changed {}`, and so does a value of all machines this machine takes from the
-hub. No tool of an agent reads or writes them: they are in its
-instructions.
+hub. An agent reads About you with `project {action: about}` and proposes a change of this
+machine's with `set_about`, which goes through `about.set` once the user allows it, in every mode
+(`docs/tools.md`, "The project"); no tool of an agent calls `about.share` or `about.reset`.
 
 ### The settings of all machines
 

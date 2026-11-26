@@ -3,8 +3,9 @@
 //! and tone they want). `about.toml` in Flottille's configuration folder, edited in the window, by
 //! hand, and through `about.show`, `about.set` and `about.reset`, as the rules are.
 //!
-//! Like the rules, it is read when an agent is created and frozen in its instructions. Agents read
-//! it and never change it.
+//! Like the rules, it is read when an agent is created and frozen in its instructions. An agent
+//! reads it and proposes a change of this machine's (`project set_about`), which only the user
+//! allows, in every mode.
 //!
 //! With a hub (`docs/remote.md`, "Settings for all machines"), each field is read on three levels:
 //! the machine's own (`about.toml`), else the value of all machines (`crate::shared`, set with
@@ -208,7 +209,7 @@ struct Set {
 }
 
 /// The name, how to refer to the user and the notes given, each left out or not.
-type Given = (Option<String>, Option<String>, Option<String>);
+pub(crate) type Given = (Option<String>, Option<String>, Option<String>);
 
 /// The fields of a `Set`, trimmed where they are one line, once each passes its limits.
 fn checked(set: Set) -> Result<Given, Failure> {
@@ -231,6 +232,12 @@ fn checked(set: Set) -> Result<Given, Failure> {
         }
     }
     Ok((name, pronouns, notes))
+}
+
+/// The fields of an `about.set` given as `params`, checked as `about.set` checks them: what an
+/// agent's `project set_about` proposes is refused at once as the window's change would be.
+pub(crate) fn given(params: Value) -> Result<Given, Failure> {
+    checked(serde_json::from_value(params)?)
 }
 
 /// The field `field` of `about.share` (`name`, `pronouns`, `notes`) as a machine keeps it from
@@ -357,7 +364,7 @@ fn announce(daemon: &Daemon) -> Result<(), Failure> {
 /// field said nowhere), the fields this machine holds itself, all machines' values (`null`
 /// without a hub), the notes' limit in characters, and why a text edited by hand past a limit is
 /// cut for the agents (`null` when it is not).
-fn show(daemon: &Daemon) -> Result<Value, Failure> {
+pub(crate) fn show(daemon: &Daemon) -> Result<Value, Failure> {
     let own = read(&daemon.paths)?;
     let all = all(daemon);
     let about = merged(&own, all.as_ref());

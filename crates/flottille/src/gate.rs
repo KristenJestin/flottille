@@ -337,6 +337,8 @@ pub fn decide(call: &Call) -> Verdict {
                 "it only switches whether the project's agents also get the global rules"
             };
             found.base(what.into());
+        } else if family == "about" {
+            found.base(ABOUT_YOU.into());
         } else {
             found.judge(crate::actions::asked(family));
         }
@@ -637,6 +639,17 @@ pub fn creates_in_a_milestone(tool: &str, args: &Value) -> bool {
 /// a comment edited before the user allows it is not posted with words they never read.
 pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
     tool == "tickets" && args["action"] == "reply"
+}
+
+/// Why `project set_about` comes to the user, every time: About you is read by every agent
+/// started after it, on every project, so a text an agent writes there is an instruction to all.
+pub const ABOUT_YOU: &str = "it changes About you, which every agent started after it reads, on \
+    every project: only the user changes it, in every mode, Full included";
+
+/// Whether a held call changes About you: held for the user in every mode, Full included, and
+/// never decided by the judge.
+pub fn asks_about(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == ABOUT_YOU)
 }
 
 /// Why `tickets worklog_delete` comes to the user, every time: a worklog deleted cannot be got
