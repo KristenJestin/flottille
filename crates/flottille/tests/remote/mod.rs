@@ -246,7 +246,15 @@ pub fn pc_and_server(server_user: User) -> (TestHub, Machine, Machine) {
 }
 
 pub fn pc_and_server_on(pc: Machine, server_user: User) -> (TestHub, Machine, Machine) {
-    let hub = TestHub::new();
+    pc_and_server_through(TestHub::new(), pc, server_user)
+}
+
+/// [`pc_and_server_on`], through `hub`, as the test made it (one of a version before, say).
+pub fn pc_and_server_through(
+    hub: TestHub,
+    pc: Machine,
+    server_user: User,
+) -> (TestHub, Machine, Machine) {
     let server = Machine::of(server_user);
     set_up(&hub, &pc);
     pair(&hub, &server, "server", "runner");

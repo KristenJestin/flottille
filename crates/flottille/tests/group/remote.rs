@@ -73,6 +73,8 @@ mod remote_uploads;
 mod shared_settings;
 #[path = "../shared_settings_often.rs"]
 mod shared_settings_often;
+#[path = "../shared_values.rs"]
+mod shared_values;
 #[path = "../ssh_agent.rs"]
 mod ssh_agent;
 #[path = "../ssh_files.rs"]

@@ -266,9 +266,11 @@ pub enum Command {
     AppearanceRead {
         seq: u64,
     },
-    /// Keeps the window's appearance (`appearance.set`).
+    /// Keeps the window's appearance (`appearance.set`): only what differs from `before`, which
+    /// the user changed, so that the rest follows all machines still.
     AppearanceSet {
         appearance: gpui_design_system::Appearance,
+        before: Option<gpui_design_system::Appearance>,
         seq: u64,
     },
     /// What the daemon keeps of a composer's draft (`draft.get`).
@@ -2152,6 +2154,53 @@ fn signed_by_device(
         .ask_within(method, params, bound)?
 }
 
+/// [`Command::AllSettingsShare`]: each value in a request of its own, signed by this device, so
+/// that each sealed copy holds its own text alone (a guidance near its limit fills one). All are
+/// checked first (`settings.check`), so that a value refused shares none of the others. The
+/// answer is the last one, saying where the values went at the least: a hub that keeps none, or
+/// out of reach, for one of them is said.
+fn share_each(
+    connect: &Connect,
+    sign: Option<Sign>,
+    values: Vec<(String, String)>,
+    bound: Duration,
+) -> Result<Value, String> {
+    let checked: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(name, text)| (name.clone(), Value::String(text.clone())))
+        .collect();
+    answer(ask_alone(
+        connect,
+        "settings.check",
+        json!({"values": checked}),
+        bound,
+    ))?;
+    let order = |hub: &Value| match hub.as_str() {
+        Some("old-hub") => 2,
+        Some("later") => 1,
+        _ => 0,
+    };
+    let mut last: Option<Value> = None;
+    let mut hub = Value::Null;
+    for (name, text) in values {
+        let answer = signed_by_device(
+            connect,
+            sign.clone(),
+            None,
+            "settings.share",
+            json!({"values": {name: text}}),
+            bound,
+        )?;
+        if order(&answer["hub"]) >= order(&hub) {
+            hub = answer["hub"].clone();
+        }
+        last = Some(answer);
+    }
+    let mut last = last.ok_or("nothing to share")?;
+    last["hub"] = hub;
+    Ok(last)
+}
+
 /// [`Command::AllowSharing`]: the files made and shared as [`share_files`] does, for the machine
 /// shown alone; the first step refused ends it, the launch still held; then the launch allowed.
 fn allow_sharing(
@@ -2814,24 +2863,11 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 bounds.quick,
             ),
         },
-        Command::AllSettingsShare { values } => {
-            let values: serde_json::Map<String, Value> = values
-                .into_iter()
-                .map(|(name, text)| (name, Value::String(text)))
-                .collect();
-            Outcome::AllSettings {
-                written: Some(true),
-                shown: signed_by_device(
-                    connect,
-                    sign,
-                    None,
-                    "settings.share",
-                    json!({"values": values}),
-                    bounds.quick,
-                )
+        Command::AllSettingsShare { values } => Outcome::AllSettings {
+            written: Some(true),
+            shown: share_each(connect, sign, values, bounds.quick)
                 .map(|shown| crate::all_settings::Shown::of(&shown, &Value::Null)),
-            }
-        }
+        },
         Command::AllSettingsUseAll { names } => Outcome::AllSettings {
             written: Some(false),
             shown: all_settings_shown(
@@ -2944,9 +2980,13 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
         }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
             let (method, params, written) = match command {
-                Command::AppearanceSet { appearance, .. } => {
-                    ("appearance.set", appearance_json(appearance), true)
-                }
+                Command::AppearanceSet {
+                    appearance, before, ..
+                } => (
+                    "appearance.set",
+                    appearance_changed(appearance, before),
+                    true,
+                ),
                 _ => ("appearance.show", json!({}), false),
             };
             let shown = answer(ask_alone(connect, method, params, bounds.quick))
@@ -4275,6 +4315,19 @@ pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Val
         Shade::Dark => "dark",
     };
     json!({"theme": theme, "shade": shade})
+}
+
+/// The fields of `appearance` that differ from `before`, in the words of `appearance.set`: each is
+/// this machine's own choice once sent. All of them without a `before`.
+fn appearance_changed(
+    appearance: gpui_design_system::Appearance,
+    before: Option<gpui_design_system::Appearance>,
+) -> Value {
+    let mut now = appearance_json(appearance);
+    if let (Some(before), Some(fields)) = (before.map(appearance_json), now.as_object_mut()) {
+        fields.retain(|key, value| before.get(key) != Some(value));
+    }
+    now
 }
 
 /// What `appearance.show` says, or why it says nothing the window knows.

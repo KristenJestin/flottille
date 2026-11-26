@@ -143,6 +143,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `about.reset` | drive |
 | `about.share` | drive |
 | `settings.shared` | read |
+| `settings.check` | read |
 | `settings.share` | drive |
 | `settings.use_all` | drive |
 | `rules.show` | read |
@@ -758,26 +759,57 @@ the compactor), `review.spec_model`, `review.bugs_model`, `review.standards_mode
 `"false"`), `workspaces_folder` (a folder under the home, `~/…`, holding `<project>`),
 `update.check` (`"automatically"` or `"never"`) and `connections` (a JSON list of declarations
 reached over `https://`, each `{"name", "about", "url", "only"?, "except"?, "client_id"?,
-"enabled"?}`).
+"enabled"?}`). Then the guidance and the rest of "Shared, personal" (#1461): `rules`,
+`judge.guidance`, `compaction.guidance`, `review.guidance` and `review.guidance.<check>` (`spec`,
+`bugs`, `standards`, `security`), each the text of the file it stands for, within that file's
+limit (8,000 characters for the rules, 4,000 for the others); `tool_results.limit` (`"4000"` to
+the largest limit, or `"off"`), `tool_results.unchanged` (`"true"` or `"false"`),
+`appearance.shade` (`"light"` or `"dark"`); `specs.language`, `specs.mode`,
+`autosubscriptions.created_pull`, `autosubscriptions.branch_pull`, `autosubscriptions.ticket` and
+`review.passes`, each the JSON text of what `extension.set` takes for it (`"\"fr-FR\""`,
+`"[\"merged\"]"`). A guidance is free text: one that holds a secret (a vault entry's value, a
+token, what masking would change) is `refused` ("holds a secret: keep secrets in the vault and
+name the entry instead"), and a machine that receives one drops it.
 
-- `settings.shared` answers `{"all", "own", "ignored"}`: all machines' values by name (`null`
-  without a hub), the names among them this machine holds itself (a connection it declares
-  otherwise as `connections.<name>`; a judge or compactor Flottille picked is none), and why each
-  value it cannot follow is ignored here, by name (a provider not ready, a model it does not
-  offer).
+- `settings.shared` answers `{"all", "own", "ignored", "defaults"}`: all machines' values by name
+  (`null` without a hub), the names among them this machine holds itself (a connection it
+  declares otherwise as `connections.<name>`; a judge or compactor Flottille picked is none; a
+  guidance file of only spaces is none; a `rules.md`, even empty, is this machine's "no rules"), why each value it cannot follow is ignored here, by name
+  (a provider not ready, a model it does not offer, a `tool-results.toml` or `appearance.toml` of
+  its own it cannot read, which fails that value alone), and Flottille's default of each value of the
+  guidance and the rest, as its value says it (what the window's All machines shows while none
+  is shared).
+- `settings.check {values: {<name>: <text>}}` answers `{}` when `settings.share` would take each
+  value sent alone, and is `refused` with the first it would refuse, and why (its name, its
+  check, a secret it holds, a size larger than the hub keeps): the window checks a section whole
+  before it shares any of its values, each in a request of its own.
 - `settings.share {values: {<name>: <text>}}` sets values of all machines, an empty text clearing
   one. Only as a request signed by the user's device, as `about.share`; `refused` for a name that
   is none, a value the setting would refuse, a workspaces folder that is not under the home, a
   connection that names a vault entry, a program or a plain address. Answers as `settings.shared`,
   with `hub` as `about.share` says it.
+- A hub names the values it keeps in its welcome (`names`); one of before #1525 names none, and
+  keeps only About you and the settings a machine often overrides. A value such a hub does not
+  keep is no value of all machines: `settings.share` writes it as this machine's own (as the
+  setting's own method does: `rules.set`, `judge.set`, `review.set`, `extension.set` and the
+  others), gives it to no hub, and answers `hub: "old-hub"`.
 - `settings.use_all {names}` drops this machine's own value of each name (one of `own`), which
   follows all machines again, and answers as `settings.shared`.
 
 A value of all machines this machine takes or changes, and an own value dropped, emits
 `settings.shared_changed {names}`, and each setting it changes emits its own change
-(`provider.new_session_changed`, `compaction.changed`, `sessions.changed` and the others; the
-judge only `settings.shared_changed`, `provider.judge_changed` being this machine's own choice). No
-tool of an agent reads or writes them.
+(`provider.new_session_changed`, `compaction.changed`, `sessions.changed`, `rules.changed`,
+`judge.changed`, `review.changed`, `tool_results.changed`, `appearance.changed`,
+`extension.changed` and the others; the judge's model only `settings.shared_changed`,
+`provider.judge_changed` being this machine's own choice). No tool of an agent reads or writes
+them.
+
+`rules.show`, `judge.show`, `review.show` and `compaction.show`'s `guidance` say `source: "all"`
+while this machine follows all machines' text, having none of its own. A machine's own value of
+the rest is what its file says: `tool-results.toml` and `appearance.toml` hold only what the user
+chose there (`tool_results.set` and `appearance.set` write what they are given, even the same as
+all machines', which the window sends only once the user changed it); in such a file written before (#1525), the default limit and the dark shade are no
+choice, and all machines' value applies over them.
 
 ### The judge methods
 
@@ -1275,8 +1307,8 @@ window and a restart show the same colours.
   theme, followed live) or `flottille` (Flottille's own palette), `shade` is `light` or `dark`
   (Flottille's, also used when Omarchy is chosen and no Omarchy theme can be used). With no file,
   `omarchy` and `dark`. `invalid-config` when the file cannot be read or names another word.
-- `appearance.set {theme, shade}` writes the file and answers as `appearance.show`;
-  `invalid-params` for another word.
+- `appearance.set {theme?, shade?}` writes what it is given, this machine's own choice, and
+  answers as `appearance.show`; `invalid-params` for another word.
 
 `appearance.set` emits `appearance.changed` with what it answers. The user's door alone reaches
 them: no tool of an agent does.

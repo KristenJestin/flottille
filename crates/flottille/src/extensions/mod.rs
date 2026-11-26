@@ -6,7 +6,7 @@
 mod automatic;
 mod command;
 mod connections;
-mod guidance;
+pub(crate) mod guidance;
 mod review;
 mod specs;
 
@@ -1306,13 +1306,41 @@ pub fn shared_model(value: &str) -> Result<Value, String> {
     }
 }
 
+/// All machines' value of the setting `key` of the extension `name` (`specs.language`,
+/// `review.passes`…) as its value says it: the JSON text of what `extension.set` takes.
+pub fn shared_value(name: &str, key: &str, value: &str) -> Result<Value, String> {
+    let extension = find(name)?;
+    let setting = extension
+        .settings
+        .iter()
+        .find(|setting| setting.key == key)
+        .ok_or_else(|| format!("{name}.{key}: unknown key"))?;
+    let value: Value = serde_json::from_str(value)
+        .map_err(|_| "the JSON text of its value, such as [\"merged\"]".to_owned())?;
+    checked(setting.kind, &value)
+}
+
+/// The default of the setting `key` of the extension `name`, as its value says it.
+pub fn default_value(name: &str, key: &str) -> Option<String> {
+    let setting = find(name)
+        .ok()?
+        .settings
+        .iter()
+        .find(|setting| setting.key == key)?;
+    Some(default_of(setting.kind).to_string())
+}
+
 /// All machines' value of the setting, if the setting is one they share and they have one.
 fn shared_setting(paths: &Paths, extension: &Extension, key: &str) -> Option<Value> {
-    if extension.name != SHARED_MODELS || !key.ends_with("_model") {
+    let name = format!("{}.{key}", extension.name);
+    if !crate::all_settings::NAMES.contains(&name.as_str()) {
         return None;
     }
-    let value = flottille_core::all_machines::value(paths, &format!("{}.{key}", extension.name))?;
-    shared_model(&value).ok()
+    let value = flottille_core::all_machines::value(paths, &name)?;
+    match extension.name == SHARED_MODELS && key.ends_with("_model") {
+        true => shared_model(&value).ok(),
+        false => shared_value(extension.name, key, &value).ok(),
+    }
 }
 
 /// Whether `extensions.toml` holds the setting: this machine's own.
@@ -1337,6 +1365,45 @@ pub(crate) fn forget_setting(daemon: &Daemon, extension: &str, key: &str) -> Res
             enabled: None,
             settings: Map::from_iter([(key.to_owned(), Value::Null)]),
         },
+    )
+    .map(drop)
+}
+
+/// Sets this machine's own value of an extension's setting `key`, as `extension.set` does:
+/// what a hub that does not keep it for all machines leaves to this machine.
+pub(crate) fn set_setting(
+    daemon: &Daemon,
+    extension: &str,
+    key: &str,
+    value: Value,
+) -> Result<(), Failure> {
+    set(
+        daemon,
+        Set {
+            name: extension.to_owned(),
+            project: None,
+            enabled: None,
+            settings: Map::from_iter([(key.to_owned(), value)]),
+        },
+    )
+    .map(drop)
+}
+
+/// Writes this machine's own guidance of `extension` (of its check `part`), as `<name>.set`
+/// does.
+pub(crate) fn set_guidance(
+    daemon: &Daemon,
+    extension: &str,
+    part: Option<&str>,
+    text: &str,
+) -> Result<(), Failure> {
+    let extension = find(extension).map_err(|why| Failure::new("not-found", why))?;
+    let method = format!("{}.set", extension.methods.prefix);
+    guidance::call(
+        daemon,
+        extension,
+        &method,
+        json!({"part": part, "text": text}),
     )
     .map(drop)
 }

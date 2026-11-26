@@ -45,7 +45,7 @@ pub const NAME_LIMIT: usize = 64;
 /// The most a sealed copy holds, its value and its boxes together: the hub refuses a larger one.
 pub const SEALED_LIMIT: usize = 40 * 1024;
 /// The most values the hub keeps.
-pub const MOST_VALUES: usize = 32;
+pub const MOST_VALUES: usize = 64;
 /// The names of the values of all machines: the hub keeps no other, so that a member's machine
 /// cannot take its places with names of its own. A setting shared later adds its name here.
 pub const SHARED_NAMES: &[&str] = &[
@@ -66,7 +66,29 @@ pub const SHARED_NAMES: &[&str] = &[
     "workspaces_folder",
     "update.check",
     "connections",
+    // The guidance and the rest of "Shared, personal" (#1461).
+    "rules",
+    "judge.guidance",
+    "compaction.guidance",
+    "review.guidance",
+    "review.guidance.spec",
+    "review.guidance.bugs",
+    "review.guidance.standards",
+    "review.guidance.security",
+    "tool_results.limit",
+    "tool_results.unchanged",
+    "appearance.shade",
+    "specs.language",
+    "specs.mode",
+    "autosubscriptions.created_pull",
+    "autosubscriptions.branch_pull",
+    "autosubscriptions.ticket",
+    "review.passes",
 ];
+
+/// The names a hub of before #1525 keeps, the first of [`SHARED_NAMES`] (About you and the
+/// settings a machine often overrides, #1514): a hub that names none in its welcome keeps these.
+pub const SHARED_NAMES_BEFORE: &[&str] = SHARED_NAMES.split_at(16).0;
 
 /// Bytes, in base64 in JSON.
 #[derive(Clone, PartialEq, Eq)]
@@ -415,5 +437,23 @@ mod tests {
         assert!(!renamed.is_signed());
         assert_eq!(later.open(&pc), None);
         assert!(!later.is_signed());
+    }
+
+    #[test]
+    fn the_most_values_at_their_largest_fit_the_line_the_hub_sends_them_in() {
+        let (_a, pc) = machine();
+        let widest = vec![b'x'; SEALED_LIMIT - 1024];
+        let sealed = Sealed::seal("rules", 1, &widest, &[pc.public()], &pc).unwrap();
+        assert!(sealed.size() <= SEALED_LIMIT, "{}", sealed.size());
+
+        let line = serde_json::to_vec(&crate::ToDevice::Shared(vec![sealed; MOST_VALUES])).unwrap();
+
+        assert!(
+            line.len() < crate::LINE_LIMIT,
+            "{} bytes of values, a line holds {}",
+            line.len(),
+            crate::LINE_LIMIT
+        );
+        assert!(SHARED_NAMES.len() <= MOST_VALUES);
     }
 }

@@ -3075,13 +3075,24 @@ impl Shell {
         self.actions.send(command);
     }
 
-    /// Asks the daemon to keep `choice` as the appearance, or what it keeps when there is none.
-    /// Each request is numbered; the window only believes the answer to the latest.
-    pub fn ask_appearance(&mut self, choice: Option<gpui_design_system::Appearance>) {
+    /// Asks the daemon to keep `choice` as the appearance, what of it differs from the one shown
+    /// before, or what it keeps when there is none. Each request is numbered; the window only
+    /// believes the answer to the latest.
+    pub fn ask_appearance(
+        &mut self,
+        choice: Option<(
+            gpui_design_system::Appearance,
+            Option<gpui_design_system::Appearance>,
+        )>,
+    ) {
         self.appearance_asked += 1;
         let seq = self.appearance_asked;
         self.actions.send(match choice {
-            Some(appearance) => Command::AppearanceSet { appearance, seq },
+            Some((appearance, before)) => Command::AppearanceSet {
+                appearance,
+                before,
+                seq,
+            },
             None => Command::AppearanceRead { seq },
         });
     }

@@ -1947,11 +1947,13 @@ impl SettingsPage {
         if !self.appearance_known() || self.appearance.as_ref() == Some(&appearance) {
             return;
         }
-        self.appearance = Some(appearance.clone());
+        let before = self.appearance.replace(appearance.clone());
         appearance::appear(appearance.clone(), cx);
         crate::look::remember(&appearance, cx);
         self.shell
-            .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
+            .update(cx, |shell, _| {
+                shell.ask_appearance(Some((appearance, before)))
+            })
             .ok();
         cx.notify();
     }
@@ -2698,6 +2700,8 @@ impl SettingsPage {
             Part::Feature(key) if key == COMPACTION => "compaction",
             Part::Feature(key) if key == connections::NAME => "connections",
             Part::Feature(key) if key == "review" => "review",
+            Part::Feature(key) if key == "specs" => "specs",
+            Part::Feature(key) if key == "autosubscriptions" => "autosubscriptions",
             _ => return drawn,
         };
         let machine = self
@@ -2790,12 +2794,16 @@ impl Render for SettingsPage {
             // Only what every machine may share.
             _ if all => {
                 let models = self.providers.model_entries();
+                let offered: Vec<crate::extensions::Listed> = self
+                    .registry(cx)
+                    .map(|registry| registry.read(cx).list().to_vec())
+                    .unwrap_or_default();
                 let mut blocks = vec![("about", self.about.clone().into_any_element())];
                 blocks.extend(crate::all_settings::SECTIONS.map(|section| {
                     let models = models.clone();
-                    let drawn = self
-                        .all_settings
-                        .update(cx, |all, cx| all.section(section, models, window, cx));
+                    let drawn = self.all_settings.update(cx, |all, cx| {
+                        all.section(section, models, &offered, window, cx)
+                    });
                     (section, drawn)
                 }));
                 blocks
@@ -2977,6 +2985,9 @@ fn part_of(block: &str) -> &'static str {
         "sessions" => "sessions",
         "workspaces" => "workspaces",
         "appearance" => "appearance",
+        "rules" => "rules",
+        "guidance" => "guidance",
+        "tool-results" => "tool-results",
         "version" => "version",
         _ => "",
     }

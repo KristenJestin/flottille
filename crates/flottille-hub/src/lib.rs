@@ -169,6 +169,9 @@ pub struct Hub<C: Clock = SystemClock> {
     presence: Vec<(PublicKey, Presence)>,
     /// The changes stored within the last hour, by their signer, with their time.
     recent: Vec<(PublicKey, u64)>,
+    /// The only values of all machines kept, as a hub of a version before the others did, which
+    /// names none in its welcome: the tests of a machine that meets one.
+    before: Option<&'static [&'static str]>,
 }
 
 impl<C: Clock> Hub<C> {
@@ -207,6 +210,7 @@ impl<C: Clock> Hub<C> {
             pairings: 0,
             presence: Vec::new(),
             recent: Vec::new(),
+            before: None,
         })
     }
 
@@ -537,6 +541,22 @@ impl<C: Clock> Hub<C> {
         self.write_facts()
     }
 
+    /// Keeps only the values `names` from now on, and names none in its welcome, as a hub of a
+    /// version before the others: the tests of a machine that meets one (a v0.4.4 hub keeps
+    /// [`flottille_link::SHARED_NAMES_BEFORE`]).
+    pub fn keep_as_before(&mut self, names: &'static [&'static str]) {
+        self.before = Some(names);
+    }
+
+    /// The names of the values of all machines this hub's welcome says it keeps: none for a hub
+    /// kept as one of before.
+    pub fn names_said(&self) -> Option<&'static [&'static str]> {
+        match self.before {
+            Some(_) => None,
+            None => Some(flottille_link::SHARED_NAMES),
+        }
+    }
+
     /// A value of all machines sealed by a member's machine, kept when it is the latest of its
     /// name (a copy of the same time replaces it when it is sealed for a machine more: a machine
     /// sealed it again for a machine added since), of a known name (`SHARED_NAMES`) and no later
@@ -548,6 +568,15 @@ impl<C: Clock> Hub<C> {
             .as_ref()
             .ok_or_else(|| refused("the hub has no member yet"))?;
         sealed.check_for_hub(members).map_err(refused)?;
+        if self
+            .before
+            .is_some_and(|names| !names.contains(&sealed.name.as_str()))
+        {
+            return Err(refused(format!(
+                "{} is no value of all machines",
+                sealed.name
+            )));
+        }
         // A time past the hub's clock would hold the name for ever: a device's clock may be ahead
         // by the window a signed request is taken in, no more.
         let latest = self

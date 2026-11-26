@@ -61,7 +61,8 @@ pub use sessions::{
     SessionList, TITLE_LIMIT,
 };
 pub use shared::{
-    Bytes, MOST_VALUES, NAME_LIMIT, SEALED_LIMIT, SHARED_NAMES, Sealed, SealedKey, check_shared,
+    Bytes, MOST_VALUES, NAME_LIMIT, SEALED_LIMIT, SHARED_NAMES, SHARED_NAMES_BEFORE, Sealed,
+    SealedKey, check_shared,
 };
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;

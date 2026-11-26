@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use flottille_link::{
     Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
-    MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Role, Sealed,
-    Session, Tls,
+    MemberList, Members, Nonce, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Request,
+    Role, Sealed, Session, Signature, Signed, Tls,
 };
 use serde_json::{Value, json};
 
@@ -123,27 +123,73 @@ impl Control {
     /// keeps none.
     pub(crate) fn share(&self, text: &str) -> Result<&'static str, String> {
         let (_, members) = self.checked()?;
-        let changes = crate::shared::from_request(text, &members)?;
+        // A value the hub open now does not keep (one of a version before it) is no value of
+        // all machines: it stays this machine's own (`crate::all_settings`), never given.
+        let (changes, lacked): (Vec<_>, Vec<_>) = crate::shared::from_request(text, &members)?
+            .into_iter()
+            .partition(|(name, _)| self.keeps(name));
         for (name, kept) in &changes {
             let sealed = crate::shared::seal(name, kept, &self.key, &members)
                 .ok_or_else(|| format!("{name} cannot be sealed"))?;
-            if sealed.size() > flottille_link::SEALED_LIMIT {
-                return Err(format!(
-                    "{name} is too large to share: sealed for every machine it holds {} bytes, \
-                     and the hub keeps {} at most; shorten it",
-                    sealed.size(),
-                    flottille_link::SEALED_LIMIT
-                ));
-            }
+            fits(name, &sealed)?;
         }
         let changed = crate::shared::keep(&self.folder, changes);
         let delivery = match self.asker.borrow().as_ref() {
             None => "later",
             Some(asker) if !asker.takes_shared() => "old-hub",
+            Some(_) if !lacked.is_empty() => "old-hub",
             Some(_) => "given",
         };
         self.give(&members, &changed);
         Ok(delivery)
+    }
+
+    /// Why `share` would refuse the value `name` of `params` for its size, sealed for every
+    /// machine in a request of its own shaped as the user's device signs it: checked before a
+    /// change of several values shares any. Nothing to check without a hub (`share` refuses).
+    pub(crate) fn fits(&self, name: &str, params: &Value) -> Result<(), String> {
+        let Ok((_, members)) = self.checked() else {
+            return Ok(());
+        };
+        // A request of the same shape as the device's: a signature and a nonce are as long
+        // whoever makes them, and the names are as long as the longest a window gives. Nothing
+        // is signed: the daemon never holds the device key.
+        let long = "x".repeat(64);
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        let request = Request {
+            id: long.clone(),
+            machine: long,
+            signed: Signed {
+                device: self.key.public(),
+                nonce: Nonce([0; 16]),
+                at,
+                method: crate::all_settings::SHARE.to_owned(),
+                params: params.to_string(),
+            },
+            sig: Signature([0; 64]),
+        };
+        let plain = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let sealed = Sealed::seal(
+            name,
+            request.signed.at,
+            &plain,
+            &crate::shared::machines(&members),
+            &self.key,
+        )
+        .map_err(|error| format!("{name} cannot be sealed: {error}"))?;
+        fits(name, &sealed)
+    }
+
+    /// Whether the value `name` may be given to the hub: one the hub open now keeps, or any while
+    /// none is open (the next session's hub decides), or while it keeps none at all (said
+    /// `old-hub`, and given once it does).
+    pub(crate) fn keeps(&self, name: &str) -> bool {
+        self.asker
+            .borrow()
+            .as_ref()
+            .is_none_or(|asker| !asker.takes_shared() || asker.keeps(name))
     }
 
     /// The values `names`, sealed for every machine of `members`, given to the hub while a session
@@ -156,7 +202,7 @@ impl Control {
             return;
         };
         let values = crate::shared::read(&self.folder);
-        for name in names {
+        for name in names.iter().filter(|name| asker.keeps(name)) {
             let Some(sealed) = values
                 .get(name)
                 .and_then(|kept| crate::shared::seal(name, kept, &self.key, members))
@@ -599,6 +645,19 @@ impl Control {
     /// What the hub told of the members' devices: kept for `remote.members`.
     fn told_facts(&self, facts: Vec<Facts>) {
         *self.facts.lock().unwrap() = facts;
+    }
+}
+
+/// Why the hub would not keep `sealed`, the value `name`: larger than it keeps.
+fn fits(name: &str, sealed: &Sealed) -> Result<(), String> {
+    match sealed.size() > flottille_link::SEALED_LIMIT {
+        true => Err(format!(
+            "{name} is too large to share: sealed for every machine it holds {} bytes, and the \
+             hub keeps {} at most; shorten it",
+            sealed.size(),
+            flottille_link::SEALED_LIMIT
+        )),
+        false => Ok(()),
     }
 }
 

@@ -42,6 +42,9 @@ pub const DEFAULT: &str = include_str!("../roles/compaction.md");
 /// The longest guidance, in characters.
 pub const LIMIT: usize = 4_000;
 
+/// The name of the guidance as a value of all machines (`crate::all_settings`).
+pub const SHARED_GUIDANCE: &str = "compaction.guidance";
+
 /// The share of the context window past which an agent is compacted, until the user says another.
 pub const THRESHOLD: u64 = 70;
 /// The thresholds the user may choose, in percent.
@@ -151,7 +154,7 @@ fn file(paths: &Paths) -> std::path::PathBuf {
     paths.config.join("compaction.toml")
 }
 
-fn guidance_file(paths: &Paths) -> std::path::PathBuf {
+pub(crate) fn guidance_file(paths: &Paths) -> std::path::PathBuf {
     paths.config.join("compaction.md")
 }
 
@@ -514,10 +517,23 @@ fn own(paths: &Paths) -> Result<Option<String>, (String, String)> {
     Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
-/// The compactor's instructions with the guidance read now.
+/// What is wrong with a text offered as the compaction model's guidance.
+pub fn check_guidance(text: &str) -> Result<(), String> {
+    let count = text.chars().count();
+    match count > LIMIT {
+        true => Err(format!(
+            "the compaction model's guidance is {count} characters long and may hold {LIMIT}"
+        )),
+        false => Ok(()),
+    }
+}
+
+/// The compactor's instructions with the guidance read now: the user's own on this machine, else
+/// all machines', else the default.
 fn instructions(paths: &Paths) -> Result<String, String> {
     let guidance = own(paths)
         .map_err(|(_, why)| why)?
+        .or_else(|| crate::all_settings::text(paths, SHARED_GUIDANCE))
         .unwrap_or_else(|| DEFAULT.to_owned());
     let (before, after) = FIXED
         .split_once("{guidance}")
@@ -539,7 +555,10 @@ fn show(daemon: &Daemon) -> Result<Value, Failure> {
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
     let (text, source, error) = match own(&daemon.paths) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (DEFAULT.to_owned(), "default", None),
+        Ok(None) => match crate::all_settings::text(&daemon.paths, SHARED_GUIDANCE) {
+            Some(text) => (text, "all", None),
+            None => (DEFAULT.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
     Ok(json!({
@@ -650,13 +669,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     let text = params["text"].as_str().ok_or_else(|| {
                         Failure::new("invalid-params", "text is the guidance, a text")
                     })?;
-                    let count = text.chars().count();
-                    if count > LIMIT {
-                        return Err(Failure::refused(format!(
-                            "the compaction model's guidance is {count} characters long and may hold \
-                             {LIMIT}"
-                        )));
-                    }
+                    check_guidance(text).map_err(Failure::refused)?;
                     Some(text.to_owned()).filter(|text| !text.trim().is_empty())
                 }
                 _ => None,

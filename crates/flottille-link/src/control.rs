@@ -705,6 +705,10 @@ pub enum ToDevice {
         /// nothing, and would close a session that asks it.
         #[serde(default)]
         shared: bool,
+        /// The names of the values the hub keeps; a hub of before #1525 says none, and keeps
+        /// [`SHARED_NAMES_BEFORE`](crate::SHARED_NAMES_BEFORE).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        names: Option<Vec<String>>,
     },
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
     /// any more, the hub having been set up again. At the end of the handshake, `proof` is the
@@ -1223,6 +1227,8 @@ pub struct Session {
     notices: bool,
     /// Whether the hub said it keeps the values of all machines.
     shared: bool,
+    /// The names of those it said it keeps, none when it said none.
+    names: Option<Arc<[String]>>,
 }
 
 impl fmt::Debug for Session {
@@ -1243,6 +1249,7 @@ pub struct Asker {
     ended: Arc<Mutex<Option<String>>>,
     notices: bool,
     shared: bool,
+    names: Option<Arc<[String]>>,
 }
 
 impl Asker {
@@ -1254,6 +1261,16 @@ impl Asker {
     /// Whether the hub said it keeps the values of all machines (`Ask::Share`, `Ask::Shared`).
     pub fn takes_shared(&self) -> bool {
         self.shared
+    }
+
+    /// Whether the hub keeps the value `name` of all machines: one it named in its welcome, or,
+    /// from a hub that named none, one of [`SHARED_NAMES_BEFORE`](crate::SHARED_NAMES_BEFORE).
+    pub fn keeps(&self, name: &str) -> bool {
+        self.shared
+            && match &self.names {
+                Some(names) => names.iter().any(|kept| kept == name),
+                None => crate::SHARED_NAMES_BEFORE.contains(&name),
+            }
     }
 
     /// Asks the hub, and waits for its answer. `Ask::Notify` is never sent to a hub that did not
@@ -1446,10 +1463,16 @@ impl Session {
         let (relay, carried) = relay_ends();
         let mut takes_notices = false;
         let mut takes_shared = false;
+        let mut kept_names = None;
         let refused = match welcome {
-            ToDevice::Welcome { notices, shared } => {
+            ToDevice::Welcome {
+                notices,
+                shared,
+                names,
+            } => {
                 takes_notices = notices;
                 takes_shared = shared;
+                kept_names = names.map(Arc::from);
                 tokio::spawn(drive(
                     reader,
                     writer,
@@ -1503,6 +1526,7 @@ impl Session {
             relay: Some(relay),
             notices: takes_notices,
             shared: takes_shared,
+            names: kept_names,
         })
     }
 
@@ -1534,6 +1558,7 @@ impl Session {
             ended: self.ended.clone(),
             notices: self.notices,
             shared: self.shared,
+            names: self.names.clone(),
         }
     }
 
@@ -1835,17 +1860,24 @@ impl Arriving {
     /// Welcomes the device: the session, whose asks come in on `asks`, lost after `SILENCE`
     /// without a word from the device.
     pub async fn welcome(self) -> std::io::Result<HubSession> {
-        self.welcome_within(SILENCE).await
+        self.welcome_within(SILENCE, Some(crate::SHARED_NAMES))
+            .await
     }
 
     /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
-    /// a line it does not read for as long.
-    pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
+    /// a line it does not read for as long. `names`: the values of all machines the hub keeps, as
+    /// its welcome says them; none as a hub of before #1525 says.
+    pub async fn welcome_within(
+        mut self,
+        silence: Duration,
+        names: Option<&[&str]>,
+    ) -> std::io::Result<HubSession> {
         write_line(
             &mut self.writer,
             &ToDevice::Welcome {
                 notices: true,
                 shared: true,
+                names: names.map(|names| names.iter().map(|name| (*name).to_owned()).collect()),
             },
         )
         .await?;

@@ -45,6 +45,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("about.reset", Drive),
     ("about.share", Drive),
     ("settings.shared", Read),
+    ("settings.check", Read),
     ("settings.share", Drive),
     ("settings.use_all", Drive),
     ("rules.show", Read),
