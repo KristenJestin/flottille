@@ -54,6 +54,9 @@ pub struct Provider {
     /// A clause after its name saying why its agents cannot run, as the daemon says it.
     pub why: Option<String>,
     pub warnings: Vec<String>,
+    /// The warnings the daemon told are about a sign-in (`warning_kinds`): the one the composer
+    /// says, where the user can act on it. Empty from a daemon that tells no kinds.
+    pub sign_in_warnings: Vec<String>,
     /// Its program's name, and where and at which version it was found.
     pub program: String,
     pub program_path: Option<String>,
@@ -147,17 +150,24 @@ impl Provider {
     }
 
     fn read(entry: &Value) -> Provider {
+        let warnings: Vec<String> = entry["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(text)
+            .collect();
         Provider {
             name: text(&entry["name"]).unwrap_or_default(),
             title: text(&entry["title"]).unwrap_or_default(),
             enabled: entry["enabled"] == true,
             ready: entry["ready"] == true,
             why: text(&entry["why"]),
-            warnings: entry["warnings"]
-                .as_array()
+            warnings: warnings.clone(),
+            sign_in_warnings: warnings
                 .into_iter()
-                .flatten()
-                .filter_map(text)
+                .zip(entry["warning_kinds"].as_array().into_iter().flatten())
+                .filter(|(_, kind)| *kind == "sign_in")
+                .map(|(warning, _)| warning)
                 .collect(),
             program: text(&entry["program"]["name"]).unwrap_or_default(),
             program_path: text(&entry["program"]["path"]),
