@@ -285,11 +285,14 @@ fn frame_height(
     })
 }
 
-/// Where the top of a session's row is drawn in its project's level.
-fn row_top(id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+/// Where the top of a session's row is drawn in its project's level: in its frame, which is
+/// its own while the row is also drawn at the foot, sliding out of it.
+fn row_top(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+    let row = shell.read_with(cx, |s, _| s.session(id).map(|row| row.entity_id()))?;
+    let frame = gpui_kit::ElementId::Name(format!("tree-row-{}", row.as_u64()).into());
     cx.update(|window, _| {
         window
-            .within(IN_PROJECT)
+            .within(frame)
             .try_find(session_id(id))
             .map(|found| f32::from(found.bounds().origin.y))
     })
@@ -312,6 +315,12 @@ fn foot_height(cx: &mut VisualTestContext) -> f32 {
             .try_find(FOOT_BLOCK)
             .map_or(0., |found| f32::from(found.bounds().size.height))
     })
+}
+
+/// Unfolds the foot once its row stands still: a row folded away cannot be pressed.
+fn unfold_foot(cx: &mut VisualTestContext) {
+    settle(cx);
+    unfold_foot(cx);
 }
 
 /// What the foot's row says: `1 blocked by others`.
@@ -391,6 +400,10 @@ fn drawn_height(cx: &mut VisualTestContext, id: &str) -> f32 {
 
 /// Opens the session's page, the right panel with it.
 fn open_page(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+    // A blocked session's row is at the foot of its project: unfolded first.
+    if blocked(shell, cx).contains(&id.to_owned()) {
+        unfold_foot(cx);
+    }
     cx.update(|window, cx| window.click(session_id(id), cx));
     until(shell, cx, "its page", |cx| {
         label(cx, "session-title").is_some()
@@ -507,8 +520,7 @@ fn a_project_gathers_its_blocked_sessions_under_n_blocked_by_others(cx: &mut Tes
     assert_eq!(blocked(&shell, cx), kept);
 
     // Its rows are drawn once the foot is unfolded, each one in its place.
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    settle(cx);
+    unfold_foot(cx);
     assert!(group_height(cx) > 1., "unfolded");
     for id in [&first, &second] {
         assert!(frame_height(&shell, id, IN_GROUP, cx).is_some_and(|h| h > 0.));
@@ -559,9 +571,8 @@ fn n_blocked_by_others_is_folded_by_default_and_keeps_its_fold(cx: &mut TestAppC
     );
     settle(cx);
     assert!(group_height(cx) < 1.);
-    eventually("the fold kept folded", || {
-        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"]
-            == json!({"atlas": false})
+    eventually("the fold kept folded (nothing to keep)", || {
+        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"].is_null()
     });
 }
 
@@ -636,8 +647,7 @@ fn a_blocked_session_comes_back_in_its_place_by_itself(cx: &mut TestAppContext) 
     until(&shell, cx, "the foot", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    settle(cx);
+    unfold_foot(cx);
     assert!(
         frame_height(&shell, &id, IN_GROUP, cx).is_some(),
         "its row at the foot"
@@ -659,9 +669,9 @@ fn a_blocked_session_comes_back_in_its_place_by_itself(cx: &mut TestAppContext) 
     assert!(leaving > 0., "it slides out of the foot: {leaving}");
     let folding = foot_height(cx);
     assert!(folding > 0., "the foot's row folds away: {folding}");
-    let rising = row_top(&id, cx).expect("drawn as it arrives");
+    let rising = row_top(&shell, &id, cx).expect("drawn as it arrives");
     settle(cx);
-    let placed = row_top(&id, cx).expect("in place");
+    let placed = row_top(&shell, &id, cx).expect("in place");
     assert!(
         rising > placed,
         "it rises into place: {rising} then {placed}"
@@ -854,8 +864,7 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
     until(&shell, cx, "the foot", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    settle(cx);
+    unfold_foot(cx);
 
     // The foot changes where the row sits, not what it says: the subject on its first line, the
     // key as the mono word on its second. It is in its project: it does not say whose it is.
@@ -892,8 +901,7 @@ fn a_blocked_row_says_who_it_waits_for_on_its_second_line(cx: &mut TestAppContex
     until(&shell, cx, "the foot", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    settle(cx);
+    unfold_foot(cx);
 
     // Line 2 says who and why, as #1508 gave it.
     let says = cx.update(|window, _| {
@@ -916,8 +924,7 @@ fn its_second_line_comes_back_when_it_is_no_longer_blocked(cx: &mut TestAppConte
     until(&shell, cx, "the foot", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
-    settle(cx);
+    unfold_foot(cx);
     assert!(
         label(cx, session_waits_id(&id)).is_some(),
         "it says who it waits for at the foot"
@@ -1209,7 +1216,7 @@ fn the_window_draws_no_frame_at_rest_on_a_blocked_session_s_page_and_its_foot(
     until(&shell, cx, "the foot", |cx| {
         blocked(&shell, cx) == [id.clone()]
     });
-    cx.update(|window, cx| window.click(project_blocked_id("atlas"), cx));
+    unfold_foot(cx);
     quiet(&shell, cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     until(&shell, cx, "the wait said in Workspace", |cx| {

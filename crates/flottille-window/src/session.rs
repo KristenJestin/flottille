@@ -9286,10 +9286,10 @@ impl Render for SessionRail {
         }
         // On top, under the ticket's line, when it waits on a ticket or on a pull request the
         // section does not show.
-        let wait_top = wait_under_pull
-            .is_none()
-            .then(|| make_wait(window, cx))
-            .unwrap_or_else(|| div().into_any_element());
+        let wait_top = match wait_under_pull {
+            None => make_wait(window, cx),
+            Some(_) => div().into_any_element(),
+        };
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
         // The forge is the project's setting, not a line of the workspace: the section only says
         // which repositories have none, once, since their pull requests cannot show.
