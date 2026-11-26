@@ -3663,11 +3663,13 @@ impl Shell {
                     section.sign_in_said(&said, &name, why, cx)
                 });
             }
-            Update::ShareRefused { name, why } => gpui_design_system::toast(
-                Toast::failure(format!("{name} was not shared with all machines")).detail(format!(
-                    "The hub refused it: {why}. It stays on this machine, sent again at the next \
-                     session to the hub."
-                )),
+            Update::ShareRefused {
+                name,
+                why,
+                answered,
+            } => gpui_design_system::toast(
+                Toast::failure(format!("{name} was not shared with all machines"))
+                    .detail(share_refused_detail(&why, answered)),
                 cx,
             ),
             Update::ServicesChanged => {
@@ -8100,5 +8102,38 @@ mod mark {
         let outline = MARK_SAIL_OUTLINE.to_string();
         assert_eq!(widths[..2], [outline.clone(), outline]);
         assert_eq!(widths[2], MARK_HULL_STROKE.to_string());
+    }
+}
+
+/// What the toast of a value of all machines the hub kept not says: one it did not answer for is
+/// likely kept at the next session, one it refused is not until what it said is fixed.
+fn share_refused_detail(why: &str, answered: bool) -> String {
+    if answered {
+        format!(
+            "The hub refused it: {why}. It stays on this machine: once that is fixed, change it \
+             again to share it."
+        )
+    } else {
+        format!(
+            "The hub did not keep it ({why}). It stays on this machine, sent again at the next \
+             session to the hub."
+        )
+    }
+}
+
+#[cfg(test)]
+mod share_refused_tests {
+    use super::share_refused_detail;
+
+    #[test]
+    fn a_refusal_says_what_to_do_and_a_hub_that_did_not_answer_says_it_is_sent_again() {
+        let refused = share_refused_detail("the hub cannot write", true);
+        assert!(refused.contains("change it again"), "{refused}");
+        assert!(!refused.contains("sent again"), "{refused}");
+        let silent = share_refused_detail("the hub did not answer in time", false);
+        assert!(
+            silent.contains("sent again at the next session"),
+            "{silent}"
+        );
     }
 }
