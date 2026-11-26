@@ -111,7 +111,12 @@ handler of the machine the window runs on when it is an `http://` or `https://` 
 the code with a copy button. A code the browser shows for the user to paste back is typed
 in the dialog's hidden field and sent once (`signin.code`): written to the program's input with a
 line's end, which then closes, and kept nowhere. When the program ends, its own status says
-whether it is signed in now; `signin.changed` says the program and the state only. A sign-in is
+whether it is signed in now; `signin.changed` says the program and the state, and for a sign-in that
+ended with an error code the last three lines the program said on its error output, masked, without
+a line that holds an address, a one-time code or the code the user pasted, a token said after its
+name masked and an email address masked as an account is (the toast says them: #1529). **A sign-in run never
+stops on a question**: it has no terminal, so each program is given everything it would ask (the
+host, the site) on its command line, or the row says the line to type in a terminal. A sign-in is
 cut after 15 minutes (a device code lasts that long); Cancel kills its process group.
 
 | Program | Signed in | Sign-in run | It asks for | Sign-out | Source |
@@ -121,8 +126,8 @@ cut after 15 minutes (a device code lasts that long); Cancel kills its process g
 | `codex` | `codex login status` (exit 0) | `codex login --device-auth` | the address and the device code | `codex logout` | OpenAI's Codex authentication page (device code for remote or headless machines) |
 | `gh` | `gh auth status --hostname <host>` (exit 0; the account is the word after `account` on the host's line) | `gh auth login --web --hostname <host> --git-protocol https`, with `GH_PROMPT_DISABLED=1` | the address and the device code (`internal/authflow/flow.go`: without a terminal it prints both and waits) | `gh auth logout --hostname <host>` | `gh auth login --help`, `gh auth status --help` |
 | `glab` | `glab auth status --hostname <host>` (exit 0) | `glab auth login --hostname <host> --device` | the address and the device code (`internal/oauth2/device.go`); GitLab 17.9 or later | `glab auth logout --hostname <host>` | glab's `docs/source/auth/login.md` (`--device`, "for headless environments") |
-| `acli` | `acli jira auth status` (exit 0; its `Site:` line, as the tickets read it) | `acli jira auth login --web` | the address when it prints one; its browser must be on the machine signing in (Atlassian's CLOUD-13014 asks for a device flow) | `acli jira auth logout` | Atlassian's `acli jira auth login` reference |
-| `bkt`, Bitbucket Cloud | a context for the host (`docs/forges.md`), never `bkt auth` | `bkt auth login https://bitbucket.org --kind cloud --web` | the address it prints when it cannot open a browser itself; it waits on `127.0.0.1` of the machine signing in, so its browser must be there | `bkt auth logout api.bitbucket.org` (it removes the host's contexts too) | `bkt`'s README, `pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go` and `server.go` |
+| `acli` | `acli jira auth status` (exit 0; its `Site:` line, as the tickets read it) | `acli jira auth login --web --site <site>` | the address when it prints one; its browser must be on the machine signing in (Atlassian's CLOUD-13014 asks for a device flow) | `acli jira auth logout` | Atlassian's `acli jira auth login` reference (developer.atlassian.com/cloud/acli/reference/commands/jira-auth-login/, last updated Oct 3, 2024: `-s, --site`, `-e, --email`, `--token`, `-w, --web`); on `acli` 1.3.39 a terminal's run asks "Select the site to login", the question `--site` answers; with no project naming a site, `--web` alone |
+| `bkt`, Bitbucket Cloud | a context for the host (`docs/forges.md`), never `bkt auth` | `bkt auth login https://bitbucket.org --kind cloud --web` (its host is the one positional word of `login [host]`: without it `bkt` asks "Bitbucket base URL" and, with no terminal, ends "host is required when not running in a TTY") | the address it prints when it cannot open a browser itself; it waits on `127.0.0.1` of the machine signing in, so its browser must be there | `bkt auth logout api.bitbucket.org` (it removes the host's contexts too) | `bkt`'s README, `pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go` and `server.go` |
 | `bkt`, Data Center | the same | none: its token is asked in a terminal ("token is required when not running in a TTY"); the row says `bkt auth login https://<host> --web-token` | | `bkt auth logout <host>` | the same |
 
 What each program prints is read once in a temporary `HOME` and XDG folders, the command stopped
