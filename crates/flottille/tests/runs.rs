@@ -1582,18 +1582,18 @@ fn a_delivery_that_interrupts_the_agent_s_turn_does_not_stop_its_runs() {
     the_seed_goes_on_to_its_end(&user, &agent, &workspace);
 }
 
-/// The case seen (#1548): a message of the session's pilot or of the user, not taken while the
-/// session's only call waits for its seed, cancels its turn 30 s later to be read.
+/// The case seen (#1548): an urgent delivery (its pilot's message, as a command's end here), not
+/// taken while the session's only call waits for its seed, is pinned as a note; 30 s later the
+/// turn is cancelled for it to be read, and the agent gives its call up.
 #[test]
-fn a_message_not_taken_while_a_run_call_waits_does_not_stop_the_run() {
+fn an_urgent_delivery_not_taken_while_a_run_call_waits_does_not_stop_the_run() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
-    let (agent, _mcp, workspace) = seeding_session(&user);
+    let (agent, mcp, workspace) = seeding_session(&user);
     eventually("the seed to run", || !listed(&user, &agent).is_empty());
-    user.call(
-        "agent.send",
-        json!({"agent": agent, "message": "How is the seed going?"}),
-    )
-    .unwrap();
+    let other = start(&mcp, "ends");
+    eventually("the other command's end", || {
+        state_of(&user, &agent, &other) == "exited"
+    });
 
     user.call("test.advance", json!({"ms": 31_000})).unwrap();
 
