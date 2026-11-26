@@ -1466,3 +1466,238 @@ fn wait_for_ticket_unassigned(user: &User, id: &str, mcp: &Mcp) {
             == "subscription"
     });
 }
+
+/// A wait of Maya's on `on`, as the daemon would say it.
+fn waiting_on(on: flottille_window::model::WaitOn) -> flottille_window::model::Blocked {
+    flottille_window::model::Blocked {
+        by: vec!["Maya".to_owned()],
+        why: match &on {
+            flottille_window::model::WaitOn::PullRequest { number, .. } => {
+                format!("review of #{number}")
+            }
+            flottille_window::model::WaitOn::Ticket(key) => format!("ticket {key}"),
+        },
+        on: Some(on),
+        since: 1_700_000_000_000,
+    }
+}
+
+fn review_of(repository: Option<&str>, number: u64) -> flottille_window::model::WaitOn {
+    flottille_window::model::WaitOn::PullRequest {
+        repository: repository.map(str::to_owned),
+        number,
+    }
+}
+
+fn pull_in(repository: &str, number: u64) -> flottille_window::session_link::PullRequest {
+    flottille_window::session_link::PullRequest {
+        repository: repository.to_owned(),
+        number,
+        state: "open".to_owned(),
+        mark: None,
+        url: format!("https://github.com/acme/{repository}/pull/{number}"),
+    }
+}
+
+/// A place of these repositories (their paths in the project) and their pull requests.
+fn place_of(
+    repositories: &[&str],
+    pulls: Vec<flottille_window::session_link::PullRequest>,
+) -> flottille_window::session_link::PlaceFacts {
+    flottille_window::session_link::PlaceFacts {
+        repositories: repositories
+            .iter()
+            .map(|path| {
+                (
+                    (*path).to_owned(),
+                    flottille_window::session_link::RepositoryFacts::Branch(Some(
+                        "main".to_owned(),
+                    )),
+                )
+            })
+            .collect(),
+        pulls,
+        ..Default::default()
+    }
+}
+
+/// The page of a session of the project folder, open, its place and its wait as the test says
+/// them (nothing polls the daemon after).
+fn page_with<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+    place: flottille_window::session_link::PlaceFacts,
+    blocked: Option<flottille_window::model::Blocked>,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    Entity<flottille_window::session::SessionPage>,
+) {
+    let (id, _mcp) = start(user, "open the docs pull request");
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    open_page(&shell, &id, cx);
+    until(&shell, cx, "its workspace", |cx| {
+        drawn_height(cx, "rail-workspace-read") > 0.
+    });
+    settle(cx);
+    let page = page_of(&shell, cx);
+    page.update(cx, |page, cx| {
+        page.set_place(Some(place), cx);
+        page.set_blocked(blocked, cx);
+    });
+    settle(cx);
+    (shell, cx, page)
+}
+
+#[gpui_kit::test]
+fn the_wait_unfolds_under_its_pull_request_as_it_comes_there_and_folds_away_as_it_leaves(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user);
+    // The pull request line is there; the wait is on a ticket, at the top.
+    let (_shell, cx, page) = page_with(
+        &user,
+        cx,
+        place_of(&["."], vec![pull_in(".", 12)]),
+        Some(waiting_on(flottille_window::model::WaitOn::Ticket(
+            "#5".to_owned(),
+        ))),
+    );
+    const TOP: &str = "rail-wait-block";
+    const UNDER: &str = "rail-wait-pull-block-atlas";
+    assert!(drawn_height(cx, TOP) > 0., "at the top");
+    assert_eq!(drawn_height(cx, UNDER), 0., "not under the pull request");
+    let at_top = drawn_height(cx, TOP);
+
+    // The wait is now on the review of #12: it goes under its line. The one under the line
+    // unfolds, the one at the top folds, both over a few frames: neither pops.
+    page.update(cx, |page, cx| {
+        page.set_blocked(Some(waiting_on(review_of(Some("."), 12))), cx)
+    });
+    after(cx, Duration::from_millis(70));
+    let (coming, leaving) = (drawn_height(cx, UNDER), drawn_height(cx, TOP));
+    settle(cx);
+    let under = drawn_height(cx, UNDER);
+    assert!(
+        coming > 0. && coming < under,
+        "the wait unfolds under its pull request: {coming} of {under}"
+    );
+    assert!(
+        leaving > 0. && leaving < at_top,
+        "the wait folds away from the top: {leaving} of {at_top}"
+    );
+    assert_eq!(drawn_height(cx, TOP), 0.);
+
+    // Back on a ticket (the pull request line left its wait): the reverse.
+    page.update(cx, |page, cx| {
+        page.set_blocked(
+            Some(waiting_on(flottille_window::model::WaitOn::Ticket(
+                "#5".to_owned(),
+            ))),
+            cx,
+        )
+    });
+    after(cx, Duration::from_millis(70));
+    let (leaving, coming) = (drawn_height(cx, UNDER), drawn_height(cx, TOP));
+    assert!(
+        leaving > 0. && leaving < under,
+        "the wait folds away from under the pull request: {leaving} of {under}"
+    );
+    assert!(coming > 0. && coming < at_top, "and unfolds at the top");
+}
+
+#[gpui_kit::test]
+fn a_wait_is_put_under_the_pull_request_of_its_own_repository(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // Two repositories each have a #12: the wait is on the one of `web`.
+    let (_shell, cx, _page) = page_with(
+        &user,
+        cx,
+        place_of(
+            &["api", "web"],
+            vec![pull_in("api", 12), pull_in("web", 12)],
+        ),
+        Some(waiting_on(review_of(Some("web"), 12))),
+    );
+
+    let (api_bottom, web_top, web_bottom, wait) = cx.update(|window, _| {
+        let bounds = |id: &str| window.find(id.to_owned()).bounds();
+        let bottom = |id: &str| f32::from(bounds(id).origin.y + bounds(id).size.height);
+        (
+            bottom("rail-line-pull-api"),
+            f32::from(bounds("rail-line-repository-web").origin.y),
+            bottom("rail-line-pull-web"),
+            f32::from(bounds("rail-wait").origin.y),
+        )
+    });
+    assert!(wait >= web_bottom - 1., "{wait} under web's {web_bottom}");
+    // Nothing between api's pull request and web's repository: no second line under api's.
+    assert!(web_top - api_bottom < 2., "a wait stands under api's");
+    // The line is under its pull request: it does not say what it waits on.
+    assert_eq!(
+        label(cx, "rail-wait").unwrap(),
+        flottille_window::session::blocked_line(&waiting_on(review_of(Some("web"), 12)), false)
+    );
+}
+
+#[gpui_kit::test]
+fn a_wait_does_not_disappear_when_its_pull_request_is_not_the_one_drawn(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // A repository has two pull requests; the section draws the first. The wait is on the other.
+    let (_shell, cx, _page) = page_with(
+        &user,
+        cx,
+        place_of(&["."], vec![pull_in(".", 11), pull_in(".", 12)]),
+        Some(waiting_on(review_of(Some("."), 12))),
+    );
+
+    // At the top, saying what it waits on, since no line of #12 stands above it.
+    assert_eq!(
+        label(cx, "rail-wait"),
+        Some(flottille_window::session::blocked_line(
+            &waiting_on(review_of(Some("."), 12)),
+            true
+        ))
+    );
+    let (wait_bottom, repository_top) = cx.update(|window, _| {
+        let wait = window.find("rail-wait".to_owned()).bounds();
+        let repository = window
+            .find("rail-line-repository-atlas".to_owned())
+            .bounds();
+        (
+            f32::from(wait.origin.y + wait.size.height),
+            f32::from(repository.origin.y),
+        )
+    });
+    assert!(wait_bottom <= repository_top + 1., "at the top");
+}
+
+#[gpui_kit::test]
+fn under_a_pull_request_subject_a_wait_does_not_repeat_its_review(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    // A session on the project folder: no pull request line, its subject says the pull request.
+    let (_shell, cx, page) = page_with(
+        &user,
+        cx,
+        place_of(&["."], vec![]),
+        Some(waiting_on(review_of(Some("."), 12))),
+    );
+    page.update(cx, |page, cx| page.set_subject(Some(pull_subject()), cx));
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "rail-about-pull").as_deref(),
+        Some("#12 Write the docs")
+    );
+    assert_eq!(
+        label(cx, "rail-wait").unwrap(),
+        flottille_window::session::blocked_line(&waiting_on(review_of(Some("."), 12)), false)
+    );
+}
