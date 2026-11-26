@@ -395,7 +395,8 @@ async fn accept<C: Clock + Send + 'static>(
             };
             // A member's session is not counted; a pairing's is, while it lasts.
             let _permit = paired.is_some().then_some(permit);
-            let Ok(session) = arriving.welcome_within(shared.waits.silence).await else {
+            let names = shared.hub.lock().unwrap().names_said();
+            let Ok(session) = arriving.welcome_within(shared.waits.silence, names).await else {
                 return;
             };
             match &paired {

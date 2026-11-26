@@ -86,6 +86,10 @@ pub const SHARED_NAMES: &[&str] = &[
     "review.passes",
 ];
 
+/// The names a hub of before #1525 keeps, the first of [`SHARED_NAMES`] (About you and the
+/// settings a machine often overrides, #1514): a hub that names none in its welcome keeps these.
+pub const SHARED_NAMES_BEFORE: &[&str] = SHARED_NAMES.split_at(16).0;
+
 /// Bytes, in base64 in JSON.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bytes(pub Vec<u8>);
