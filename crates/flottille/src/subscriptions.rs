@@ -331,9 +331,9 @@ fn reset(daemon: &Arc<Daemon>, subscription: &Subscription) {
 
 /// A turn of the session ended with `stop_reason`: the agents that lead it are woken, once each,
 /// with why (it asked, it reported, it failed, or none) and the last message of that turn, cut
-/// and said. A paused following wakes nobody, nor one whose session wrote to its pilot in the
-/// turn: that message woke it already. A turn cancelled to take a queued delivery wakes nobody:
-/// the turn that takes it does.
+/// and said. A paused following wakes nobody, nor one whose session ended a plain turn on a
+/// message to its pilot: that message woke it already. A turn cancelled to take a queued delivery
+/// wakes nobody: the turn that takes it does, with the questions it asked.
 pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     if stop_reason == "cancelled" && queued_for(daemon, &session.id) {
         return;
@@ -357,7 +357,19 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     };
     let seq_of = |name: &str| last_of(name).0;
     let (prompted, prompted_at) = last_of("agent.prompted");
-    let asked = seq_of("agent.asked") > prompted;
+    let before = daemon.read(|store| store.last_seq()).unwrap_or(0);
+    // The questions to its pilot that still wait and no wake said yet: those of this turn, and
+    // those of a turn that ended without a wake (one cancelled to take a delivery).
+    let told = told_up_to(daemon, &session.id);
+    let questions: Vec<Value> = crate::tree::unanswered_to(daemon, &session.id, "pilot")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|question| {
+            let seq = question["seq"].as_u64().unwrap_or(0);
+            seq > told && seq <= before
+        })
+        .collect();
+    let asked = seq_of("agent.asked") > prompted || !questions.is_empty();
     let reported = !asked && seq_of("agent.reported") > prompted;
     // What waits for the user and was not said yet, its tree's included: each request once, in
     // the first wake after it reached the user, whatever ended the turns between (one cancelled
@@ -365,21 +377,31 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     // several reads while it runs: only what was given to the user before them is said now, all of
     // which they see if it still waits; what came during them is said by the next wake.
     let said = said_up_to(daemon, &session.id);
-    let before = daemon.read(|store| store.last_seq()).unwrap_or(0);
     let requests: Vec<UserRequest> = waiting_for_the_user(daemon, &session.id)
         .into_iter()
         .filter(|request| request.seq > said && request.seq <= before)
         .collect();
     let plain = !asked && !reported && requests.is_empty();
     let user_spoke = followed_the_user(daemon, &session.id);
+    // The last call of the turn: a plain turn whose last call wrote to the pilot woke it with that
+    // message. One that went on after it (a question, a report, more work) still wakes it (#1540).
+    let last_call = daemon
+        .read(|store| store.last_agent_events(&session.id, "agent.tool_served", 1))
+        .ok()
+        .and_then(|events| events.into_iter().next())
+        .filter(|event| event.seq > prompted);
     let woken: Vec<Subscription> = leads
         .into_iter()
-        // A message to the pilot woke it already, but did not say what waits for the user.
         .filter(|s| {
-            !requests.is_empty()
-                || s.seen["answered"]
-                    .as_u64()
-                    .is_none_or(|at| at < prompted_at)
+            let wrote_last = s.seen["answered"].as_u64().is_some_and(|answered| {
+                answered >= prompted_at
+                    && last_call.as_ref().is_some_and(|call| {
+                        call.data["tool"] == "session_send"
+                            && call.data["outcome"] == "ok"
+                            && call.at >= answered
+                    })
+            });
+            !(plain && wrote_last)
         })
         .collect();
     if woken.is_empty() && !remote {
@@ -394,11 +416,17 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
             false,
         );
     }
+    if let Some(upto) = questions.iter().filter_map(|q| q["seq"].as_u64()).max() {
+        crate::agents::record(
+            daemon,
+            &session.id,
+            QUESTIONS_SAID,
+            json!({"upto": upto}),
+            false,
+        );
+    }
     // A pilot of another machine was asked while its machine was linked; the user otherwise.
-    let pilot_asked = crate::tree::unanswered_to(daemon, &session.id, "pilot").is_ok_and(|open| {
-        open.iter()
-            .any(|q| q["seq"].as_u64().unwrap_or(0) > prompted)
-    });
+    let pilot_asked = !questions.is_empty();
     let what = what_of(
         stop_reason,
         asked,
@@ -409,16 +437,12 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
         .pop()
         .unwrap_or_else(|| NO_MESSAGE.to_owned());
-    // The questions it asked its pilot in this turn and that still wait, said whole above its
+    // The questions it asked its pilot that still wait and were not said, said whole above its
     // last message: the pilot answers what it knows, or relays them, without a read.
     let env = std::env::vars_os().collect();
     let mut asked: Vec<String> = Vec::new();
     let (mut used, mut left) = (0, 0);
-    for question in crate::tree::unanswered_to(daemon, &session.id, "pilot")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|question| question["seq"].as_u64().unwrap_or(0) > prompted)
-    {
+    for question in questions {
         let text = secrets::mask(question["question"].as_str().unwrap_or_default(), &env);
         let said = format!(
             "Its question to you (#{}):\n\n{}",
@@ -613,6 +637,18 @@ fn said_up_to(daemon: &Daemon, session: &str) -> u64 {
 
 /// The agent event that says how far the requests of a session's tree were said to its leads.
 const REQUESTS_SAID: &str = "agent.requests_said";
+
+/// How far the session's questions to its pilot were said in a wake: the `seq` of the last.
+fn told_up_to(daemon: &Daemon, session: &str) -> u64 {
+    daemon
+        .read(|store| store.last_agent_events(session, QUESTIONS_SAID, 1))
+        .ok()
+        .and_then(|events| events.first().and_then(|event| event.data["upto"].as_u64()))
+        .unwrap_or(0)
+}
+
+/// The agent event that says how far a session's questions to its pilot were said to its leads.
+const QUESTIONS_SAID: &str = "agent.questions_said";
 
 /// How a request of `agent`, below `session`, says who asked it.
 fn asked_by(agent: &Agent, session: &str) -> String {

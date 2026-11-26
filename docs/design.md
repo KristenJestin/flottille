@@ -362,8 +362,8 @@ ends: the line, the exit code, the duration and the last lines of the output, ma
 An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
 `session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
 the session ends or fails. The delivery names the session, says
-why and holds its last message, masked and cut, after the questions to the pilot that turn asked
-and that still wait, whole, and the requests that wait for the user and no wake said yet (a call
+why and holds its last message, masked and cut, after the questions to the pilot that still wait
+and no wake said yet (a turn that ended without a wake loses none), whole, and the requests that wait for the user and no wake said yet (a call
 held, a connection asked, a vault entry asked for), its own and those its children forwarded to
 the user or asked them for, each with its number, what it asks and who asked: the pilot is
 told, the user answers, and how they answered is queued for the pilot's next wake, here or on

@@ -996,6 +996,17 @@ user after that event, whatever ended the turns between. No sign of activity.
 | `agent` | |
 | `upto` | The `seq` of the last event that gave one of them to the user: a request made, its last forward to the user, a vault ask or its join. |
 
+#### `agent.questions_said`
+
+The questions the session asked its pilot with `ask` were said to its leads in a wake, up to
+`upto` (`docs/tools.md`, "Following a session"): the next wake says those that still wait and came
+after, whatever ended the turns between. No sign of activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `upto` | The `seq` of the last `agent.asked` event the wake said. |
+
 #### `agent.released`
 
 Its process was let go; the next message starts it again.
