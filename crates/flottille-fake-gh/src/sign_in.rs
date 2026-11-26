@@ -11,7 +11,9 @@
 //! - `approve` and `refuse`, written by the test: a sign-in that waits for the user's browser ends
 //!   signed in once `approve` is there, refused once `refuse` is (60 s at most).
 //!
-//! The script's `sign_in` shapes the flow: `{"address", "code", "asks_code", "accepts"}`. The
+//! The script's `sign_in` shapes the flow: `{"address", "code", "asks_code", "accepts", "fail", "echo_refused", "stdout"}`.
+//! With `fail`, the fake says that text on its error output and ends with 1 at once, as a program
+//! that cannot sign in without a terminal does (#1529), after the `stdout` text on its output. The
 //! address and the code are invented ones by default; with `asks_code: true` the fake reads the
 //! code back on its input, as a program that asks for a pasted code does, and is signed in when
 //! it is `accepts` (any code without).
@@ -53,6 +55,17 @@ pub fn login(dir: &Path, script: &Value, args: &[String], say: impl FnOnce(&str,
     let address = flow["address"].as_str().unwrap_or(ADDRESS);
     let code = flow["code"].as_str().unwrap_or(CODE);
     record(dir, json!({"login": args, "pid": std::process::id()}));
+    if let Some(failure) = flow["fail"].as_str() {
+        // What a program prints on its output before it fails (`stdout`): the dialog's, never a
+        // failure's.
+        if let Some(said) = flow["stdout"].as_str() {
+            println!("{said}");
+            let _ = std::io::stdout().flush();
+        }
+        eprintln!("{failure}");
+        record(dir, json!({"ended": "refused"}));
+        return 1;
+    }
     say(address, code);
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
@@ -68,9 +81,14 @@ pub fn login(dir: &Path, script: &Value, args: &[String], say: impl FnOnce(&str,
         if !rest.is_empty() {
             record(dir, json!({"after": rest}));
         }
-        flow["accepts"]
+        let accepted = flow["accepts"]
             .as_str()
-            .is_none_or(|accepts| accepts == pasted)
+            .is_none_or(|accepts| accepts == pasted);
+        if !accepted && flow["echo_refused"] == true {
+            // Some programs say the code they refused in their error.
+            eprintln!("Error: the code {pasted} is not valid\nError: the sign-in was refused");
+        }
+        accepted
     } else {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {

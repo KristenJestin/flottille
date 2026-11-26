@@ -362,8 +362,8 @@ ends: the line, the exit code, the duration and the last lines of the output, ma
 An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
 `session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
 the session ends or fails. The delivery names the session, says
-why and holds its last message, masked and cut, after the questions to the pilot that turn asked
-and that still wait, whole, and the requests that wait for the user and no wake said yet (a call
+why and holds its last message, masked and cut, after the questions to the pilot that still wait
+and no wake said yet (a turn that ended without a wake loses none), whole, and the requests that wait for the user and no wake said yet (a call
 held, a connection asked, a vault entry asked for), its own and those its children forwarded to
 the user or asked them for, each with its number, what it asks and who asked: the pilot is
 told, the user answers, and how they answered is queued for the pilot's next wake, here or on
@@ -743,9 +743,8 @@ session an agent starts, and a child, keep the rules below (a child follows its 
 session an agent starts in another project is in Auto, never above its launcher's tree's; the
 pilot door's `agent_start`, which an outside agent drives, starts in Auto; the session an
 extension starts for the user, a spec's writer or its developer, does not go through
-`agent.start` and stays in Auto; a launch from a tree in Full on another machine goes Auto there
-unless the user's signed switch raises it: **replaced by the rule (#1517)** ([Machines are one](remote.md#machines-are-one)), Full
-follows the tree there with no signed switch, kept until the code follows), so that a default of Full lends nothing to a tree that
+`agent.start` and stays in Auto; a launch from a tree on another machine takes that tree's mode,
+Full included, as on one machine: [Machines are one](remote.md#machines-are-one)), so that a default of Full lends nothing to a tree that
 is not in Full. Choosing Full as the default
 says once, under the choice, what Full lends: a session's commands run as the user's, as in their
 terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its
@@ -1234,7 +1233,23 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and fades in, with its space; the rows that go into it from the list slide there, and when the
   stored arrangement reaches a window after its first rows they slide into their groups rather
   than jump. A project that is new, or newly seen on a machine, is at the end of the list, outside
-  any group, and unfolds there. The order and the groups are the user's, so they are kept by the
+  any group, and unfolds there. **A project can be hidden on one machine** (#1526): each project
+  row has a "⋯" menu of its own, at its right, with **Hide on this machine**; the row folds away
+  with its sessions and its gap, and unfolds again when it is shown. It is the user's view of
+  this machine alone, kept by this machine's daemon (`project.hide`, `project.hidden`,
+  `docs/protocol.md`), so it hides nothing on another machine's window, sends nothing to the
+  machine that has the project, and leaves the project and its sessions as they are. It works on
+  any project of the list, this machine's own included: no rule of its own for another machine
+  ([Machines are one](remote.md#machines-are-one)). If its page is the one in front, the next
+  shown project's page opens (none when none is shown), as after a removal; a machine whose
+  projects are all hidden leaves the sections of Group by machine. A hidden project is no longer offered where
+  a project is chosen (the quick switcher's Projects, a vault entry's project, a task's copy),
+  but its sessions are still found by the switcher, and **a session of it that needs the user is
+  still in the notification centre and rings as it would**: hiding hides the project from view,
+  never a question waiting for the user. Settings, General, has **Hidden projects** (this machine
+  only): one list of the one pattern, each row with a **Show** that brings the project back, its
+  row unfolding in the sidebar. `flottille project hide|unhide <name>` and
+  `project list --hidden` are the same methods. The order and the groups are the user's, so they are kept by the
   daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
   sidebar's folds so that one window's fold never erases another's groups, read by a window when
   it opens and again at each change it makes (applied to what the daemon holds, so that a window
@@ -1315,16 +1330,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   all it held is closed or merged it is free: `Free · nothing in hand`, in faint ink, its page
   saying what it last held (`#5 done · #12 merged`). An ended session keeps the subject it had
   when it ended. A session that never held anything has no subject and shows
-  its title. The row's first line says the ticket's key as a chip, then its title (else `#12` and
+  its title. The row's first line says its title across the row's width (the ticket's title, else `#12` and
   the pull request's title, else `Free · nothing in hand`); the session's own title stays in the
-  line's tooltip and the page's header. A title the user gave (Rename…) wins: it keeps the first
-  line and the key goes to the second, before the place. The session's page says, under its
+  line's tooltip and the page's header. The ticket's key is never on the first line, where it
+  would push the title: it is the mono word of the second line, before the place, in place of the
+  model a led session runs on (a session about no ticket keeps its model there). A title the user
+  gave (Rename…) wins the first line the same way. The session's page says, under its
   header, the chips of its ticket and of its pull request with its checks' mark, then one faint
   line, `What it is about, from <where it comes from>.` (`the workspace's linked ticket`, `a ticket
   it changed`, `a pull request it opened`…), so that a wrong guess can be understood; its
   workspace stays in the header and its runs in the rail. A subject that changes fades in over
-  the old one, the key's chip unfolds and fades in, folds away and fades out, or goes from the
-  first line to the second with a fade, and the row's height never changes. The mark says its words under the pointer
+  the old one, the key unfolds and fades in on the second line as the model fades out, and back, and
+  the row's height never changes, nor does anything on its first line. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
   A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for

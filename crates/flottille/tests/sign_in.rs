@@ -644,3 +644,259 @@ fn a_list_asked_without_its_checks_runs_none_and_a_row_asked_alone_is_checked() 
     assert_eq!(gh["checking"], false, "{gh}");
     assert_eq!(gh["signed_in"], true, "{gh}");
 }
+
+/// The last `signin.changed` that said `state` for `program`.
+fn changed_to(user: &User, program: &str, state: &str) -> Option<Value> {
+    events(user)
+        .into_iter()
+        .filter(|event| event["name"] == "signin.changed")
+        .map(|event| event["data"].clone())
+        .rfind(|data| data["program"] == program && data["state"] == state)
+}
+
+#[test]
+fn acli_signs_in_to_the_row_s_site_from_the_window() {
+    let user = User::new().with_sign_in_programs(&["acli"]);
+    tracked(&user);
+    user.sign_in_script(
+        "acli",
+        json!({"signed_in": false, "sign_in": {"address": "https://id.example.test/authorize"}}),
+    );
+
+    let started = user
+        .call("signin.start", json!({"program": "acli"}))
+        .unwrap();
+
+    assert_eq!(started["running"], true, "{started}");
+    assert_eq!(started["address"], "https://id.example.test/authorize");
+    assert_eq!(
+        user.sign_in_record("acli")[0]["login"],
+        json!([
+            "jira",
+            "auth",
+            "login",
+            "--web",
+            "--site",
+            "example.atlassian.net"
+        ])
+    );
+    user.approve_sign_in("acli");
+    eventually("acli signed in", || {
+        let acli = row(&list(&user), "acli");
+        acli["signed_in"] == true && acli["running"] == false
+    });
+}
+
+#[test]
+fn a_failed_sign_in_says_what_the_program_said() {
+    let user = User::new().with_sign_in_programs(&["gh", "glab", "acli", "bkt"]);
+    tracked(&user);
+    for program in ["gh", "glab", "acli", "bkt"] {
+        // A token the program printed with its error is masked, as every output is.
+        let said = format!("Error: {program} said this on its error output\n  Token: {TOKEN}");
+        user.sign_in_script(
+            program,
+            json!({"signed_in": false, "sign_in": {"fail": said}}),
+        );
+    }
+
+    for program in ["gh", "glab", "acli", "bkt"] {
+        user.call("signin.start", json!({"program": program}))
+            .unwrap();
+        eventually(&format!("{program}'s sign-in failed"), || {
+            changed_to(&user, program, "failed").is_some()
+        });
+        let failed = changed_to(&user, program, "failed").unwrap();
+        let why = failed["why"].as_str().unwrap_or_default();
+        assert!(
+            why.contains(&format!("Error: {program} said this on its error output")),
+            "{failed}"
+        );
+        assert!(why.contains("exit code 1"), "{failed}");
+        assert!(!why.contains(TOKEN), "{failed}");
+    }
+    assert!(
+        !events(&user)
+            .iter()
+            .any(|event| event.to_string().contains(TOKEN)),
+        "an event holds the token"
+    );
+}
+
+#[test]
+fn a_failed_sign_in_never_says_an_address_or_a_code() {
+    const KEPT: &str = "Error: the sign-in needs a terminal";
+    // One case per filter of what a failure says (at most the last three lines are kept, so a
+    // case holds three at most): the line only that filter drops, and what must not be said.
+    let cases: [(&str, Option<&str>, &str, &str); 5] = [
+        // An address, with no code shape in it.
+        (
+            "an address",
+            None,
+            "Open https://id.example.test/device?code=XYZW\n",
+            "id.example.test",
+        ),
+        // The announcement of the code, with none in it.
+        (
+            "the announcement",
+            None,
+            "Please copy your one-time code first\n",
+            "one-time code",
+        ),
+        // A code the program did not announce (another than the one it showed).
+        (
+            "a word shaped as a code",
+            None,
+            "Retry with WXYZ-9876 instead\n",
+            "WXYZ-9876",
+        ),
+        // The code it showed, in a word that is no code by itself.
+        (
+            "the code shown, glued to letters",
+            None,
+            "one-time code: ABCD-1234\nsee xABCD-1234x\n",
+            "ABCD-1234",
+        ),
+        // What it printed on its output, where the dialog reads it: never a failure's.
+        (
+            "its output",
+            Some("Your one-time code is wxyz9876"),
+            "",
+            "wxyz9876",
+        ),
+    ];
+    for (case, stdout, error, never) in cases {
+        let user = User::new().with_sign_in_programs(&["gh"]);
+        let mut flow = json!({"fail": format!("{error}{KEPT}")});
+        if let Some(stdout) = stdout {
+            flow["stdout"] = json!(stdout);
+        }
+        user.sign_in_script("gh", json!({"signed_in": false, "sign_in": flow}));
+
+        user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+        eventually(&format!("{case}: gh's sign-in failed"), || {
+            changed_to(&user, "gh", "failed").is_some()
+        });
+        let failed = changed_to(&user, "gh", "failed").unwrap();
+        let why = failed["why"].as_str().unwrap_or_default();
+        assert!(why.contains(KEPT), "{case}: {failed}");
+        assert!(!why.contains(never), "{case}: {never}: {failed}");
+    }
+}
+
+#[test]
+fn acli_without_a_site_fails_saying_why() {
+    // No project names a Jira site: the sign-in is the program's `--web` alone, which cannot ask
+    // for the site without a terminal and says so.
+    let user = User::new().with_sign_in_programs(&["acli"]);
+    user.sign_in_script("acli", json!({"signed_in": false}));
+
+    user.call("signin.start", json!({"program": "acli"}))
+        .unwrap();
+
+    eventually("acli's sign-in failed", || {
+        changed_to(&user, "acli", "failed").is_some()
+    });
+    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(why.contains("pass --site <site>"), "{failed}");
+    assert_eq!(
+        user.sign_in_record("acli")[0]["login"],
+        json!(["jira", "auth", "login", "--web"])
+    );
+}
+
+#[test]
+fn a_failed_sign_in_never_repeats_the_code_the_user_pasted() {
+    const PASTED: &str = "pasted-code-of-a-test-0042";
+    let user = User::new().with_sign_in_programs(&["claude"]);
+    // The code is refused, and the program repeats it in its error, as some do.
+    user.sign_in_script(
+        "claude",
+        json!({"signed_in": false, "sign_in": {"accepts": "another-code", "echo_refused": true}}),
+    );
+    user.call("signin.start", json!({"program": "claude"}))
+        .unwrap();
+
+    user.call("signin.code", json!({"program": "claude", "code": PASTED}))
+        .unwrap();
+
+    eventually("claude's sign-in failed", || {
+        changed_to(&user, "claude", "failed").is_some()
+    });
+    let failed = changed_to(&user, "claude", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(why.contains("Error: the sign-in was refused"), "{failed}");
+    assert!(!why.contains(PASTED), "{failed}");
+    assert!(
+        !events(&user)
+            .iter()
+            .any(|event| event.to_string().contains(PASTED)),
+        "an event holds the pasted code"
+    );
+}
+
+#[test]
+fn a_failed_sign_in_masks_an_email_address_as_an_account_is() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    user.sign_in_script(
+        "gh",
+        json!({"signed_in": false, "sign_in": {"fail": "Error: no access for someone@example.test, try again"}}),
+    );
+
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
+    });
+    let failed = changed_to(&user, "gh", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("no access for s***@e***, try again"),
+        "{failed}"
+    );
+    assert!(!why.contains("someone"), "{failed}");
+}
+
+#[test]
+fn a_failed_sign_in_masks_a_token_said_after_its_name() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    // Invented, of no known shape: only its place says it is a token.
+    let said = "Error: login refused, access_token: example-opaque-0000 and more\n\
+                Error: the server said token=example-other-0000 too\n\
+                Error: an invalid token: expired";
+    user.sign_in_script("gh", json!({"signed_in": false, "sign_in": {"fail": said}}));
+
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
+    });
+    let failed = changed_to(&user, "gh", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(!why.contains("example-"), "{failed}");
+    assert!(why.contains("access_token: [masked] and more"), "{failed}");
+    assert!(why.contains("an invalid token: expired"), "{failed}");
+}
+
+#[test]
+fn a_failed_sign_in_says_only_the_last_lines_it_said() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    let lines: Vec<String> = (1..=8).map(|n| format!("line {n} of the error")).collect();
+    user.sign_in_script(
+        "gh",
+        json!({"signed_in": false, "sign_in": {"fail": lines.join("\n")}}),
+    );
+
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
+    });
+    let failed = changed_to(&user, "gh", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(why.contains("line 8 of the error"), "{failed}");
+    assert!(why.contains("line 6 of the error"), "{failed}");
+    assert!(!why.contains("line 5 of the error"), "{failed}");
+}

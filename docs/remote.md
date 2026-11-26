@@ -1081,7 +1081,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch, `workspace` `remove` of the workspace made for it, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine").
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch, `workspace` `remove` of the workspace made for it, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree` and `mode`): judged there as the same call of one of its own agents ("Sessions of another machine").
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1326,15 +1326,10 @@ local child's work; nothing moves your branch.*
   for its user in every mode but Full, never the judge's (`this agent is a session another agent
   started for the user, …`). A `led` or `handed` session a machine started for an agent of
   another is, to its own gate, a session an agent started: a session it starts comes to the user.
-- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the mode is the caller's
-  tree's, Full included: Full follows the tree, with no signed switch and no 12 hours. Kept until
-  the code follows.
-
-  **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
-  machine alone cannot raise: a session on another machine is in Full only when the caller's tree
-  was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
-  with the launch, and that switch is less than 12 hours old on the receiving machine's clock.
-  Otherwise it starts in Auto. A switch out of Full forgets the kept switch.
+- **The mode** is the caller's tree's, as for any session an agent starts on one machine, Full
+  included: Full follows the tree, with no switch signed from a device and no time limit. A
+  runner is the user ("Machines are one"); a call of a device of another role is never taken in
+  Full. A machine of before sends a signed switch with Full (`switch`), which none reads any more.
 - **What the sender says is bounded** before a card or the judge reads it: a title of one line, 200
   characters at most; the caller and its tree named by agents' ids (1 to 64 letters, digits,
   dashes or underscores); the branch a name git takes, 255 bytes at most. Otherwise refused.
@@ -1406,12 +1401,8 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
   the members, with their leaves.
-- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): Full follows the tree,
-  with no signed switch: a machine raises nothing, it carries the tree's own mode. Kept until the
-  code follows.
-
-  **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
-  launch's ("Starting a session on another machine"): a machine alone cannot raise it.
+- **The mode** is the caller's tree's, Full included, as a launch's ("Starting a session on
+  another machine").
 - **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
   sessions stay listed with its state (`on server, offline since 22:14`), and a call is refused at
   once saying so (`refused: server is offline since 22:14: the session "Night lead" (agent …)
@@ -1469,10 +1460,6 @@ parent, …`), each naming the ref they came into. A child that reported and end
 nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
 to be told.
 
-**Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): the removal runs as the
-same removal on one machine: what still exists on the launcher's machine is no loss, and nothing
-waits for the user, in Full or not, that would not wait there. Kept until the code follows.
-
 **The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
 workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
 tool's `remove` takes the same optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
@@ -1484,7 +1471,10 @@ of its own agents' removals (`tools.md`, "The workspace"), its caller stood in f
 workspace's project there, in its tree's mode: held for its user as a removal of its own agents'
 is, its card saying what would be lost, refused while an agent works in it, and done only with nothing lost or
 by the user's answer to discard. Commits that went back count as kept, as commits another branch
-holds do: what the card names is only what never reached the caller. Nothing of it is done, not
+holds do, and so does the caller's uncommitted work laid with the launch while it is as it was
+laid (#1512): it is the caller's, which its machine still has. What the card names is only the
+work of that workspace's own that never reached the caller, so nothing waits for the user, in Full
+or not, that would not wait on one machine. Nothing of it is done, not
 even the commits sent, before the call is found to be one that machine plays: its device's role
 (`refused: pc may only view: …` for a viewer), its words, its workspace that launch's. The user's
 answer comes back as an `approval` delivery, as any held call of another machine's, and is done for
@@ -2297,16 +2287,10 @@ on a real phone, by hand, and reported.
   could read a key a client keeps in an unlocked keyring. A device key read that way can sign what
   its role allows. Roles bound what a device may do; a phone that asks for its unlock before a base
   answer comes later.
-- **Replaced by the rule (#1517)** ([Machines are one](#machines-are-one)): no signed switch to Full
-  and no twelve hours: Full follows the tree across machines. What stays true: code run in Full can
-  sign what this device's role allows. Kept until the code follows.
-
-  **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
+- **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
   nothing (`docs/tools.md`, "In Full, a run is the user's own"): it reaches the keyring, and in it
   the `Flottille: device` key that signs the user's requests to every machine, and Flottille's
-  state folder. Code it runs can sign what this device's role allows, a switch to Full among
-  them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
-  do not hold against code run in Full, which can sign a new one at any time.
+  state folder. Code it runs can sign what this device's role allows.
 - **Configuration is synced for About you, the settings a machine often overrides, the guidance and
   the rest of "Shared, personal" only** ("Settings for all machines"): a project is registered by
   hand on each machine.
@@ -2322,17 +2306,12 @@ on a real phone, by hand, and reported.
 give another machine a rule of its own, each kept until the code follows: a child of another
 machine without a parent and what is refused it (#1274's depth at every open, #1275's child
 counted as a session an agent started and session that cannot be detached, #1304's refusals and
-depth); the hollow stand-in (#1250's leave that the writer's end does not take, a led session asking leave to
-write to its pilot, a held call's `<caller>@<key>`, a stand-in's folder that does not exist;
+depth); the hollow stand-in (#1250's leave that the writer's end does not take, a held call's `<caller>@<key>`, a stand-in's folder that does not exist;
 #1263's reach to one machine only and stand-ins kept by an unread member list; #1361's cap of a
-pilot); the signed switch to Full and its 12 hours (#1250's switch for a call; the list after
-"The hub's hello is signed": a launch judged there, child as led, Full only with the switch, the
-switch, its root and its tree; and, as built, the kept switch a launch sends, Full "with a switch it
-verified", the user's switch kept by the caller's machine); the closed list of calls a caller may
+pilot); the closed list of calls a caller may
 make, `review` for one call alone among them ("Across machines", #1279); #1272's led session whose
 pilot is a stand-in and a row under its pilot; the rows of another machine's launches (a reported
-child that stays under its pilot, rows of the tree that nothing offers to end, #1280); #1278's
-removal held in Full when it would lose what the launcher's machine still has; and #1441's phone
+child that stays under its pilot, rows of the tree that nothing offers to end, #1280); and #1441's phone
 row of a session led from another machine.
 
 - **Settings for all machines are sealed to the machines' own keys** (#1330): each machine's
@@ -2560,12 +2539,6 @@ row of a session led from another machine.
   live sessions that machine listed, an untitled one by the first line its list gives it. The
   name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
   a follow-up.
-- **A led session writing to its pilot on another machine** is asked the leave as any other pair
-  (#1250): the receiving machine does not stand its caller in as started by that pilot.
-- **The user's signed switch to Full counts for a call as for a launch** (#1250): checked against
-  the machine that sends it and the tree that machine names. The receiving machine cannot tell
-  which tree the caller belongs to; a machine that holds a switch could name its tree for another
-  of its agents, for 12 hours at most, as it already could for a launch.
 - **A machine of before refuses a call of another session** with the link's own refusal of a
   message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
 - **A held call of a caller of another machine is that machine's user's request** (#1250), as a
@@ -2695,21 +2668,8 @@ row of a session led from another machine.
 - The project must be registered by hand on the other machine, under the same name.
 - A launch on another machine is judged by the receiving machine's gate, `child` as `led`; a child
   launch on the same machine stays unjudged.
-- A session on another machine is in Full only with the user's signed switch to Full of the
-  launcher's tree; otherwise Auto.
-- That signed switch is the `agent.mode` request a device signed, kept whole by the caller's
-  machine while the tree stays in Full, checked by the receiving machine for its signature, its
-  signer's role, the caller's machine, the tree and Full, and its time: it counts for **12 hours**
-  from when it was signed (one night's work), by the receiving machine's clock; past that, the
-  launch starts in Auto, and the user switches the tree to Full again. Its nonce is not checked: it
-  goes with every launch of those hours.
-- The switch is kept on the tree's root and may name any agent of the tree (the user switched it
-  from a child): the launch names the tree by that agent, which the receiving machine checks the
-  switch against.
-- The tree a launch names is the caller's machine's word: a machine holding the user's switch of
-  one tree to Full may name that tree for a launch of any of its agents within those 12 hours, and
-  that launch starts in Full. Accepted as a limit: the switch is the user's, for that machine, and
-  that machine runs the user's agents already.
+- A session on another machine takes the launcher's tree mode, Full included, with no switch
+  signed and no time limit (#1512): a runner is the user.
 - A launch held for the user on the receiving machine makes its agent and its workspace there once
   its code came, the agent sent nothing and the setup waiting until the user allows it; the code
   of a launch is taken when the gate accepted it or held it for the user, never when it refused it.
@@ -3145,13 +3105,17 @@ row of a session led from another machine.
   about submodules and remotes, not a file of Flottille's; and `fetch.fsckObjects` and
   `transfer.fsckObjects`: an object git finds malformed fetches nothing.
 - The snapshot's ref on the sending side is removed once the travel ends, placed or failed; the
-  incoming refs on the receiving side once its workspace is made, or its making failed. A launch
+  incoming refs on the receiving side once its making failed, or once the workspace made for the
+  launch is removed: until then the snapshot tells what was laid from work of the workspace's own,
+  and a snapshot git no longer has makes every change of it a loss. A launch
   whose code never came whole (the sender gone mid-way) is forgotten an hour after it was asked,
   with its incoming refs, when its machine next asks a launch; and a machine may leave 4 launches
   at most waiting for their code, its next refused until they are placed or forgotten.
 - The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
   no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
-  have is untracked there, even one the sender had staged.
+  have is untracked there, even one the sender had staged. So a change staged there since is the
+  workspace's own, a loss, even when the file was put back as laid; and a copy forced away for what
+  was laid is read again right before its removal, which a change written since refuses.
 - Every git of a launch runs with `GIT_NO_LAZY_FETCH=1`, and a partial clone
   (`extensions.partialClone`, or a remote with `promisor = true`) is refused on either side: what
   it lacks is on its remote, and a bundle of it would be incomplete.
@@ -3223,7 +3187,7 @@ row of a session led from another machine.
   `base` and `project` are refused with it, since the place is a copy of the caller's. It then
   sends the `launch` machine message (the launch's name, the caller and the root of its tree, the
   kind, the project, the title, the brief, the provider, model, effort and role, the mode, the
-  kept switch to Full, the caller's branch and repositories, each repository's root commits and
+  caller's branch and repositories, each repository's root commits and
   remote URL without credentials, and the project's settings that travel), and the code of the
   caller's place
   under the launch's name, and answers with the agent started there or the request waiting there.
@@ -3231,7 +3195,7 @@ row of a session led from another machine.
   it runs agents itself, recognises the project by its repositories or makes it (`travelled.rs`,
   #1188), and checks the provider signed in
   there, the brief's length (the judge's 8,000 characters) and, for a child, a free slot of its own
-  cap. Its gate then judges it: Full (with a switch it verified) accepts it; Auto asks its judge,
+  cap. Its gate then judges it: Full accepts it; Auto asks its judge,
   with the words and the brief whole, nothing of the caller's conversation (which is on the other
   machine), and holds what the judge does not allow, or everything when no judge is chosen; Ask
   holds it. A launch held makes its agent and its workspace once the code came, and a request for
@@ -3270,13 +3234,6 @@ row of a session led from another machine.
   is offline since 22:14: agent … cannot be reached now. You will be woken by what comes back
   from it.`). The sweep drops a message kept 30 days, with a `remote.delivery_dropped` event, an
   entry of kind `dropped` in the inbox.
-- The user's switch to Full is kept by the caller's machine when `agent.mode {mode: full}` came
-  from another machine's client, signed by a device: the request whole, as it was signed. Any
-  other switch of that tree's mode forgets it. The receiving machine takes it only signed by a
-  member that may switch a mode (a runner or a controller), for the caller's machine, that tree
-  and Full; neither its time nor its nonce is checked, since it lasts as long as the tree stays in
-  Full. A switch made in the window or the command line of the caller's own machine is signed by
-  no device: a launch from such a tree starts in Auto.
 - A child on another machine counts in its parent's project cap on the parent's machine from its
   launch for as long as its parent lives, until its report or failure comes back or its parent
   stops it (the `out` launch is then `ended`); in the receiving machine's cap from its launch
@@ -3288,8 +3245,10 @@ row of a session led from another machine.
   what that machine delivered here: `running` once launched until its first delivery, `waiting`
   after a turn's end, a question or a request, until the next delivery says otherwise (a message
   the pilot sends does not make it `running` again here). An ended launch leaves its pilot's
-  rows unless its last delivery was a report: a reported child stays, `reported`, under its pilot
-  while the pilot lives. A session handed to the user is not shown under the agent that started it.
+  rows unless its last delivery was a report: a reported child is an ended child (#1520), in its
+  parent's `N ended` of the rail (of its Review, under a review's pilot), no row of the sidebar,
+  while its parent lives. A session handed to the user is not shown under the agent that started
+  it.
   The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
   whose caller ended: an old launch is never read again. A launch held for the user there is
   `needs you` from the moment it is held, drawn with the request's mark, until the user's answer
@@ -3297,8 +3256,10 @@ row of a session led from another machine.
   delivery; refused, it leaves its pilot's rows. While it is held, a list that says `idle` (a
   machine of before, which did not list a held launch as `needs you`) does not take it back.
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
-  those sessions, so a project's page, search, a session's page and the inbox do not list them,
-  and nothing offers to end them from here.
+  those sessions, so a project's page, search, a session's page and the inbox do not list them.
+  Their row's End session closes them as a session of another machine's list is closed (#1520):
+  the user's close goes to that machine, which stops it there, kept while that machine is off; the
+  launch leaves its pilot's rail and rows at once.
 - Those rows are always in the list, which is this machine's whatever page is shown (#1271).
 - Links through the hub (#1151): a link's packets travel in the control session as JSON lines, the
   packet in base64, not as binary WebSocket frames: the session is one JSON object a line since

@@ -1066,6 +1066,17 @@ pub fn definition(name: &str) -> Option<&'static Definition> {
         .or_else(|| (dynamic_of(name)?.definition)(name))
 }
 
+/// Every definition an extension gives, for the test that holds each to a client's rules: those
+/// declared, and one of a connection's tools, which are named at run time and share one schema.
+#[cfg(test)]
+pub fn definitions() -> Vec<&'static Definition> {
+    ALL.iter()
+        .flat_map(|extension| extension.tools)
+        .map(|tool| &tool.definition)
+        .chain([connections::sample()])
+        .collect()
+}
+
 /// Whether the tool is one an extension gives.
 pub fn gives(name: &str) -> bool {
     tool(name).is_some() || dynamic_of(name).is_some()

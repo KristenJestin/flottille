@@ -23,6 +23,8 @@ mod mcp;
 mod remote_asks;
 #[path = "../remote_child.rs"]
 mod remote_child;
+#[path = "../remote_close.rs"]
+mod remote_close;
 #[path = "../remote_code.rs"]
 mod remote_code;
 #[path = "../remote_deliveries.rs"]

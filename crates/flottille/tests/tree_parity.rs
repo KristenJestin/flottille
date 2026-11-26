@@ -715,7 +715,6 @@ fn pilot_stops_its_led_session() {
 }
 
 #[test]
-#[ignore = "#1277: a pilot's end does not end its led sessions on other machines"]
 fn pilot_ends_and_its_led_sessions_end() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -731,6 +730,15 @@ fn pilot_ends_and_its_led_sessions_end() {
             .call("agent.stop", json!({"agent": play.root}))
             .unwrap();
         soon(|| play.shown(&session)["state"] == "ended");
+        // The End confirmation whole, less what differs by nature: the session there works in a
+        // workspace of its own, a copy of the pilot's place, which here it does not
+        // (`workspace`), and is said with its machine (`machine`).
+        let mut ending = ending;
+        for session in ending["sessions"].as_array_mut().unwrap() {
+            let session = session.as_object_mut().unwrap();
+            session.remove("workspace");
+            session.remove("machine");
+        }
         vec![
             seen("pilot's end: agent.ending", ending.to_string()),
             seen("pilot's end: session", Play::end_of(play.there(), &session)),
@@ -822,7 +830,7 @@ fn unsubscribe_from_a_led_session() {
 // The children.
 
 #[test]
-#[ignore = "#1274: a child launched across is a root there: a root's tools, depth 0, no parent"]
+#[ignore = "#1512, next round: a child launched across has no parent there, its caller a stand-in"]
 fn child_tools_and_depth() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -854,7 +862,6 @@ fn child_does(steps: Value) -> impl Fn(Topology) -> Seen {
 }
 
 #[test]
-#[ignore = "#1274: the report of a child launched across lands in that machine's inbox: it is a root there"]
 fn child_reports() {
     parity(child_does(json!([report("The export tests are written.")])));
 }
@@ -877,7 +884,6 @@ fn child_goes_idle() {
 }
 
 #[test]
-#[ignore = "#1277: stopping a parent does not stop its children on other machines"]
 fn parent_stops_and_its_child_stops() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -916,7 +922,6 @@ fn handed_tells_nothing() {
 }
 
 #[test]
-#[ignore = "#1274: a child launched across is a root there, and starts a session"]
 fn a_child_starts_a_session() {
     parity(|topology| {
         let play = Play::new(
@@ -933,6 +938,209 @@ fn a_child_starts_a_session() {
             seen("child's launch: requests", play.requests().to_string()),
         ]
     });
+}
+
+// Machines are one (#1512): what one machine would do, the other does.
+
+/// A launch of `kind` by a root the user put in Full from this machine, with no switch signed
+/// from a device: the mode the launched session runs in, and what waits for the user.
+fn in_full(kind: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, "full", json!([]));
+        let (_, session) = play.started(kind);
+        play.idle(&session);
+        vec![
+            seen("full: mode", play.shown(&session)["gate_mode"].to_string()),
+            seen("full: requests", play.requests().to_string()),
+            seen("full: inbox", play.inbox()),
+        ]
+    }
+}
+
+#[test]
+fn full_follows_the_tree_to_a_child() {
+    parity(in_full("child"));
+}
+
+#[test]
+fn full_follows_the_tree_to_a_led_session() {
+    parity(in_full("led"));
+}
+
+#[test]
+fn full_follows_the_tree_to_a_handed_session() {
+    parity(in_full("handed"));
+}
+
+/// A session of `kind` whose first turn writes to the root that launched it, with
+/// `session_send`: what it is answered, whether the root got it, and what waits for the user.
+fn writes_to_its_launcher(kind: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            first_turn(json!([{"mcp": {"tool": "session_send", "arguments": {
+                "session": play.root, "text": "The export is half done."}}}])),
+        );
+        let (_, session) = play.started(kind);
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        soon(|| {
+            play.root_deliveries()
+                .iter()
+                .any(|delivery| delivery.contains("The export is half done."))
+        });
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("write back: its answer", list(play.tool_answers())),
+            seen("write back: reached the launcher", reached.to_string()),
+            seen("write back: requests", play.requests().to_string()),
+        ]
+    }
+}
+
+#[test]
+fn a_led_session_writes_to_its_launcher() {
+    parity(writes_to_its_launcher("led"));
+}
+
+#[test]
+fn a_handed_session_writes_to_its_launcher() {
+    parity(writes_to_its_launcher("handed"));
+}
+
+/// A led session whose launcher paused their following (fifty messages without the user, the
+/// last asking it to write back) writes to its launcher with `session_send`: refused as paused,
+/// and nothing reaches the launcher, on one machine as on two.
+#[test]
+fn a_paused_launcher_refuses_a_write_back_as_on_one_machine() {
+    parity(|topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            json!([{"when": "Write back now", "times": 1, "do": [{"mcp": {"tool": "session_send",
+                "arguments": {"session": play.root, "text": "The export is half done."}}}]}]),
+        );
+        let (_, session) = play.started("led");
+        play.idle(&session);
+        let texts = (1..50).map(|_| "Go on.").chain(["Write back now"]);
+        let sent: Vec<String> = texts
+            .map(|text| {
+                said(
+                    &play
+                        .mcp
+                        .call("session_send", json!({"session": session, "text": text})),
+                )
+            })
+            .filter(|said| said.starts_with("error: "))
+            .collect();
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        a_while();
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("paused: the launcher's messages refused", list(sent)),
+            seen("paused: its answer", list(play.tool_answers())),
+            seen("paused: reached the launcher", reached.to_string()),
+            seen("paused: requests", play.requests().to_string()),
+        ]
+    });
+}
+
+/// A led session the user detached writes to its former launcher with `session_send`: it is the
+/// user's alone, so it needs a leave there as any other session does, on one machine as on two.
+#[test]
+fn a_detached_session_across_needs_a_leave_to_write_to_its_former_launcher() {
+    parity(|topology| {
+        let play = Play::new(topology, "auto", json!([]));
+        script(
+            play.there(),
+            json!([{"when": "Write back now", "times": 1, "do": [{"mcp": {"tool": "session_send",
+                "arguments": {"session": play.root, "text": "The export is half done."}}}]}]),
+        );
+        let (_, session) = play.started("led");
+        play.idle(&session);
+        play.there()
+            .user
+            .call("agent.detach", json!({"agent": session}))
+            .unwrap();
+        soon(|| !play.root_deliveries().is_empty());
+        play.there()
+            .user
+            .call(
+                "agent.send",
+                json!({"agent": session, "message": "Write back now"}),
+            )
+            .unwrap();
+        soon(|| !play.tool_answers().is_empty());
+        play.idle(&session);
+        a_while();
+        let reached = play
+            .root_deliveries()
+            .iter()
+            .any(|delivery| delivery.contains("The export is half done."));
+        vec![
+            seen("detached: its answer", list(play.tool_answers())),
+            seen("detached: reached the launcher", reached.to_string()),
+            seen("detached: requests", play.requests().to_string()),
+        ]
+    });
+}
+
+/// The root, in `mode`, with uncommitted work in its place, launches a led session in a workspace
+/// of its own, which ends; then removes that workspace: what it is answered, and what waits for
+/// the user. Here the session is given a new workspace; there it works in the copy of the root's
+/// place made for it, uncommitted work included, which is the root's and still on its machine.
+fn removes_the_workspace_of_its_led_session(mode: &'static str) -> impl Fn(Topology) -> Seen {
+    move |topology| {
+        let play = Play::new(topology, mode, json!([]));
+        let mut args = json!({"kind": "led", "title": TITLE, "brief": BRIEF});
+        match topology {
+            Topology::Here => args["new_workspace"] = "feat-export".into(),
+            Topology::Across => args["machine"] = "server".into(),
+        }
+        let answer = play.mcp.call("agent_launch", args);
+        assert!(!answer.error, "{}", answer.text);
+        let session = play.titled(TITLE);
+        play.idle(&session);
+        let workspace = play.shown(&session)["workspace"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no workspace: {:#}", play.shown(&session)))
+            .to_owned();
+        play.there()
+            .user
+            .call("agent.stop", json!({"agent": session}))
+            .unwrap();
+        soon(|| play.shown(&session)["state"] == "ended");
+        let mut args = json!({"action": "remove", "name": workspace});
+        if topology == Topology::Across {
+            args["machine"] = "server".into();
+        }
+        let answer = play.mcp.call("workspace", args);
+        a_while();
+        // Its branch there is the root's, copied; here the one its new workspace made.
+        let answer = said(&answer).replace("feat/export", "feat-export");
+        vec![
+            seen("removal: answer", answer),
+            seen("removal: requests", play.requests().to_string()),
+        ]
+    }
+}
+
+#[test]
+fn the_pilot_removes_the_workspace_of_its_led_session() {
+    parity(removes_the_workspace_of_its_led_session("auto"));
+}
+
+#[test]
+fn in_full_the_pilot_removes_the_workspace_of_its_led_session() {
+    parity(removes_the_workspace_of_its_led_session("full"));
 }
 
 #[test]

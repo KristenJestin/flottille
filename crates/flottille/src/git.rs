@@ -134,14 +134,27 @@ pub type ForgeHelpers = (String, Vec<(String, String)>);
 /// The settings `args` of `git config` lists, read at the daemon's start by its own git, confined:
 /// a git only root may change is not always found, and the one of the `PATH` may be a run's.
 pub(crate) fn start_read<S: AsRef<OsStr>>(args: &[S]) -> String {
+    start_output(args)
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// [`start_read`], None where git could not read them: it did not run, or it failed (`git config`
+/// exits with 1 where nothing matches, which is a read).
+pub(crate) fn start_listed<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
+    let output = start_output(args)?;
+    matches!(output.status.code(), Some(0 | 1))
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn start_output<S: AsRef<OsStr>>(args: &[S]) -> Option<std::process::Output> {
     let mut command = command_of(own(), Path::new("/"), args);
     crate::landlock::confined(&mut command);
     let mut command = command.into_std();
     command.stderr(Stdio::null());
     crate::children::spawn_std(&mut command)
         .and_then(std::process::Child::wait_with_output)
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-        .unwrap_or_default()
+        .ok()
 }
 
 /// The entries of `git config --null --get-regexp`, each its key and its value.

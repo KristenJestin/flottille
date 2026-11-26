@@ -668,7 +668,7 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             let work = crate::projects::Projects::open(paths)
                 .map(|projects| crate::daemon::work_folders(&projects, None))
                 .unwrap_or_default();
-            crate::pushed::find(false, &work);
+            crate::pushed::find(false, &work, None);
             let mut sandbox = crate::mounts::sandbox();
             sandbox["probed"] = "no daemon running: probed by doctor".into();
             Ok(sandbox)

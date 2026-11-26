@@ -15,7 +15,8 @@ use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::state::AgentState;
 use flottille_window::tree::{
-    blocked_id, blocked_who_id, session_id, session_key_id, session_place_id, session_waits_id,
+    blocked_id, blocked_who_id, session_id, session_key_beside_id, session_place_id,
+    session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -642,7 +643,7 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
     settle(cx);
 
     // The group changes where the row sits, not what it says: the subject on its first line, the
-    // key as its chip, its project in its meta as the group's rows say it.
+    // key as the mono word on its second, its project in its meta as the group's rows say it.
     let (first, scope) = shell.read_with(cx, |s, cx| {
         let row = s.session(&id).unwrap().read(cx);
         (row.first_line(), row.scope().map(str::to_owned))
@@ -652,7 +653,7 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
     let key = cx.update(|window, _| {
         window
             .within(IN_GROUP)
-            .try_find(session_key_id(&id))
+            .try_find(session_key_beside_id(&id))
             .and_then(|found| found.label().map(str::to_owned))
     });
     assert_eq!(key.as_deref(), Some("#5"));

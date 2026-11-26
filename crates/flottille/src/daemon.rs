@@ -172,13 +172,20 @@ pub fn run(paths: &Paths) -> Result<()> {
     let projects = Projects::open(paths)?;
     // Before anything runs: what a push reads, which every run has read-only, never a folder runs
     // work in.
-    crate::pushed::find(true, &work_folders(&projects, Some(&store)));
+    crate::pushed::find(
+        true,
+        &work_folders(&projects, Some(&store)),
+        Some(&paths.runtime.join("git-settings")),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let served = runtime.block_on(serve(paths, store, projects, machine_key));
     // Everything it held is let go before another daemon takes its place.
     drop(runtime);
+    // What the user's git settings held, which may say a token (`http.extraHeader`): nothing a
+    // daemon that no longer runs needs, the next one copies them again.
+    let _ = std::fs::remove_dir_all(paths.runtime.join("git-settings"));
     if served.is_ok() && crate::updates::restart_asked() {
         drop(_store_lock);
         drop(_lock);
@@ -1338,6 +1345,14 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         "project.list" => (
             match projects::list(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        // The window's own state of this machine, kept beside the sidebar's: no project file.
+        method if matches!(method, "project.hide" | "project.unhide" | "project.hidden") => (
+            match crate::drafts::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },

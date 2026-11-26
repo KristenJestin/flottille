@@ -184,7 +184,10 @@ impl Target {
     }
 }
 
-fn corpus(snapshot: &Snapshot) -> Vec<Target> {
+/// What can be found: the sessions, and the projects and workspaces this machine does not hide
+/// (a hidden project is not offered; its sessions can still be found, which is how a question
+/// waiting for the user is reached).
+fn corpus(snapshot: &Snapshot, hidden: &[String]) -> Vec<Target> {
     let mut found: Vec<Target> = snapshot
         .sessions
         .iter()
@@ -197,7 +200,11 @@ fn corpus(snapshot: &Snapshot) -> Vec<Target> {
             active_at: session.active_at,
         })
         .collect();
-    for project in &snapshot.projects {
+    for project in snapshot
+        .projects
+        .iter()
+        .filter(|p| !hidden.contains(&p.name))
+    {
         found.push(Target::Project {
             name: project.name.clone(),
         });
@@ -441,11 +448,16 @@ impl Switcher {
 
     /// The daemon's last read, when it changed what can be found. While it is open the results
     /// keep their places, under the pointer and the mark: only what they say is read again.
-    pub fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
-        let projects: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+    pub fn set_snapshot(&mut self, snapshot: &Snapshot, hidden: &[String], cx: &mut Context<Self>) {
+        let projects: Vec<String> = snapshot
+            .projects
+            .iter()
+            .map(|p| p.name.clone())
+            .filter(|name| !hidden.contains(name))
+            .collect();
         self.projects = projects;
         self.actions = actions(&self.projects, &self.features);
-        let corpus = corpus(snapshot);
+        let corpus = corpus(snapshot, hidden);
         if self.corpus != corpus {
             self.corpus = corpus;
             if self.open {

@@ -20,6 +20,10 @@ mod changes_command;
 mod chat;
 mod children;
 mod claude;
+/// The rules the unit tests of the tool lists share with the integration tests.
+#[cfg(test)]
+#[path = "../tests/common/claude_drops.rs"]
+mod claude_drops;
 mod claude_import;
 mod client;
 mod codex;

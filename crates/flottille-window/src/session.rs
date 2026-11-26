@@ -27,6 +27,7 @@ use std::time::Duration;
 use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
+use gpui_design_system::typography::BODY;
 use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
     Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
@@ -65,6 +66,7 @@ use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
+use crate::loading::{ConversationLoading, Opening};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
@@ -1499,6 +1501,13 @@ impl SessionPage {
         cx.notify();
     }
 
+    /// The first page of the shown conversation, which could not be read, is asked again.
+    pub fn read_again(&mut self, cx: &mut Context<Self>) {
+        self.conversation.update(cx, |view, cx| view.read_again(cx));
+        self.relink();
+        cx.notify();
+    }
+
     /// How many pages of the shown conversation are asked for.
     pub fn pages(&self) -> usize {
         self.pages
@@ -1669,10 +1678,14 @@ impl SessionPage {
                 self.fetch_pictures(cx);
             }
             SessionUpdate::HistoryFailed(why) => {
-                // The first read is the skeleton's; only a page asked for is told.
-                if self.pages > 1 {
-                    self.conversation
-                        .update(cx, |view, cx| view.load_failed(why, cx));
+                // A page asked for says why at its line; the first read, in place of the rows.
+                match self.pages > 1 {
+                    true => self
+                        .conversation
+                        .update(cx, |view, cx| view.load_failed(why, cx)),
+                    false => self
+                        .conversation
+                        .update(cx, |view, cx| view.unread(why, cx)),
                 }
             }
             // One row added or drawn again: nothing else is looked at.
@@ -3025,6 +3038,8 @@ pub struct ConversationView {
     /// The user's messages recorded while one sent from here waits for the daemon's answer: not
     /// drawn until it says which is that one, which then becomes it in place.
     held: HashSet<usize>,
+    /// What it shows until its first page has arrived, over the list.
+    loading: Entity<ConversationLoading>,
     renders: usize,
 }
 
@@ -3127,6 +3142,7 @@ impl ConversationView {
     ) -> Self {
         let list = Self::list();
         let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let loading = cx.new(|cx| ConversationLoading::new(id, page.clone(), cx));
         let mut model = Conversation::new(me, parent);
         model.set_project(project);
         let this = Self {
@@ -3151,6 +3167,7 @@ impl ConversationView {
             pending: Vec::new(),
             in_place: HashMap::new(),
             held: HashSet::new(),
+            loading,
             renders: 0,
         };
         this.watch(cx);
@@ -3663,6 +3680,26 @@ impl ConversationView {
         Some(again)
     }
 
+    /// Whether its first page has arrived.
+    pub fn is_read(&self, cx: &gpui_kit::App) -> bool {
+        *self.loading.read(cx).opening() == Opening::Read
+    }
+
+    /// Its first page could not be read, with why: it says so, unless a page arrived before.
+    pub(crate) fn unread(&mut self, why: String, cx: &mut Context<Self>) {
+        self.loading.update(cx, |loading, cx| {
+            if *loading.opening() != Opening::Read {
+                loading.set(Opening::Unread(why), cx);
+            }
+        });
+    }
+
+    /// Its first page is asked again.
+    pub(crate) fn read_again(&mut self, cx: &mut Context<Self>) {
+        self.loading
+            .update(cx, |loading, cx| loading.set(Opening::Waiting, cx));
+    }
+
     /// The page asked for did not come, with why.
     pub(crate) fn load_failed(&mut self, why: String, cx: &mut Context<Self>) {
         if self.load == Load::Idle || self.load == Load::Failed(why.clone()) {
@@ -3833,6 +3870,8 @@ impl ConversationView {
         // A page of earlier events keeps the user where they were reading.
         let anchor = (!read.follow).then(|| self.anchor()).flatten();
         let had_head = self.head() == 1;
+        self.loading
+            .update(cx, |loading, cx| loading.set(Opening::Read, cx));
         self.model = self.model.restarted();
         self.model.place_approvals(read.placed);
         for event in read.events {
@@ -4493,25 +4532,39 @@ impl Render for ConversationView {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
         let id = SharedString::from(format!("conversation-{}", self.id));
         if self.rows.is_empty() && !self.earlier && self.pending.is_empty() {
+            // Nothing was said only once the history says so: until then it is being read.
+            let read = self.is_read(cx);
+            let empty = fade(
+                SharedString::from(format!("conversation-empty-fade-{}", self.id)),
+                read,
+                PANEL,
+                window,
+                cx,
+            );
             return div()
                 .id(id)
                 .size_full()
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "conversation-empty-{}",
-                            self.id
-                        )))
-                        .max_w(px(780.))
-                        .w_full()
-                        .mx_auto()
-                        .px(if narrow { space::LG } else { space::XXL })
-                        .pt(if narrow { space::XL } else { space::XXL })
-                        .text_color(p.faint)
-                        .aria_label("Nothing said yet.")
-                        .child("Nothing said yet.")
-                        .test_support(),
-                )
+                .relative()
+                .when(read || empty > 0.0, |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "conversation-empty-{}",
+                                self.id
+                            )))
+                            .max_w(px(780.))
+                            .w_full()
+                            .mx_auto()
+                            .px(if narrow { space::LG } else { space::XXL })
+                            .pt(if narrow { space::XL } else { space::XXL })
+                            .text_color(p.faint)
+                            .opacity(empty)
+                            .aria_label("Nothing said yet.")
+                            .child("Nothing said yet.")
+                            .test_support(),
+                    )
+                })
+                .child(self.loading.clone())
                 .into_any_element();
         }
         div()
@@ -4526,6 +4579,7 @@ impl Render for ConversationView {
                 .size_full(),
             )
             .child(self.to_end.clone())
+            .child(self.loading.clone())
             .test_support()
             .into_any_element()
     }
@@ -7719,6 +7773,9 @@ pub struct SessionRail {
     /// The sessions and children started on other machines the rail has drawn: one that is gone
     /// from the tree's launches folds away with its last words.
     remote_seen: HashMap<String, crate::model::RemoteAgent>,
+    /// The children started on other machines that ended with their report, as the rail last
+    /// read them: each is an ended child of its parent, in its "N ended" (#1520).
+    remote_ended: Vec<crate::model::RemoteAgent>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -7811,6 +7868,7 @@ impl SessionRail {
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             remote_seen: HashMap::new(),
+            remote_ended: Vec::new(),
             menu,
             linked: false,
             removable,
@@ -8007,6 +8065,12 @@ impl SessionRail {
                 ended: a.ended,
                 pilot: a.extensions["review"]["kind"] == "pilot",
             })
+            .chain(self.remote_ended.iter().map(|remote| Node {
+                id: &remote.key,
+                parent: Some(&remote.caller),
+                ended: true,
+                pilot: false,
+            }))
             .collect();
         rail_rows(&nodes, open)
     }
@@ -8279,6 +8343,19 @@ impl Render for SessionRail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
+        // The sessions and children this tree started on other machines. A child among them that
+        // reported is an ended child of its parent, as one of this machine.
+        let remote = self
+            .page
+            .upgrade()
+            .map(|page| page.read(cx).remote(cx))
+            .unwrap_or_default();
+        let ended_remote: Vec<crate::model::RemoteAgent> = remote
+            .iter()
+            .filter(|found| found.ended && self.agents.iter().any(|a| a.id == found.caller))
+            .cloned()
+            .collect();
+        self.remote_ended = ended_remote;
         // A folding "ended" row still has its children until the fold ends.
         let now = cx.background_executor().now();
         let open_now = self.open_keys();
@@ -8391,6 +8468,22 @@ impl Render for SessionRail {
                 (agent.id.clone(), fade(id, on, PANEL, window, cx))
             })
             .collect();
+        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
+        // A child of another machine among the ended, drawn at its depth under its parent.
+        let ended_remote_row = |id: &str, window: &mut Window, cx: &mut App| {
+            let found = self.remote_ended.iter().find(|found| found.key == id)?;
+            let depth = self
+                .agents
+                .iter()
+                .find(|a| a.id == found.caller)
+                .map_or(1, |a| a.depth + 1);
+            Some(
+                div()
+                    .pl(space::LG * depth as f32)
+                    .child(remote_row(found, true, shell.clone(), window, cx))
+                    .into_any_element(),
+            )
+        };
         let rail = cx.entity().downgrade();
         // `fold` is `Some((open, turned))` on a review's row, which folds what is under it.
         let agent_row = |agent: &RailAgent,
@@ -8761,9 +8854,12 @@ impl Render for SessionRail {
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
-                    rows.extend(self.agents.iter().find(|a| a.id == id).map(|agent| {
-                        agent_row(agent, &lines_of(&id), None, window, cx).into_any_element()
-                    }));
+                    rows.extend(match self.agents.iter().find(|a| a.id == id) {
+                        Some(agent) => Some(
+                            agent_row(agent, &lines_of(&id), None, window, cx).into_any_element(),
+                        ),
+                        None => ended_remote_row(&id, window, cx),
+                    });
                 }
                 RailRow::Ended {
                     parent,
@@ -8789,13 +8885,13 @@ impl Render for SessionRail {
                         .by_ref()
                         .take(count)
                         .filter_map(|row| match row {
-                            RailRow::Agent(id) => {
-                                let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(
+                            RailRow::Agent(id) => match self.agents.iter().find(|a| a.id == id) {
+                                Some(agent) => Some(
                                     agent_row(agent, &lines_of(&id), None, window, cx)
                                         .into_any_element(),
-                                )
-                            }
+                                ),
+                                None => ended_remote_row(&id, window, cx),
+                            },
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
                         .collect();
@@ -8843,12 +8939,15 @@ impl Render for SessionRail {
                         .take(count)
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
-                                let agent = self.agents.iter().find(|a| a.id == id)?;
                                 last = id.clone();
-                                Some(
-                                    agent_row(agent, &lines_of(&id), None, window, cx)
-                                        .into_any_element(),
-                                )
+                                match self.agents.iter().find(|a| a.id == id) {
+                                    Some(agent) => Some(
+                                        agent_row(agent, &lines_of(&id), None, window, cx)
+                                            .into_any_element(),
+                                    ),
+                                    // An ended child of another machine, of the pilot.
+                                    None => ended_remote_row(&id, window, cx),
+                                }
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
@@ -8897,21 +8996,18 @@ impl Render for SessionRail {
                 }
             }
         }
-        // The sessions and children this tree started on other machines: a row each, with its
-        // machine's icon. One that is gone folds away with its words.
-        let remote = self
-            .page
-            .upgrade()
-            .map(|page| page.read(cx).remote(cx))
-            .unwrap_or_default();
-        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
-        for found in &remote {
-            self.remote_seen.insert(found.key.clone(), found.clone());
+        // The live sessions and children this tree started on other machines: a row each, with
+        // its machine's icon. One that is gone, or ended among its parent's, folds away with its
+        // words.
+        let live: Vec<&crate::model::RemoteAgent> =
+            remote.iter().filter(|found| !found.ended).collect();
+        for found in &live {
+            self.remote_seen.insert(found.key.clone(), (*found).clone());
         }
         let mut seen: Vec<_> = self.remote_seen.values().cloned().collect();
         seen.sort_by(|a, b| a.key.cmp(&b.key));
         for found in seen {
-            let here = remote.iter().any(|now| now.key == found.key);
+            let here = live.iter().any(|now| now.key == found.key);
             rows.push(remote_row(&found, here, shell.clone(), window, cx));
         }
         let agents = div()
@@ -9030,7 +9126,7 @@ impl Render for SessionRail {
                             .flex()
                             .items_center()
                             .gap(space::SM)
-                            .text_size(px(13.))
+                            .text_size(px(REPOSITORY_SIZE))
                             .medium()
                             .child(tipped(
                                 div()
@@ -9090,7 +9186,7 @@ impl Render for SessionRail {
                                     div()
                                         .id(ElementId::Name(format!("rail-status-{name}").into()))
                                         .pl(space::XL)
-                                        .mono(11.5)
+                                        .mono(STATUS_SIZE)
                                         .text_color(p.faint)
                                         .overflow_hidden()
                                         .whitespace_nowrap()
@@ -9320,6 +9416,29 @@ impl Render for SessionRail {
         {
             facts.push(("From", place.bases.join(", ")));
         }
+        // What the window knows of the section before the daemon answers: its repositories and
+        // the base they started from, and whether the session is about a ticket.
+        let (skeleton_repositories, skeleton_ticket, skeleton_from) = match self.page.upgrade() {
+            Some(page) => {
+                let page = page.read(cx);
+                let ticket = page.subject().and_then(ticket_key).is_some();
+                let (repositories, from) = page.shell().upgrade().map_or((0, false), |shell| {
+                    let snapshot = shell.read(cx).snapshot();
+                    match &self.workspace {
+                        Some(name) => snapshot
+                            .workspace(&self.project, name)
+                            .map_or((0, false), |w| (w.repositories.len(), !w.bases.is_empty())),
+                        None => snapshot
+                            .projects
+                            .iter()
+                            .find(|p| p.name == self.project)
+                            .map_or((0, false), |p| (p.repositories.len(), false)),
+                    }
+                });
+                (repositories, ticket, from)
+            }
+            None => (0, false, false),
+        };
         let workspace = div()
             .id("rail-workspace")
             .flex()
@@ -9337,7 +9456,7 @@ impl Render for SessionRail {
             .child(awaiting(
                 "rail-workspace-wait",
                 !self.place_known,
-                workspace_skeleton(),
+                workspace_skeleton(skeleton_repositories, skeleton_ticket, skeleton_from),
                 div()
                     .id("rail-workspace-read")
                     .test_support()
@@ -9537,21 +9656,72 @@ fn skeleton_line(id: String, value: f32) -> impl IntoElement {
                 .w(px(FACT_ICON))
                 .h(px(FACT_ICON)),
         )
-        .child(Skeleton::new(part("label")).w(px(72.)).h(px(10.)))
+        .child(
+            Skeleton::new(part("label"))
+                .w(px(72.))
+                .h(px(FACT_LABEL_SIZE)),
+        )
         .child(div().flex_1())
-        .child(Skeleton::new(part("value")).w(px(value)).h(px(10.)))
+        .child(Skeleton::new(part("value")).w(px(value)).h(px(FACT_SIZE)))
         .test_support()
 }
 
-/// The Workspace section before the daemon first answered: a line for each of its facts.
-fn workspace_skeleton() -> impl IntoElement {
+/// The size of a fact's label.
+const FACT_LABEL_SIZE: f32 = 12.5;
+
+/// The size of a repository's name in the Workspace section, and of its status under it.
+const REPOSITORY_SIZE: f32 = 13.;
+const STATUS_SIZE: f32 = 11.5;
+
+/// The Workspace section before the daemon first answered, shaped as what replaces it: the
+/// ticket's line when the session is about one, then each repository's, its name over its status,
+/// one when the window does not know them yet, then the base they started from when they have
+/// one. Each bar is of its text's size, in a line of its height.
+fn workspace_skeleton(repositories: usize, ticket: bool, from: bool) -> impl IntoElement {
+    let bar = |id: String, width: f32, size: f32| {
+        Skeleton::new(ElementId::Name(id.into()))
+            .w(px(width))
+            .h(px(size))
+    };
     div()
         .id("rail-workspace-skeleton")
         .flex()
         .flex_col()
-        .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
-        .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
-        .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
+        .children(ticket.then(|| skeleton_line("rail-skeleton-ticket".to_owned(), 150.)))
+        .children((0..repositories.max(1)).map(|n| {
+            let id = |part: &str| format!("rail-skeleton-repository-{n}-{part}");
+            div()
+                .id(ElementId::Name(id("line").into()))
+                .flex()
+                .flex_col()
+                .px(space::XS)
+                .py(space::XS)
+                .child(
+                    div()
+                        .h(px(BODY * 1.5))
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(bar(id("icon"), FACT_ICON, FACT_ICON))
+                        .child(bar(id("name"), 96., REPOSITORY_SIZE)),
+                )
+                .child(
+                    div()
+                        .mt(space::XS)
+                        .pl(space::XL)
+                        .h(px((STATUS_SIZE * 1.4).round()))
+                        .flex()
+                        .items_center()
+                        .child(bar(id("status"), 140., STATUS_SIZE)),
+                )
+                .test_support()
+        }))
+        // The facts sit under the lines after a space of their own, whether there is one or not.
+        .child(
+            div()
+                .pt(space::SM)
+                .children(from.then(|| skeleton_line("rail-skeleton-from".to_owned(), 60.))),
+        )
         .test_support()
 }
 
@@ -9581,7 +9751,7 @@ fn fact_line(
         .flex()
         .items_center()
         .gap(space::SM)
-        .text_size(px(12.5))
+        .text_size(px(FACT_LABEL_SIZE))
         .child(slot)
         .child(
             div()

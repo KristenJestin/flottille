@@ -1084,6 +1084,16 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_of_the_door_is_one_a_claude_client_offers() {
+        let tools: Vec<Value> = TOOLS
+            .iter()
+            .map(|definition| serde_json::to_value(tool_of(definition, false)).unwrap())
+            .collect();
+        let dropped = crate::claude_drops::dropped(&tools);
+        assert!(dropped.is_empty(), "{dropped:#?}");
+    }
+
+    #[test]
     fn a_page_of_events_stays_under_the_result_limit_and_says_where_to_go_on() {
         let events: Vec<_> = (1..=EVENTS_PAGE as u64)
             .map(|seq| flottille_core::protocol::Event {
