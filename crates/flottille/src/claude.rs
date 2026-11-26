@@ -198,8 +198,8 @@ fn command() -> Result<Program, String> {
             "`claude` is not on PATH: install Claude Code and sign in with it first".into(),
         );
     }
-    let program =
-        std::env::current_exe().map_err(|e| format!("cannot find Flottille itself: {e}"))?;
+    let program = crate::program::own(crate::program::Started::Here)
+        .map_err(|e| format!("cannot find Flottille itself: {e}"))?;
     Ok((program, vec!["bridge".into(), "claude".into()]))
 }
 

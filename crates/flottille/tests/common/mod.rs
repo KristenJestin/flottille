@@ -888,6 +888,40 @@ impl User {
         command_for(program, self.dir.path(), &self.env, args)
     }
 
+    /// Starts this user's daemon from a file of its own, then replaces that file while it runs,
+    /// as an update does: the daemon's `/proc/<pid>/exe` then names `… (deleted)`. Hard links in
+    /// the folder of the built binary, so nothing of its gigabyte is copied. The folder is kept as long as the
+    /// returned guard.
+    pub fn daemon_from_replaced_binary(&self) -> TempDir {
+        let built = Path::new(env!("CARGO_BIN_EXE_flottille"));
+        let folder = tempfile::Builder::new()
+            .prefix("flottille-replaced")
+            .tempdir_in(built.parent().unwrap())
+            .unwrap();
+        let installed = folder.path().join("flottille");
+        std::fs::hard_link(built, &installed).unwrap();
+        let output = self
+            .command_through(&installed, &["status"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The file it runs from is gone, and a build is at its path: a link to the same file, as
+        // a rename of a link onto itself would change nothing.
+        std::fs::remove_file(&installed).unwrap();
+        std::fs::hard_link(built, &installed).unwrap();
+        let pid = std::fs::read_to_string(self.path("runtime/flottille/daemon.lock")).unwrap();
+        let running = std::fs::read_link(format!("/proc/{}/exe", pid.trim())).unwrap();
+        assert_eq!(
+            running,
+            PathBuf::from(format!("{} (deleted)", installed.display()))
+        );
+        folder
+    }
+
     /// Connects to this user's daemon as a client that starts it when nobody listens (the
     /// command line's `connect_or_start`): `flottille status` starts it, then the socket is
     /// opened. Usable from any thread; once the user is dropped it fails and starts nothing.

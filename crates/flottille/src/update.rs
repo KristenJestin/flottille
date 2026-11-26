@@ -1,7 +1,7 @@
 //! `flottille update` (`docs/releases.md`): replaces this binary with the latest build of a
 //! channel, its SHA-256 sum checked first. Never while the daemon runs: it would go on from a
-//! file that is gone (`/proc/self/exe` then names `… (deleted)`), and its next start of an
-//! agent's process, which is this binary too, would fail.
+//! file that is gone (`/proc/self/exe` then names `… (deleted)`), on its old version, and so would
+//! what it starts from itself (`program::own`) until it restarts.
 //!
 //! The releases are read from GitHub's API with the user's own `curl` and unpacked with their
 //! own `tar`, both spawned without a shell, as git is.
