@@ -898,6 +898,45 @@ fn a_void_copy_is_dropped_only_at_a_member_s_word_and_of_its_time() {
     assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
 }
 
+/// A machine whose list is behind still counts the device inside a copy another machine
+/// dropped, and gives it again: the hub keeps the copy dropped, so that the two machines do not
+/// drop and give it again in turn. A newer value is kept as ever, and frees the name.
+#[test]
+fn a_dropped_copy_given_again_is_not_kept() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |at: u64, value: &[u8]| {
+        Sealed::seal("about.name", at, value, &[machine.public()], &machine).unwrap()
+    };
+    assert!(hub.share(seal(START_MS, b"Sam")).unwrap());
+    assert!(
+        hub.unshare(&machine.public(), "about.name", START_MS)
+            .unwrap()
+    );
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    // Given again, or an older copy: neither kept nor written, and so not told to anyone.
+    assert!(!hub.share(seal(START_MS, b"Sam")).unwrap());
+    assert!(!hub.share(seal(START_MS - 1, b"Old")).unwrap());
+    assert!(hub.shared().is_empty());
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    // The hub remembers it across a start.
+    drop(hub);
+    let mut hub = open(&folder, &time);
+    assert!(!hub.share(seal(START_MS, b"Sam")).unwrap());
+    assert!(hub.shared().is_empty());
+
+    // A newer value is kept, and clears what the hub remembered of the drop.
+    assert!(hub.share(seal(START_MS + 1, b"Alex")).unwrap());
+    assert_eq!(hub.shared()[0].at, START_MS + 1);
+    let file = std::fs::read_to_string(folder.join("hub.json")).unwrap();
+    assert!(!file.contains("dropped"), "{file}");
+}
+
 /// A viewer's machine may not drop a value of all machines, as it may not set one.
 #[test]
 fn a_viewer_s_machine_drops_no_copy() {
