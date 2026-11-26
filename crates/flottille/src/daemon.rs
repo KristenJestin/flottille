@@ -172,7 +172,11 @@ pub fn run(paths: &Paths) -> Result<()> {
     let projects = Projects::open(paths)?;
     // Before anything runs: what a push reads, which every run has read-only, never a folder runs
     // work in.
-    crate::pushed::find(true, &work_folders(&projects, Some(&store)));
+    crate::pushed::find(
+        true,
+        &work_folders(&projects, Some(&store)),
+        Some(&paths.runtime.join("git-settings")),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
