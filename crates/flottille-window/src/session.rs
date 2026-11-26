@@ -9024,7 +9024,7 @@ impl Render for SessionRail {
         };
         let about_shown =
             about_now.present && about_last.as_ref().is_some_and(|about| !said_above(about));
-        let about_content = match about_last {
+        let about_content = match about_last.clone() {
             Some(about) => {
                 let said = SharedString::from(match &about.title {
                     Some(title) => format!("{} {title}", about.key),
