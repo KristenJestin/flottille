@@ -474,6 +474,55 @@ fn in_full_a_removal_from_another_machine_is_not_done_when_work_came_after_its_c
     assert!(there.join("late.txt").exists());
 }
 
+/// The incoming refs of `server`'s repository: the snapshots it keeps.
+fn incoming(server: &Machine) -> String {
+    server.git(
+        &server.folder(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/flottille/incoming/",
+        ],
+    )
+}
+
+#[test]
+fn the_snapshot_is_kept_while_its_workspace_lives() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("full");
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    );
+    let session = id_in(done(&answer));
+    prompted(&server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    // The caller's uncommitted work, laid there.
+    assert!(there.join("new.txt").exists());
+
+    // Kept by a ref while the workspace lives: git's cleaning takes nothing of it.
+    assert_ne!(incoming(&server), "");
+    server.git(&server.folder(), &["gc", "--quiet", "--prune=now"]);
+    ended_there(&server, &session);
+
+    let answer = mcp.call(
+        "workspace",
+        json!({"action": "remove", "name": workspace, "machine": "server"}),
+    );
+
+    // What was laid is still told from work of its own: nothing to lose, done at once in Full.
+    let text = done(&answer);
+    assert!(!text.contains("request #"), "{text}");
+    eventually("the workspace removed there", || !there.exists());
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    // And its ref goes with it.
+    assert_eq!(incoming(&server), "");
+}
+
 #[test]
 fn a_removal_there_is_refused_for_another_workspace_a_handed_session_or_another_action() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
