@@ -552,6 +552,19 @@ fn a_shade_chosen_on_a_machine_stays_marked_when_all_machines_change(cx: &mut Te
 #[gpui_kit::test]
 fn colours_chosen_in_the_window_leave_the_shade_to_all_machines(cx: &mut TestAppContext) {
     let (_hub, pc, _server) = pc_and_server();
+    // An Omarchy desktop, whose theme the window follows first: Flottille's colours are a choice.
+    std::fs::write(pc.user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
+    let colours = gpui_design_system::omarchy::Environment {
+        os_release: pc.user.path("os-release"),
+        state_home: pc.user.path("state"),
+    }
+    .colors_path();
+    std::fs::create_dir_all(colours.parent().unwrap()).unwrap();
+    std::fs::write(
+        &colours,
+        "background = \"#0e1116\"\nforeground = \"#c9d1d9\"\naccent = \"#f0883e\"\n",
+    )
+    .unwrap();
     share(&pc, json!({"appearance.shade": "light"}));
     eventually("this machine is light", || {
         call(&pc, "appearance.show", json!({}))["shade"] == "light"
