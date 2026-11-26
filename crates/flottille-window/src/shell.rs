@@ -57,7 +57,7 @@ use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{Arranged, ArrangedGroup};
-use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar, node_key};
+use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -3520,16 +3520,6 @@ impl Shell {
                 .as_ref()
                 .map(|group| group.read(cx).is_open())
                 .or(self.kept.ended),
-            // Only the feet the user unfolded: a foot is folded until then.
-            blocked: self
-                .projects
-                .values()
-                .chain(self.machine_projects.values())
-                .chain(self.gone.values())
-                .map(|node| node.read(cx))
-                .filter(|node| node.blocked_open(cx))
-                .map(|node| (node.blocked_key(), true))
-                .collect(),
         }
     }
 
@@ -5770,21 +5760,6 @@ impl Shell {
                 cx,
             );
             let rows = nested(&live, &rows, cx);
-            let at_foot: Vec<&crate::model::Session> = snapshot
-                .level_blocked(&gone.name, true)
-                .into_iter()
-                .filter(|session| {
-                    machine.is_none_or(|machine| snapshot.machine_of(session) == machine)
-                })
-                .collect();
-            let at_foot = self.session_rows(
-                at_foot.iter().copied(),
-                &snapshot.homes,
-                sessions,
-                &mut marks,
-                now,
-                cx,
-            );
             let key = (gone.name.clone(), machine.map(str::to_owned));
             let node = self.gone.remove(&key).unwrap_or_else(|| {
                 let this = this.clone();
@@ -5799,18 +5774,12 @@ impl Shell {
                         .copied(),
                 }
                 .unwrap_or(true);
-                let unfolded = self
-                    .kept
-                    .blocked
-                    .get(&node_key(&name, machine, true))
-                    .copied()
-                    .unwrap_or(false);
                 let machine = machine.map(str::to_owned);
-                cx.new(|cx| ProjectNode::gone(name, machine, this, open, unfolded, cx))
+                cx.new(|cx| ProjectNode::gone(name, machine, this, open, cx))
             });
             let mark = AgentState::strongest_held(marks);
-            if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
-                node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
+            if !node.read(cx).holds(&rows, mark, cx) {
+                node.update(cx, |node, cx| node.set(rows, mark, cx));
             }
             // Beside the group of another machine's project of its name, the row says whose it is
             // (by machine, the sections do).
@@ -5880,19 +5849,6 @@ impl Shell {
                         cx,
                     );
                     let rows = nested(&live, &rows, cx);
-                    let at_foot: Vec<&crate::model::Session> = snapshot
-                        .level_blocked(&project.name, false)
-                        .into_iter()
-                        .filter(|session| snapshot.machine_of(session) == home.machine)
-                        .collect();
-                    let at_foot = self.session_rows(
-                        at_foot.iter().copied(),
-                        &snapshot.homes,
-                        &mut sessions,
-                        &mut marks,
-                        now,
-                        cx,
-                    );
                     let key = (project.name.clone(), home.machine.clone());
                     let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
                         let this = this.clone();
@@ -5905,17 +5861,11 @@ impl Shell {
                             .copied()
                             .unwrap_or(true);
                         let (name, machine) = key.clone();
-                        let unfolded = self
-                            .kept
-                            .blocked
-                            .get(&node_key(&name, Some(&machine), false))
-                            .copied()
-                            .unwrap_or(false);
-                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, unfolded, cx))
+                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, cx))
                     });
                     let mark = AgentState::strongest_held(marks);
-                    if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
-                        node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
+                    if !node.read(cx).holds(&rows, mark, cx) {
+                        node.update(cx, |node, cx| node.set(rows, mark, cx));
                     }
                     // Its commands run on the machine this was read from.
                     let commands =
@@ -5992,30 +5942,15 @@ impl Shell {
                     cx,
                 );
                 let rows = nested(&live, &rows, cx);
-                let at_foot = snapshot.level_blocked(&project.name, false);
-                let at_foot = self.session_rows(
-                    at_foot.iter().copied(),
-                    &snapshot.homes,
-                    &mut sessions,
-                    &mut marks,
-                    now,
-                    cx,
-                );
                 let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                     let name = project.name.clone();
                     let this = this.clone();
                     let open = self.kept.projects.get(&name).copied().unwrap_or(true);
-                    let unfolded = self
-                        .kept
-                        .blocked
-                        .get(&node_key(&name, None, false))
-                        .copied()
-                        .unwrap_or(false);
-                    cx.new(|cx| ProjectNode::new(name, None, this, open, unfolded, cx))
+                    cx.new(|cx| ProjectNode::new(name, None, this, open, cx))
                 });
                 let mark = AgentState::strongest_held(marks);
-                if !node.read(cx).holds(&rows, &at_foot, mark, cx) {
-                    node.update(cx, |node, cx| node.set(rows, at_foot, mark, cx));
+                if !node.read(cx).holds(&rows, mark, cx) {
+                    node.update(cx, |node, cx| node.set(rows, mark, cx));
                 }
                 if node.read(cx).commands() != project.commands {
                     node.update(cx, |node, cx| node.set_commands(project.commands, cx));

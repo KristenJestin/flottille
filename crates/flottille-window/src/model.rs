@@ -1496,32 +1496,23 @@ impl Snapshot {
         self.unconfigured.iter().any(|gone| gone.name == project)
     }
 
-    /// The live sessions of one row of `project` that wait on no one else: this machine's alone on
-    /// the row of the project with no settings file (`gone`), and the others' on the group of that
-    /// name, which has none of this machine's while this machine's is that row.
+    /// The live sessions of one row of `project`: this machine's alone on the row of the project
+    /// with no settings file (`gone`), and the others' on the group of that name, which has none
+    /// of this machine's while this machine's is that row. The ones that wait on someone else
+    /// come last, in the order the project has them: a blocked session stays a row of its
+    /// project, at its foot, and goes back to its place when the wait ends.
     pub fn level_sessions(&self, project: &str, gone: bool) -> Vec<&Session> {
-        self.level_of(project, gone)
-            .filter(|session| !self.blocked_apart(session))
-            .collect()
-    }
-
-    /// The sessions of the same level that wait on someone else and sit at the foot of the project,
-    /// under `N blocked by others`, in the order the project has them: a session keeps its place
-    /// whatever its state.
-    pub fn level_blocked(&self, project: &str, gone: bool) -> Vec<&Session> {
-        self.level_of(project, gone)
-            .filter(|session| self.blocked_apart(session))
-            .collect()
-    }
-
-    fn level_of(&self, project: &str, gone: bool) -> impl Iterator<Item = &Session> {
         let twin = self.is_gone_here(project);
-        self.live_sessions_of(project)
+        let (blocked, mut sessions): (Vec<&Session>, Vec<&Session>) = self
+            .live_sessions_of(project)
             .into_iter()
-            .filter(move |session| !twin || self.is_here(session) == gone)
+            .filter(|session| !twin || self.is_here(session) == gone)
+            .partition(|session| self.blocked_apart(session));
+        sessions.extend(blocked);
+        sessions
     }
 
-    /// Whether `session` goes to its project's foot, `N blocked by others`: a root no agent
+    /// Whether `session` goes to its project's foot: a root no agent
     /// leads, blocked by someone else, that leads no live session. A led one stays under its
     /// pilot, which speaks for it; a pilot stays with the sessions it leads.
     pub fn blocked_apart(&self, session: &Session) -> bool {
