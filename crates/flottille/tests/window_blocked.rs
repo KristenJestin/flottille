@@ -1222,7 +1222,7 @@ fn a_pull_request_subject_is_said_in_workspace(cx: &mut TestAppContext) {
     });
     open_page(&shell, &id, cx);
     until(&shell, cx, "its workspace", |cx| {
-        label(cx, "rail-workspace-read").is_some()
+        drawn_height(cx, "rail-workspace-read") > 0.
     });
     settle(cx);
     assert!(label(cx, "rail-about-pull").is_none(), "about nothing yet");
