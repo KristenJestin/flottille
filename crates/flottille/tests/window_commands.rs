@@ -13,7 +13,7 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use flottille_window::Shell;
 use flottille_window::actions::{RunAct, RunAnswer};
-use flottille_window::conversation::{Block, Ending};
+use flottille_window::conversation::{Block, Ending, Stopper};
 use flottille_window::runs::CommandRow;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::{project_commands_id, session_commands_id, session_id};
@@ -746,7 +746,7 @@ fn a_card_whose_command_the_agent_stopped_itself_shows_it_stopped(cx: &mut TestA
     // No delivery tells the agent its own stop: the list of commands does.
     ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
     until(&shell, cx, "the card shows the stop", |cx| {
-        ending_of_card(&page, cx) == Some(Ending::Stopped)
+        ending_of_card(&page, cx) == Some(Ending::Stopped(Stopper::Agent))
     });
     settle(cx);
 
@@ -1760,6 +1760,7 @@ fn run_of(run: &str, agent: &str, task: Option<&str>, running: bool, at: u64) ->
         url: None,
         service: false,
         needs_stopped: Vec::new(),
+        stopped_by: None,
     }
 }
 
