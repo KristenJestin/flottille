@@ -2134,6 +2134,42 @@ fn signed_by_device(
         .ask_within(method, params, bound)?
 }
 
+/// [`Command::AllSettingsShare`]: each value in a request of its own, signed by this device, so
+/// that each sealed copy holds its own text alone (a guidance near its limit fills one). The first
+/// refused ends it; the answer is the last one, saying where the values went at the least: a hub
+/// that keeps none, or out of reach, for one of them is said.
+fn share_each(
+    connect: &Connect,
+    sign: Option<Sign>,
+    values: Vec<(String, String)>,
+    bound: Duration,
+) -> Result<Value, String> {
+    let order = |hub: &Value| match hub.as_str() {
+        Some("old-hub") => 2,
+        Some("later") => 1,
+        _ => 0,
+    };
+    let mut last: Option<Value> = None;
+    let mut hub = Value::Null;
+    for (name, text) in values {
+        let answer = signed_by_device(
+            connect,
+            sign.clone(),
+            None,
+            "settings.share",
+            json!({"values": {name: text}}),
+            bound,
+        )?;
+        if order(&answer["hub"]) >= order(&hub) {
+            hub = answer["hub"].clone();
+        }
+        last = Some(answer);
+    }
+    let mut last = last.ok_or("nothing to share")?;
+    last["hub"] = hub;
+    Ok(last)
+}
+
 /// [`Command::AllowSharing`]: the files made and shared as [`share_files`] does, for the machine
 /// shown alone; the first step refused ends it, the launch still held; then the launch allowed.
 fn allow_sharing(
@@ -2796,24 +2832,11 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 bounds.quick,
             ),
         },
-        Command::AllSettingsShare { values } => {
-            let values: serde_json::Map<String, Value> = values
-                .into_iter()
-                .map(|(name, text)| (name, Value::String(text)))
-                .collect();
-            Outcome::AllSettings {
-                written: Some(true),
-                shown: signed_by_device(
-                    connect,
-                    sign,
-                    None,
-                    "settings.share",
-                    json!({"values": values}),
-                    bounds.quick,
-                )
+        Command::AllSettingsShare { values } => Outcome::AllSettings {
+            written: Some(true),
+            shown: share_each(connect, sign, values, bounds.quick)
                 .map(|shown| crate::all_settings::Shown::of(&shown, &Value::Null)),
-            }
-        }
+        },
         Command::AllSettingsUseAll { names } => Outcome::AllSettings {
             written: Some(false),
             shown: all_settings_shown(

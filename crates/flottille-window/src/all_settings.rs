@@ -1,21 +1,23 @@
-//! The settings of all machines a machine often overrides (`docs/remote.md`, "Settings for all
-//! machines"). On All machines, a section for each subject chooses the value every machine
-//! follows, saved with `settings.share`, which this device's key signs. On a machine, a section it
+//! The settings of all machines (`docs/remote.md`, "Settings for all machines"): those a machine
+//! often overrides, then the guidance and the rest of "Shared, personal". On All machines, a
+//! section for each subject chooses the value every machine follows (where none is shared yet, it
+//! shows Flottille's default and says so), saved with `settings.share`, which this device's key signs. On a machine, a section it
 //! changed is marked as its own, with the way back to all machines' value (`settings.use_all`),
 //! and a value it cannot follow is said there. Everything is read from `settings.shared` and
 //! `connection.list`; the daemon checks and keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gpui_design_system::follow_theme;
 use gpui_design_system::{
     Button, Chosen, EmptyLine, Field, Icon, Item, Listing, ModelChoice, ModelEntry, Section,
     Segmented, SetHere, Switch, Toast, palette, presence, presence_of, space, toast,
 };
-use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window,
-    div, px,
+    AnyElement, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Map, Value, json};
 
@@ -24,14 +26,79 @@ use crate::actions::Command;
 use crate::commands::{boxed, line_field, perform_later};
 
 /// The sections of All machines, top to bottom, after About you.
-pub const SECTIONS: [&str; 6] = [
+pub const SECTIONS: [&str; 13] = [
     "all-new-sessions",
     "all-models",
     "all-sessions",
     "all-workspaces",
     "all-updates",
     "all-connections",
+    "all-rules",
+    "all-guidance",
+    "all-review",
+    "all-tool-results",
+    "all-appearance",
+    "all-specs",
+    "all-subscriptions",
 ];
+
+/// The guidance texts, each in a field of several lines.
+const TEXTS: [&str; 8] = [
+    "rules",
+    "judge.guidance",
+    "compaction.guidance",
+    "review.guidance",
+    "review.guidance.spec",
+    "review.guidance.bugs",
+    "review.guidance.standards",
+    "review.guidance.security",
+];
+
+/// The label of each guidance text.
+fn text_label(name: &str) -> &'static str {
+    match name {
+        "rules" => "Rules for every project",
+        "judge.guidance" => "The Auto judge's guidance",
+        "compaction.guidance" => "The compaction model's guidance",
+        "review.guidance" => "Review's guidance",
+        "review.guidance.spec" => "Review: the spec",
+        "review.guidance.bugs" => "Review: bugs",
+        "review.guidance.standards" => "Review: project rules",
+        _ => "Review: security",
+    }
+}
+
+/// The values chosen among words: each word as the value says it, and as the window does.
+fn words_of(name: &str) -> &'static [(&'static str, &'static str)] {
+    match name {
+        "tool_results.unchanged" => &[("true", "On"), ("false", "Off")],
+        "appearance.shade" => &[("light", "Light"), ("dark", "Dark")],
+        "specs.mode" => &[
+            ("\"internal\"", "Kept in Flottille"),
+            ("\"ticket\"", "Written to the ticket"),
+        ],
+        _ => &[],
+    }
+}
+
+/// The values that are some of a list, and the extension and the key whose options they are.
+const SUBSETS: [(&str, &str, &str); 4] = [
+    ("review.passes", "review", "passes"),
+    (
+        "autosubscriptions.created_pull",
+        "autosubscriptions",
+        "created_pull",
+    ),
+    (
+        "autosubscriptions.branch_pull",
+        "autosubscriptions",
+        "branch_pull",
+    ),
+    ("autosubscriptions.ticket", "autosubscriptions", "ticket"),
+];
+
+/// What All machines says under a value no machine shared yet: what it shows is the default.
+pub const DEFAULT_SAID: &str = "Flottille's default: nothing is shared yet.";
 
 /// The values each section of All machines chooses.
 fn names_of(section: &str) -> &'static [&'static str] {
@@ -50,6 +117,24 @@ fn names_of(section: &str) -> &'static [&'static str] {
         "all-workspaces" => &["workspaces_folder"],
         "all-updates" => &["update.check"],
         "all-connections" => &["connections"],
+        "all-rules" => &["rules"],
+        "all-guidance" => &["judge.guidance", "compaction.guidance"],
+        "all-review" => &[
+            "review.passes",
+            "review.guidance",
+            "review.guidance.spec",
+            "review.guidance.bugs",
+            "review.guidance.standards",
+            "review.guidance.security",
+        ],
+        "all-tool-results" => &["tool_results.limit", "tool_results.unchanged"],
+        "all-appearance" => &["appearance.shade"],
+        "all-specs" => &["specs.mode", "specs.language"],
+        "all-subscriptions" => &[
+            "autosubscriptions.created_pull",
+            "autosubscriptions.branch_pull",
+            "autosubscriptions.ticket",
+        ],
         _ => &[],
     }
 }
@@ -76,15 +161,31 @@ fn names_on_a_machine(part: &str) -> &'static [&'static str] {
         "sessions" => &["sessions.end_inactive_days", "sessions.resume_at_reset"],
         "workspaces" => &["workspaces_folder"],
         "version" => &["update.check"],
-        "compaction" => &["compactor"],
+        "compaction" => &["compactor", "compaction.guidance"],
         "review" => &[
             "review.spec_model",
             "review.bugs_model",
             "review.standards_model",
             "review.security_model",
             "review.verifier_model",
+            "review.passes",
+            "review.guidance",
+            "review.guidance.spec",
+            "review.guidance.bugs",
+            "review.guidance.standards",
+            "review.guidance.security",
         ],
         "connections" => &["connections"],
+        "rules" => &["rules"],
+        "guidance" => &["judge.guidance"],
+        "tool-results" => &["tool_results.limit", "tool_results.unchanged"],
+        "appearance" => &["appearance.shade"],
+        "specs" => &["specs.mode", "specs.language"],
+        "autosubscriptions" => &[
+            "autosubscriptions.created_pull",
+            "autosubscriptions.branch_pull",
+            "autosubscriptions.ticket",
+        ],
         _ => &[],
     }
 }
@@ -100,6 +201,8 @@ fn stays(part: &str) -> Option<&'static str> {
 
 pub const APPEARANCE_STAYS: &str = "The colours of this machine's desktop theme (Omarchy) stay \
                                     this machine's.";
+/// What All machines' Appearance says stays each machine's.
+pub const THEMES_STAY: &str = "The colours of each machine's desktop theme stay that machine's.";
 pub const CHANNEL_STAYS: &str = "The update channel stays this machine's.";
 /// What All machines says when none of this machine's connections can be shared.
 pub const NO_CONNECTION: &str = "No https:// connection of this machine can be shared: add one \
@@ -131,6 +234,9 @@ pub struct Shown {
     /// Where a change of all machines went: `given`, `later` or `old-hub`.
     pub hub: Option<String>,
     pub connections: Vec<Shareable>,
+    /// Flottille's default of the guidance and the rest, by name: what All machines shows of a
+    /// value no machine shared.
+    pub defaults: BTreeMap<String, String>,
 }
 
 impl Shown {
@@ -182,6 +288,7 @@ impl Shown {
             ignored: texts(&shared["ignored"]).unwrap_or_default(),
             hub: shared["hub"].as_str().map(str::to_owned),
             connections: shareable,
+            defaults: texts(&shared["defaults"]).unwrap_or_default(),
         }
     }
 
@@ -192,6 +299,19 @@ impl Shown {
             .map_or("", String::as_str)
     }
 
+    /// What All machines shows of `name`: all machines' value, else Flottille's default.
+    pub fn shown_value(&self, name: &str) -> &str {
+        match self.value(name) {
+            "" => self.defaults.get(name).map_or("", String::as_str),
+            value => value,
+        }
+    }
+
+    /// Whether All machines shows Flottille's default of `name`: no machine shared one.
+    pub fn is_default(&self, name: &str) -> bool {
+        self.all.is_some() && self.value(name).is_empty() && self.defaults.contains_key(name)
+    }
+
     /// The names of the connections All machines shares.
     fn shared_connections(&self) -> BTreeSet<String> {
         serde_json::from_str::<Vec<Value>>(self.value("connections"))
@@ -200,6 +320,20 @@ impl Shown {
             .filter_map(|declaration| declaration["name"].as_str().map(str::to_owned))
             .collect()
     }
+}
+
+/// What the field of `name` shows of `shown`: all machines' value, else Flottille's default.
+fn field_shows(shown: &Shown, name: &str) -> String {
+    field_text(name, shown.shown_value(name))
+}
+
+/// A word with its first letter in capital.
+fn capitalized(word: &str) -> String {
+    let mut letters = word.chars();
+    letters
+        .next()
+        .map(|first| first.to_uppercase().chain(letters).collect())
+        .unwrap_or_default()
 }
 
 /// A listed connection that may be shared: reached over `https://`, naming no vault entry, with
@@ -277,12 +411,53 @@ struct Edits {
     resume: Option<usize>,
     updates: Option<usize>,
     connections: Option<BTreeSet<String>>,
+    /// A value chosen among words, by name: the index of its word.
+    words: BTreeMap<&'static str, usize>,
+    /// A value that is some of a list, by name.
+    subsets: BTreeMap<&'static str, Vec<String>>,
 }
 
 #[derive(Clone)]
 struct Fields {
     days: Entity<InputState>,
     folder: Entity<InputState>,
+    limit: Entity<InputState>,
+    language: Entity<InputState>,
+    texts: BTreeMap<&'static str, Entity<TextareaState>>,
+}
+
+impl Fields {
+    /// The fields of one line, and the value each holds.
+    fn lines(&self) -> [(&Entity<InputState>, &'static str); 4] {
+        [
+            (&self.days, "sessions.end_inactive_days"),
+            (&self.folder, "workspaces_folder"),
+            (&self.limit, "tool_results.limit"),
+            (&self.language, "specs.language"),
+        ]
+    }
+}
+
+/// What a field shows of a value: a language's tag without its quotes.
+fn field_text(name: &str, value: &str) -> String {
+    match name {
+        "specs.language" => serde_json::from_str::<String>(value).unwrap_or_default(),
+        _ => value.to_owned(),
+    }
+}
+
+/// The value a field's text is: a language's tag in quotes, and nothing for an empty field.
+fn field_value(name: &str, text: &str) -> String {
+    match (name, text) {
+        (_, "") => String::new(),
+        ("specs.language", text) => json!(text).to_string(),
+        (_, text) => text.to_owned(),
+    }
+}
+
+/// The words a list value holds.
+fn listed(value: &str) -> Vec<String> {
+    serde_json::from_str(value).unwrap_or_default()
 }
 
 /// The two ends of a choice between nothing shared and two values.
@@ -324,6 +499,21 @@ impl AllSettings {
 
     pub fn folder_field(&self) -> Option<&Entity<InputState>> {
         self.fields.as_ref().map(|fields| &fields.folder)
+    }
+
+    /// The field of the guidance text `name` (`rules`, `judge.guidance`…).
+    pub fn text_field(&self, name: &str) -> Option<&Entity<TextareaState>> {
+        self.fields
+            .as_ref()
+            .and_then(|fields| fields.texts.get(name))
+    }
+
+    pub fn limit_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|fields| &fields.limit)
+    }
+
+    pub fn language_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|fields| &fields.language)
     }
 
     /// The values of the block `part` of a machine's page that the machine holds itself.
@@ -384,7 +574,35 @@ impl AllSettings {
         let mut changed = Vec::new();
         for name in names_of(section) {
             let was = shown.value(name);
+            // A value shown at Flottille's default changes once it says another; emptied, it
+            // shares nothing.
+            let from_default = |now: String| -> Option<String> {
+                match now.is_empty() {
+                    true => (!was.is_empty()).then(String::new),
+                    false => (now != shown.shown_value(name)).then_some(now),
+                }
+            };
             let now = match *name {
+                "tool_results.limit" | "specs.language" => {
+                    self.fields.as_ref().and_then(|fields| {
+                        let (field, _) = fields.lines().into_iter().find(|(_, of)| of == name)?;
+                        from_default(field_value(name, field.read(cx).value().trim()))
+                    })
+                }
+                name if TEXTS.contains(&name) => self.fields.as_ref().and_then(|fields| {
+                    from_default(fields.texts.get(name)?.read(cx).value().to_string())
+                }),
+                name if !words_of(name).is_empty() => self
+                    .edits
+                    .words
+                    .get(name)
+                    .and_then(|at| from_default(words_of(name)[*at].0.to_owned())),
+                name if SUBSETS.iter().any(|(of, _, _)| *of == name) => {
+                    self.edits.subsets.get(name).and_then(|chosen| {
+                        (*chosen != listed(shown.shown_value(name)))
+                            .then(|| json!(chosen).to_string())
+                    })
+                }
                 "sessions.end_inactive_days" => self
                     .fields
                     .as_ref()
@@ -488,15 +706,20 @@ impl AllSettings {
                 self.edits = Edits::default();
             }
             if let Some(fields) = &self.fields {
-                for (field, name) in [
-                    (&fields.days, "sessions.end_inactive_days"),
-                    (&fields.folder, "workspaces_folder"),
-                ] {
-                    let was = self.text(name);
+                for (field, name) in fields.lines() {
+                    let was = self.field_shows(name);
                     let typed = field.read(cx).value().to_string();
                     // Typing in progress is kept when a read comes back.
                     if written == Some(true) || typed == was {
-                        let now = shown.value(name).to_owned();
+                        let now = field_shows(&shown, name);
+                        field.update(cx, |field, cx| field.set_value(now, window, cx));
+                    }
+                }
+                for (name, field) in &fields.texts {
+                    let was = self.field_shows(name);
+                    let typed = field.read(cx).value().to_string();
+                    if written == Some(true) || typed == was {
+                        let now = field_shows(&shown, name);
                         field.update(cx, |field, cx| field.set_value(now, window, cx));
                     }
                 }
@@ -506,17 +729,41 @@ impl AllSettings {
         cx.notify();
     }
 
+    /// What the field of `name` shows of the values read.
+    fn field_shows(&self, name: &str) -> String {
+        self.shown
+            .as_ref()
+            .map_or_else(String::new, |shown| field_shows(shown, name))
+    }
+
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Fields {
         if let Some(fields) = &self.fields {
             return fields.clone();
         }
         let days = line_field("30, or off", window, cx);
         let folder = line_field("~/work/<project>-ws", window, cx);
-        for (field, name) in [
-            (&days, "sessions.end_inactive_days"),
-            (&folder, "workspaces_folder"),
-        ] {
-            let text = self.text(name);
+        let limit = line_field("8000, or off", window, cx);
+        let language = line_field("en, fr-FR", window, cx);
+        let texts: BTreeMap<&'static str, Entity<TextareaState>> = TEXTS
+            .iter()
+            .map(|name| {
+                let field = cx.new(|cx| {
+                    let mut field = TextareaState::new(window, cx).auto_grow(6, 18);
+                    follow_theme(&mut field, cx);
+                    field
+                });
+                (*name, field)
+            })
+            .collect();
+        let fields = Fields {
+            days,
+            folder,
+            limit,
+            language,
+            texts,
+        };
+        for (field, name) in fields.lines() {
+            let text = self.field_shows(name);
             field.update(cx, |field, cx| field.set_value(text, window, cx));
             self._subscriptions
                 .push(cx.subscribe(field, |_, _, event, cx| {
@@ -525,9 +772,178 @@ impl AllSettings {
                     }
                 }));
         }
-        let fields = Fields { days, folder };
+        for (name, field) in &fields.texts {
+            let text = self.field_shows(name);
+            field.update(cx, |field, cx| field.set_value(text, window, cx));
+            self._subscriptions
+                .push(cx.subscribe(field, |_, _, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }));
+        }
         self.fields = Some(fields.clone());
         fields
+    }
+
+    /// The line under a value no machine shared: what it shows is Flottille's default. It unfolds
+    /// and folds away with its gap.
+    fn default_line(&self, name: &str, cx: &gpui_kit::App) -> AnyElement {
+        let p = palette(cx);
+        let id = name.replace('.', "-");
+        let shown = self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.is_default(name));
+        presence(
+            ElementId::Name(format!("all-{id}-default-block").into()),
+            shown,
+            div().pt(space::XS).child(
+                div()
+                    .id(ElementId::Name(format!("all-{id}-default").into()))
+                    .aria_label(DEFAULT_SAID)
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(DEFAULT_SAID)
+                    .test_support(),
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// The guidance text `name` in its field, with the line that says it is the default.
+    fn text_block(&self, name: &'static str, fields: &Fields, cx: &gpui_kit::App) -> AnyElement {
+        let p = palette(cx);
+        let id = name.replace('.', "-");
+        let field = fields.texts.get(name).cloned();
+        div()
+            .flex()
+            .flex_col()
+            .child(Field::new(
+                ElementId::Name(format!("all-{id}").into()),
+                text_label(name),
+                div()
+                    .id(ElementId::Name(format!("all-{id}-box").into()))
+                    .min_h(px(96.))
+                    .px(space::MD)
+                    .py(space::SM)
+                    .rounded(px(8.))
+                    .bg(p.field)
+                    .border_1()
+                    .border_color(p.line2)
+                    .text_size(px(12.5))
+                    .children(field)
+                    .test_support(),
+            ))
+            .child(self.default_line(name, cx))
+            .into_any_element()
+    }
+
+    /// A value chosen among words, as a segmented control.
+    fn words(&self, name: &'static str, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let words = words_of(name);
+        let chosen = self.edits.words.get(name).copied().unwrap_or_else(|| {
+            let value = self
+                .shown
+                .as_ref()
+                .map_or("", |shown| shown.shown_value(name));
+            words.iter().position(|(v, _)| *v == value).unwrap_or(0)
+        });
+        let keys: Vec<(&'static str, &'static str)> = words
+            .iter()
+            .map(|(value, said)| (value.trim_matches('"'), *said))
+            .collect();
+        let this = cx.entity().downgrade();
+        let id = name.replace('.', "-");
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                Segmented::new(
+                    ElementId::Name(format!("all-{id}").into()),
+                    label,
+                    keys,
+                    chosen,
+                )
+                .on_choose(move |index, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.edits.words.insert(name, index);
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            )
+            .child(self.default_line(name, cx))
+            .into_any_element()
+    }
+
+    /// A value that is some of a list: a switch for each of its options.
+    fn subset(
+        &self,
+        name: &'static str,
+        offered: &[crate::extensions::Listed],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (_, extension, key) = SUBSETS
+            .iter()
+            .find(|(of, _, _)| *of == name)
+            .copied()
+            .expect("a list value");
+        let setting = offered
+            .iter()
+            .find(|listed| listed.name == extension)
+            .and_then(|listed| listed.settings.iter().find(|setting| setting.key == key));
+        let (label, options) = setting.map_or((String::new(), Vec::new()), |setting| {
+            (setting.label.clone(), setting.options.clone())
+        });
+        let chosen = self.edits.subsets.get(name).cloned().unwrap_or_else(|| {
+            listed(
+                self.shown
+                    .as_ref()
+                    .map_or("", |shown| shown.shown_value(name)),
+            )
+        });
+        let id = name.replace('.', "-");
+        let switches = options.iter().map(|option| {
+            let on = chosen.contains(option);
+            let this = cx.entity().downgrade();
+            let (chosen, option, options) = (chosen.clone(), option.clone(), options.clone());
+            Switch::new(
+                ElementId::Name(format!("all-{id}-{option}").into()),
+                on,
+                capitalized(&option),
+            )
+            .disabled(self.waiting)
+            .on_click(move |_, _, cx| {
+                // In the options' order, whatever order they were chosen in.
+                let list: Vec<String> = options
+                    .iter()
+                    .filter(|word| (**word == option) != chosen.contains(word))
+                    .cloned()
+                    .collect();
+                this.update(cx, |this, cx| {
+                    this.edits.subsets.insert(name, list);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+        let p = palette(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(
+                div()
+                    .id(ElementId::Name(format!("all-{id}-label").into()))
+                    .text_size(px(12.5))
+                    .text_color(p.text)
+                    .child(label)
+                    .test_support(),
+            )
+            .children(switches)
+            .child(self.default_line(name, cx))
+            .into_any_element()
     }
 
     /// The model `name`, as every model of Settings is chosen: each machine's own, none where
@@ -575,6 +991,7 @@ impl AllSettings {
         &mut self,
         section: &'static str,
         models: Vec<ModelEntry>,
+        offered: &[crate::extensions::Listed],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -702,6 +1119,124 @@ impl AllSettings {
                     "Updates",
                     CHANNEL_STAYS,
                     card().child(check).into_any_element(),
+                )
+            }
+            "all-rules" => {
+                let fields = self.fields(window, cx);
+                (
+                    "Rules",
+                    "How every agent works, on each machine that wrote none of its own.",
+                    card()
+                        .child(self.text_block("rules", &fields, cx))
+                        .into_any_element(),
+                )
+            }
+            "all-guidance" => {
+                let fields = self.fields(window, cx);
+                (
+                    "Guidance",
+                    "What the Auto judge and the compaction model follow, on each machine that \
+                     wrote none of its own.",
+                    card()
+                        .child(self.text_block("judge.guidance", &fields, cx))
+                        .child(self.text_block("compaction.guidance", &fields, cx))
+                        .into_any_element(),
+                )
+            }
+            "all-review" => {
+                let fields = self.fields(window, cx);
+                let mut body = card().child(self.subset("review.passes", offered, cx));
+                for name in [
+                    "review.guidance",
+                    "review.guidance.spec",
+                    "review.guidance.bugs",
+                    "review.guidance.standards",
+                    "review.guidance.security",
+                ] {
+                    body = body.child(self.text_block(name, &fields, cx));
+                }
+                (
+                    "Review",
+                    "What a review checks, and the guidance of its checks.",
+                    body.into_any_element(),
+                )
+            }
+            "all-tool-results" => {
+                let fields = self.fields(window, cx);
+                (
+                    "Long tool results",
+                    "",
+                    card()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Field::new(
+                                        "all-tool-results-limit",
+                                        "Cut a result longer than (characters)",
+                                        boxed(
+                                            "all-tool-results-limit-box",
+                                            Input::new(&fields.limit),
+                                            cx,
+                                        ),
+                                    )
+                                    .hint("4000 or more, or off. Empty: each machine's own."),
+                                )
+                                .child(self.default_line("tool_results.limit", cx)),
+                        )
+                        .child(self.words(
+                            "tool_results.unchanged",
+                            "Say a page read already is unchanged",
+                            cx,
+                        ))
+                        .into_any_element(),
+                )
+            }
+            "all-appearance" => (
+                "Appearance",
+                THEMES_STAY,
+                card()
+                    .child(self.words("appearance.shade", "Shade", cx))
+                    .into_any_element(),
+            ),
+            "all-specs" => {
+                let fields = self.fields(window, cx);
+                (
+                    "Specs",
+                    "",
+                    card()
+                        .child(self.words("specs.mode", "From a ticket", cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Field::new(
+                                        "all-specs-language",
+                                        "Written in",
+                                        boxed(
+                                            "all-specs-language-box",
+                                            Input::new(&fields.language),
+                                            cx,
+                                        ),
+                                    )
+                                    .hint("A language tag. Empty: each machine's own."),
+                                )
+                                .child(self.default_line("specs.language", cx)),
+                        )
+                        .into_any_element(),
+                )
+            }
+            "all-subscriptions" => {
+                let mut body = card();
+                for name in names_of(section) {
+                    body = body.child(self.subset(name, offered, cx));
+                }
+                (
+                    "Automatic subscriptions",
+                    "What a session is subscribed to by itself.",
+                    body.into_any_element(),
                 )
             }
             _ => (

@@ -49,6 +49,8 @@ pub enum Source {
     Global,
     /// The project's own.
     Project,
+    /// All machines', which this machine follows while it has none of its own.
+    All,
 }
 
 /// The rules as the daemon says them (`rules.show`).
@@ -79,11 +81,13 @@ impl Shown {
             source: match value["source"].as_str() {
                 Some("project") => Source::Project,
                 Some("global") => Source::Global,
+                Some("all") => Source::All,
                 _ => Source::Default,
             },
             global: value["global"].as_str().unwrap_or_default().to_owned(),
             global_source: match value["global_source"].as_str() {
                 Some("global") => Source::Global,
+                Some("all") => Source::All,
                 _ => Source::Default,
             },
             alone: value["alone"].as_bool().unwrap_or(false),
@@ -491,8 +495,10 @@ impl RulesEditor {
         ) {
             (_, _, None) => "asking Flottille",
             (true, _, Some(Source::Global)) => "your own",
+            (true, _, Some(Source::All)) => "all machines'",
             (true, _, Some(_)) => "Flottille's own",
             (false, None, Some(Source::Global)) => "your own",
+            (false, None, Some(Source::All)) => "all machines'",
             (false, None, Some(_)) => "Flottille's own",
             (false, Some(_), Some(Source::Project)) => "this project's own",
             (false, Some(_), Some(_)) => "none of its own",
