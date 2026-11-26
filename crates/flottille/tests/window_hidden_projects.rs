@@ -17,7 +17,11 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
-use flottille_window::tree::{project_id, project_options_id, session_id};
+use flottille_window::shell::Selection;
+use flottille_window::tree::{
+    by_machine_id, machine_id, project_id, project_on_id, project_options_id, projects_menu_id,
+    session_id,
+};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -156,6 +160,89 @@ fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Opti
     })
 }
 
+/// The tallest height of the frames drawn under `id`, nothing while none is drawn (two frames of
+/// one row are drawn while it moves between two levels).
+fn height(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> f32 {
+    let id = id.into();
+    cx.update(|window, _| {
+        window
+            .find_all(id)
+            .iter()
+            .map(|found| f32::from(found.bounds().size.height))
+            .fold(0., f32::max)
+    })
+}
+
+/// The heights of the frame `id` over the next `frames` frames of 16 ms: what a motion draws.
+fn heights_over(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    id: &gpui_kit::ElementId,
+    frames: usize,
+) -> Vec<f32> {
+    (0..frames)
+        .map(|_| {
+            step(shell, FRAME, cx);
+            height(cx, id.clone())
+        })
+        .collect()
+}
+
+/// Said of a frame that folds away: it was `full`, was seen between nothing and `full`, and ends
+/// at nothing.
+fn folds_away(seen: &[f32], full: f32, what: &str) {
+    assert!(full > 0., "{what}: it was drawn before: {seen:?}");
+    assert!(
+        seen.iter().any(|h| *h > 0. && *h < full),
+        "{what}: part-way through its height is between nothing and {full}: {seen:?}"
+    );
+    assert_eq!(seen.last(), Some(&0.), "{what}: it ends folded: {seen:?}");
+}
+
+/// Said of a frame that unfolds: it was nothing, is seen between nothing and its height, and ends
+/// at it.
+fn unfolds(seen: &[f32], what: &str) {
+    let full = seen.last().copied().unwrap_or(0.);
+    assert!(full > 0., "{what}: it ends drawn: {seen:?}");
+    assert!(
+        seen.iter().any(|h| *h > 0. && *h < full),
+        "{what}: part-way through its height is between nothing and {full}: {seen:?}"
+    );
+}
+
+fn frame(prefix: &str, node: u64) -> gpui_kit::ElementId {
+    gpui_kit::ElementId::Name(format!("{prefix}-{node}").into())
+}
+
+/// The id of the entity of the row of `name`, which its list frames it by (`tree-project-<id>`).
+fn node_of(shell: &Entity<Shell>, name: &str, cx: &mut VisualTestContext) -> u64 {
+    shell.read_with(cx, |s, _| {
+        s.project(name).expect("the row").entity_id().as_u64()
+    })
+}
+
+/// The window on Settings, General, tall enough for the whole of its sections.
+fn general_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    cx.update(|window, cx| window.click("settings", cx));
+    until(shell, cx, "the settings page", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    settle(shell, cx);
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+    settle(shell, cx);
+}
+
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
 #[gpui_kit::test]
 fn a_project_hidden_on_this_machine_leaves_the_sidebar_with_its_sessions(cx: &mut TestAppContext) {
     let user = user();
@@ -271,7 +358,10 @@ fn a_hidden_project_comes_back_from_settings(cx: &mut TestAppContext) {
         present(cx, "hidden-projects-empty"),
         "an empty list says what it is for"
     );
-    assert!(hidden(&user).is_empty(), "the daemon forgot it");
+    // The window asks the daemon from a thread of its own: the answer is waited for.
+    until(&shell, cx, "the daemon forgot it", |_| {
+        hidden(&user).is_empty()
+    });
     until(&shell, cx, "the row is back", |cx| {
         present(cx, project_id("bravo"))
     });
@@ -386,5 +476,285 @@ fn hiding_a_project_sends_nothing_to_its_machine(cx: &mut TestAppContext) {
             .iter()
             .any(|p| p["name"] == "site"),
         "the project is where it was"
+    );
+}
+
+// The motion of #1526 (AGENTS.md, "Motion in the window"): a frame is seen part-way through its
+// way, not only where it ends.
+
+#[gpui_kit::test]
+fn the_row_of_a_hidden_project_folds_away_over_the_motion_not_at_once(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "both rows", |cx| {
+        present(cx, project_id("alpha")) && present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+    let row = frame("tree-project", node_of(&shell, "alpha", cx));
+    let full = height(cx, row.clone());
+
+    hide_from_its_row("alpha", &shell, cx);
+    let seen = heights_over(&shell, cx, &row, 40);
+
+    folds_away(&seen, full, "the row of alpha");
+    assert!(present(cx, project_id("bravo")), "another stays");
+}
+
+#[gpui_kit::test]
+fn a_project_shown_again_folds_from_the_hidden_list_and_swaps_with_its_empty_line(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    user.call("project.hide", json!({"name": "bravo"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| present(cx, project_id("alpha")));
+    settle(&shell, cx);
+    general_settings(&shell, cx);
+    assert!(present(cx, "hidden-project-row-bravo"));
+    let list = gpui_kit::ElementId::from("hidden-projects-list-block");
+    let empty = gpui_kit::ElementId::from("hidden-projects-empty-block");
+    let full = height(cx, list.clone());
+    assert_eq!(
+        height(cx, empty.clone()),
+        0.,
+        "no empty line while a row is listed"
+    );
+
+    cx.update(|window, cx| window.click("hidden-project-show-bravo", cx));
+    let (mut going, mut coming) = (Vec::new(), Vec::new());
+    for _ in 0..40 {
+        step(&shell, FRAME, cx);
+        going.push(height(cx, list.clone()));
+        coming.push(height(cx, empty.clone()));
+    }
+
+    folds_away(&going, full, "the list block");
+    unfolds(&coming, "the empty line's block");
+    assert!(
+        going
+            .iter()
+            .zip(&coming)
+            .any(|(list, empty)| *list > 0. && *empty > 0.),
+        "the two swap, one folding as the other unfolds: {going:?} {coming:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_shown_again_folds_its_own_row_away_from_a_list_of_two(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    add(&user, "charlie", "");
+    user.call("project.hide", json!({"name": "bravo"})).unwrap();
+    user.call("project.hide", json!({"name": "charlie"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| present(cx, project_id("alpha")));
+    settle(&shell, cx);
+    general_settings(&shell, cx);
+    let row = gpui_kit::ElementId::from("hidden-project-item-bravo");
+    let full = height(cx, row.clone());
+    let other = gpui_kit::ElementId::from("hidden-project-item-charlie");
+    let other_height = height(cx, other.clone());
+
+    cx.update(|window, cx| window.click("hidden-project-show-bravo", cx));
+    let seen = heights_over(&shell, cx, &row, 40);
+
+    folds_away(&seen, full, "the row of bravo in Settings");
+    assert_eq!(height(cx, other), other_height, "the other row stays");
+    assert!(
+        !present(cx, "hidden-projects-empty"),
+        "no empty line while one is listed"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_hidden_while_settings_is_open_unfolds_in_the_list_and_the_empty_line_folds(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "both rows", |cx| {
+        present(cx, project_id("alpha")) && present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+    general_settings(&shell, cx);
+    let list = gpui_kit::ElementId::from("hidden-projects-list-block");
+    let empty = gpui_kit::ElementId::from("hidden-projects-empty-block");
+    let full = height(cx, empty.clone());
+    assert!(present(cx, "hidden-projects-empty"));
+
+    hide_from_its_row("bravo", &shell, cx);
+    let (mut going, mut coming) = (Vec::new(), Vec::new());
+    for _ in 0..40 {
+        step(&shell, FRAME, cx);
+        going.push(height(cx, empty.clone()));
+        coming.push(height(cx, list.clone()));
+    }
+
+    folds_away(&going, full, "the empty line's block");
+    unfolds(&coming, "the list block");
+}
+
+#[gpui_kit::test]
+fn a_hide_the_daemon_refuses_brings_the_row_back_and_says_so(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let user = user();
+    add(&user, "alpha", "");
+    add(&user, "bravo", "");
+    let held = session(&user, "alpha");
+    let (down, real) = (Arc::new(AtomicBool::new(false)), user.connector());
+    let connect: Connect = {
+        let down = down.clone();
+        Arc::new(move || match down.load(Ordering::SeqCst) {
+            true => Err(std::io::Error::other("the daemon is not answering")),
+            false => real(),
+        })
+    };
+    let env = Environment {
+        os_release: user.path("os-release"),
+        state_home: user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let device = Some(Device::in_folder(user.path("state/flottille/remote")));
+    let (shell, cx) =
+        cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    until(&shell, cx, "the row and its session", |cx| {
+        present(cx, project_id("alpha")) && present(cx, session_id(&held))
+    });
+    settle(&shell, cx);
+    let row = frame("tree-project", node_of(&shell, "alpha", cx));
+    let full = height(cx, row.clone());
+
+    // The daemon does not answer the hide: the window is not polled meanwhile, so that only the
+    // hide meets the failure.
+    down.store(true, Ordering::SeqCst);
+    hide_from_its_row("alpha", &shell, cx);
+    let mut folding = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    while !toasts(&shell, cx).iter().any(|title| title == "Not hidden") {
+        assert!(Instant::now() < deadline, "the failure was never said");
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        folding.push(height(cx, row.clone()));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    down.store(false, Ordering::SeqCst);
+
+    // What was shown at once is taken back: the row unfolds again, with its session.
+    let seen = heights_over(&shell, cx, &row, 40);
+    assert_eq!(
+        seen.last(),
+        Some(&full),
+        "the row is back as it was: {seen:?} after {folding:?}"
+    );
+    assert!(present(cx, project_id("alpha")));
+    assert!(present(cx, session_id(&held)), "with its session");
+    assert!(
+        shell.read_with(cx, |s, _| !s.is_hidden("alpha")),
+        "the window no longer holds it hidden"
+    );
+    assert!(hidden(&user).is_empty(), "the daemon never had it");
+}
+
+#[gpui_kit::test]
+fn a_hidden_project_is_not_offered_to_the_switcher_new_session_or_a_task_copy(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    // `abacus` is listed first, and hidden: the first project is not the one to start in.
+    add(&user, "abacus", "");
+    add(&user, "bravo", "");
+    add(&user, "cedar", "");
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "abacus", "name": "side", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(made["state"], "ready", "{made}");
+    user.call(
+        "task.add",
+        json!({"project": "bravo", "name": "check", "line": "cargo test"}),
+    )
+    .unwrap();
+    user.call("project.hide", json!({"name": "abacus"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("bravo")) && present(cx, project_id("cedar"))
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, project_id("abacus")));
+
+    // The switcher finds the projects and the workspaces that are shown, not the hidden one's.
+    cx.simulate_keystrokes("ctrl-k");
+    settle(&shell, cx);
+    cx.simulate_input("a");
+    settle(&shell, cx);
+    let said = shell.read_with(cx, |s, cx| s.switcher().read(cx).said());
+    let found: Vec<&String> = said
+        .iter()
+        .filter(|(heading, _)| heading != "Sessions")
+        .flat_map(|(_, titles)| titles)
+        .collect();
+    assert!(
+        found.iter().any(|title| title.as_str() == "bravo"),
+        "a shown project is found: {said:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .all(|title| !title.contains("abacus") && title.as_str() != "side"),
+        "neither the hidden project, its workspace nor its settings are: {said:?}"
+    );
+    cx.simulate_keystrokes("escape");
+    settle(&shell, cx);
+
+    // "New session" with no project in front starts in the first shown one.
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
+    settle(&shell, cx);
+    shell.update_in(cx, |s, window, cx| s.new_session(window, cx));
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("bravo".into())),
+        "the first project is hidden: the next one is"
+    );
+
+    // The dialog of a task's copy offers the shown projects only.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("bravo".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
+    until(&shell, cx, "the task is listed", |cx| {
+        present(cx, "task-more-check")
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("task-more-check", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("copy-task-check", cx));
+    settle(&shell, cx);
+    assert!(present(cx, "copy-task-to-cedar"), "a shown project is");
+    assert!(
+        !present(cx, "copy-task-to-abacus"),
+        "a hidden project is not"
     );
 }
