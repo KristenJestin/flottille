@@ -701,26 +701,22 @@ fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
 #[gpui_kit::test]
 fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
-    // A running row's spinner turns by design: a child that reported is at rest.
-    server.user.fake_script(json!({"turns": [
-        {"when": "Write the tests of the export.", "do": [
-            {"mcp": {"tool": "report", "arguments": {"text": "The export tests are written."}}}]}
-    ]}));
+    // A running row's spinner turns by design: a led session whose turn ended is at rest. (A
+    // child that reported is no row of the sidebar any more, #1520.)
     let (_pilot, mcp) = root(&pc, "auto");
-    let answer = mcp.call(
-        "agent_launch",
-        json!({"kind": "child", "machine": "server", "title": "Write the tests",
-            "brief": "Write the tests of the export."}),
-    );
-    assert!(!answer.error, "{}", answer.text);
-    let at = answer
-        .text
-        .find("(agent ")
-        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
-    let agent = answer.text[at + 7..at + 19].to_owned();
+    let agent = led_on_server(&mcp);
+    eventually("its turn ended on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
     let (shell, cx, row) = the_led_row(&pc, &agent, cx);
-    until(&shell, cx, "the row says it reported", |cx| {
-        label(cx, session_machine_id(&row)).as_deref() == Some("server · reported")
+    until(&shell, cx, "the row says it is at rest", |cx| {
+        matches!(
+            label(cx, session_machine_id(&row)).as_deref(),
+            Some("server · idle" | "server · waiting")
+        )
     });
     // The pulse of a new wait moves by design; past it, the dot is still.
     cx.executor()
@@ -1712,13 +1708,6 @@ fn mark_all_read_marks_read_on_the_other_machine(cx: &mut TestAppContext) {
     });
 }
 
-/// The heights of the sidebar row of `row` while it is in the tree, as it folds away.
-fn row_heights(shell: &Entity<Shell>, row: &str, cx: &mut VisualTestContext) -> Vec<f32> {
-    frame_of(shell, row, cx)
-        .map(|frame| heights(cx, &frame))
-        .unwrap_or_default()
-}
-
 #[gpui_kit::test]
 fn a_session_launched_on_another_machine_closes_from_this_machine_as_a_local_one(
     cx: &mut TestAppContext,
@@ -1733,7 +1722,9 @@ fn a_session_launched_on_another_machine_closes_from_this_machine_as_a_local_one
             .is_ok_and(|shown| shown["agent"]["state"] == "idle")
     });
     let (shell, cx, row) = the_led_row(&pc, &agent, cx);
-    let full = row_heights(&shell, &row, cx).into_iter().fold(0., f32::max);
+    // The frame its row unfolds and folds in, named while the tree has the row.
+    let frame = frame_of(&shell, &row, cx).expect("the row's frame");
+    let full = heights(cx, &frame).into_iter().fold(0., f32::max);
     assert!(full > 0., "{full}");
 
     // Its row's menu ends it, as a local session's: the confirmation, then End.
@@ -1747,11 +1738,9 @@ fn a_session_launched_on_another_machine_closes_from_this_machine_as_a_local_one
 
     // It folds away from the live list, then is gone, and it ended on its machine.
     until(&shell, cx, "the row starts folding away", |cx| {
-        row_heights(&shell, &row, cx)
-            .iter()
-            .all(|height| *height < full)
+        heights(cx, &frame).iter().all(|height| *height < full)
     });
-    let going = row_heights(&shell, &row, cx);
+    let going = heights(cx, &frame);
     assert!(
         going.iter().any(|height| *height > 0.),
         "the row folds away, it does not vanish: {going:?}"
@@ -1792,17 +1781,17 @@ fn a_child_launched_on_another_machine_that_reported_goes_into_ended(cx: &mut Te
         present(cx, live.clone().into())
     });
     settle(&shell, cx);
-    let full = row_heights(&shell, &row, cx).into_iter().fold(0., f32::max);
+    // The frame its row unfolds and folds in, named while the tree has the row.
+    let frame = frame_of(&shell, &row, cx).expect("the row's frame");
+    let full = heights(cx, &frame).into_iter().fold(0., f32::max);
 
     std::fs::write(server.user.path("fake/release"), "").unwrap();
 
     // It leaves the sidebar's live rows, folding away, as an ended local child is no row there.
     until(&shell, cx, "its sidebar row starts folding away", |cx| {
-        row_heights(&shell, &row, cx)
-            .iter()
-            .all(|height| *height < full)
+        heights(cx, &frame).iter().all(|height| *height < full)
     });
-    let going = row_heights(&shell, &row, cx);
+    let going = heights(cx, &frame);
     assert!(
         going.iter().any(|height| *height > 0.),
         "the row folds away, it does not vanish: {going:?}"
