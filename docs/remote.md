@@ -2106,8 +2106,8 @@ never told, and with no session to the hub nothing is told and nothing is kept f
 A user with four machines fills the same settings four times. The hub keeps **settings for all
 machines**: every machine uses them, each machine can **override any one** of them, and go back to
 the value of all machines (decided 2026-11-25, #1330). Built for About you first (#1330, part 1),
-then for the settings a machine often overrides (#1462, below); the guidance files and the rest of
-"Shared, personal" (#1330's inventory) follow in their own issue.
+then for the settings a machine often overrides (#1462, below), then for the guidance files and
+the rest of "Shared, personal" (#1461, #1525, below).
 
 - **Three levels**, read in this order: the project's value (where one exists) → **the machine's
   own** → **all machines'** → the default, as `extensions::value()` reads project → global →
@@ -2149,7 +2149,8 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
   requests themselves: with the hub out of reach its agents read what it last checked, and a change
   made meanwhile waits on the machine where it was made, given to the hub at the next session.
   `about.share` says where it went (`hub`: `given`, `later` with the hub out of reach, `old-hub`
-  with a hub of before them, which keeps none), and the window's toast says it; a value that,
+  with a hub of before them, which keeps none), and the window's toast says it (`Saved on this
+  machine only` with a hub of before); a value that,
   sealed for every machine, would be larger than the hub keeps (notes of characters escaped twice
   over) is refused on the machine, before anything is kept. A
   change reaches every machine at once, a machine that was off at its connect. A machine paired
@@ -2201,16 +2202,50 @@ choice:
 - **The check for updates is shared, the channel is not**; a desktop theme's colours stay the
   machine's.
 
+### The guidance and the rest
+
+The same mechanism, `settings.share`, carries the rest of "Shared, personal" (#1461, #1525), read
+by each setting's own loader under the machine's own file:
+
+| Setting | Value | A machine's own |
+|---|---|---|
+| The rules for every project | `rules` | `rules.md` |
+| The judge's and the compaction's guidance | `judge.guidance`, `compaction.guidance` | `judge.md`, `compaction.md` |
+| Review's guidance, and each check's | `review.guidance`, `review.guidance.<check>` | `review.md`, `review-<check>.md` |
+| Long tool results | `tool_results.limit`, `tool_results.unchanged` | the key of `tool-results.toml` |
+| The shade | `appearance.shade` | `shade` of `appearance.toml` |
+| Specs | `specs.language`, `specs.mode` | the key under `[specs]` of `extensions.toml`, and a project's |
+| Automatic subscriptions | `autosubscriptions.created_pull`, `.branch_pull`, `.ticket` | the key under `[autosubscriptions]`, and a project's |
+| What Review checks | `review.passes` | `passes` under `[review]`, and a project's |
+
+- **A guidance is free text, and no secret**: one that holds a vault entry's value, a token or a
+  key (what masking would change) is refused where it is shared, before it is sealed, and dropped
+  by a machine that receives it. Each text keeps its own limit (8,000 characters for the rules,
+  4,000 for the others), and the window shares each value in a request of its own, so that a
+  sealed copy holds one text: the rules at their limit in characters of four bytes fit the 40 KiB a
+  copy holds, unchanged.
+- **A file of before**: `tool-results.toml` and `appearance.toml` held every key whatever the user
+  chose; such a file's default (the 8,000 characters, the dark shade) is no choice of the
+  machine's, and all machines' value applies over it. What this version writes holds only what
+  the user chose there.
+- **The rules, and each guidance, say where they come from**: `source: "all"` while the machine
+  follows all machines', which a project's own rules still follow or replace as before.
+
 **In the window** (decided 2026-11-25 on the prototype): Settings' picker "Settings of", on the
 title's line of the page's header, which stays in place while the sections scroll, lists **All
 machines** first, then each machine. All machines shows the sections every machine may share on
 General: About you, New sessions, Models (the judge's, the compactor's and Review's), Sessions,
 Workspaces folder, Updates and Connections (a switch for each of this machine's `https://`
-connections that names no vault entry). A change there is signed with the device key and saved for
+connections that names no vault entry), then Rules, Guidance (the judge's and the compaction's),
+Review (what it checks, its guidance and each check's), Long tool results, Appearance (the shade),
+Specs and Automatic subscriptions. Where no machine shared a value, All machines shows
+Flottille's default, never this machine's own, and says under it `Flottille's default: nothing is
+shared yet.`, a line that folds away once a value is shared. A change there is signed with the device key and saved for
 all machines, each section by its own Save, drawn once something differs; a model is chosen from
 this machine's providers, or `Each machine's own`. A section a machine changed is marked under it,
 `Changed on server` with **Use all machines' value** (on a machine's page: New sessions, Sessions,
-the judge, the compaction, Review, Connections, the workspaces folder, and on this machine's
+the judge, the compaction, Review, Connections, the workspaces folder, the rules, the judge's
+guidance, Long tool results, Appearance, Specs, Automatic subscriptions, and on this machine's
 Version), a value it ignores is said above it, and Appearance and Version say what stays the
 machine's.
 On a machine, About you says once `The values of all machines, unless changed here.`; a field
@@ -2272,9 +2307,9 @@ on a real phone, by hand, and reported.
   state folder. Code it runs can sign what this device's role allows, a switch to Full among
   them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
   do not hold against code run in Full, which can sign a new one at any time.
-- **Configuration is synced for About you and the settings a machine often overrides only**
-  ("Settings for all machines"): the rest of the settings follow in their own issues, and a project
-  is registered by hand on each machine.
+- **Configuration is synced for About you, the settings a machine often overrides, the guidance and
+  the rest of "Shared, personal" only** ("Settings for all machines"): a project is registered by
+  hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a
   launch.
@@ -2304,6 +2339,12 @@ row of a session led from another machine.
   Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
   do), rather than a key of its own for it, which the member list would have to sign and send. The
   use of one key for both is studied (eprint 2021/509) and found sound for this.
+- **A shade chosen on a machine is its own only when it differs from the one it follows** (#1525):
+  the window sends the shade with the theme, so that changing the theme alone would otherwise make
+  the shade the machine's. A file of before is read as said under "The guidance and the rest".
+- **What All machines shows of a value none shared is Flottille's default** (#1525), said as such
+  under it; a list (Review's checks, the subscriptions) and a choice among words share what they
+  show once it changes, a text or a line emptied shares nothing.
 - **A connection that names a vault entry is not shared** (#1462), rather than shared without the
   entry's place, which would reach the server without what it needs, or with the entry's name, a
   machine's own.

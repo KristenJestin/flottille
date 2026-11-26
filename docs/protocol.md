@@ -754,13 +754,25 @@ the compactor), `review.spec_model`, `review.bugs_model`, `review.standards_mode
 `"false"`), `workspaces_folder` (a folder under the home, `~/…`, holding `<project>`),
 `update.check` (`"automatically"` or `"never"`) and `connections` (a JSON list of declarations
 reached over `https://`, each `{"name", "about", "url", "only"?, "except"?, "client_id"?,
-"enabled"?}`).
+"enabled"?}`). Then the guidance and the rest of "Shared, personal" (#1461): `rules`,
+`judge.guidance`, `compaction.guidance`, `review.guidance` and `review.guidance.<check>` (`spec`,
+`bugs`, `standards`, `security`), each the text of the file it stands for, within that file's
+limit (8,000 characters for the rules, 4,000 for the others); `tool_results.limit` (`"4000"` to
+the largest limit, or `"off"`), `tool_results.unchanged` (`"true"` or `"false"`),
+`appearance.shade` (`"light"` or `"dark"`); `specs.language`, `specs.mode`,
+`autosubscriptions.created_pull`, `autosubscriptions.branch_pull`, `autosubscriptions.ticket` and
+`review.passes`, each the JSON text of what `extension.set` takes for it (`"\"fr-FR\""`,
+`"[\"merged\"]"`). A guidance is free text: one that holds a secret (a vault entry's value, a
+token, what masking would change) is `refused` ("holds a secret: keep secrets in the vault and
+name the entry instead"), and a machine that receives one drops it.
 
-- `settings.shared` answers `{"all", "own", "ignored"}`: all machines' values by name (`null`
-  without a hub), the names among them this machine holds itself (a connection it declares
-  otherwise as `connections.<name>`; a judge or compactor Flottille picked is none), and why each
-  value it cannot follow is ignored here, by name (a provider not ready, a model it does not
-  offer).
+- `settings.shared` answers `{"all", "own", "ignored", "defaults"}`: all machines' values by name
+  (`null` without a hub), the names among them this machine holds itself (a connection it
+  declares otherwise as `connections.<name>`; a judge or compactor Flottille picked is none; a
+  guidance file of only spaces is none), why each value it cannot follow is ignored here, by name
+  (a provider not ready, a model it does not offer), and Flottille's default of each value of the
+  guidance and the rest, as its value says it (what the window's All machines shows while none
+  is shared).
 - `settings.share {values: {<name>: <text>}}` sets values of all machines, an empty text clearing
   one. Only as a request signed by the user's device, as `about.share`; `refused` for a name that
   is none, a value the setting would refuse, a workspaces folder that is not under the home, a
@@ -771,9 +783,18 @@ reached over `https://`, each `{"name", "about", "url", "only"?, "except"?, "cli
 
 A value of all machines this machine takes or changes, and an own value dropped, emits
 `settings.shared_changed {names}`, and each setting it changes emits its own change
-(`provider.new_session_changed`, `compaction.changed`, `sessions.changed` and the others; the
-judge only `settings.shared_changed`, `provider.judge_changed` being this machine's own choice). No
-tool of an agent reads or writes them.
+(`provider.new_session_changed`, `compaction.changed`, `sessions.changed`, `rules.changed`,
+`judge.changed`, `review.changed`, `tool_results.changed`, `appearance.changed`,
+`extension.changed` and the others; the judge's model only `settings.shared_changed`,
+`provider.judge_changed` being this machine's own choice). No tool of an agent reads or writes
+them.
+
+`rules.show`, `judge.show`, `review.show` and `compaction.show`'s `guidance` say `source: "all"`
+while this machine follows all machines' text, having none of its own. A machine's own value of
+the rest is what its file says: `tool-results.toml` and `appearance.toml` hold only what the user
+chose there (`tool_results.set` writes what it is given, `appearance.set` a shade other than the
+one followed); in such a file written before (#1525), the default limit and the dark shade are no
+choice, and all machines' value applies over them.
 
 ### The judge methods
 
