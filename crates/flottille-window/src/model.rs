@@ -488,10 +488,21 @@ pub struct Session {
 pub struct Blocked {
     /// The people, by the names the forge or the tracker gives them.
     pub by: Vec<String>,
-    /// What for: `review of #123`, `ticket SHOP-12`.
+    /// What for, in words: `review of #123`, `ticket SHOP-12`.
     pub why: String,
+    /// What it waits on, as the daemon says it as data; none from a daemon of before.
+    pub on: Option<WaitOn>,
     /// Since when, in milliseconds since the Unix epoch.
     pub since: u64,
+}
+
+/// What a blocked session waits on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitOn {
+    /// The review of a pull request, by its number.
+    PullRequest(u64),
+    /// A ticket assigned to someone else, by its key as the tracker says it (`#5`, `SHOP-12`).
+    Ticket(String),
 }
 
 impl Blocked {
@@ -505,6 +516,13 @@ impl Blocked {
         (!by.is_empty()).then(|| Blocked {
             by,
             why: value["why"].as_str().unwrap_or_default().to_owned(),
+            on: match value["on"]["kind"].as_str() {
+                Some("pull_request") => value["on"]["number"].as_u64().map(WaitOn::PullRequest),
+                Some("ticket") => value["on"]["key"]
+                    .as_str()
+                    .map(|key| WaitOn::Ticket(key.to_owned())),
+                _ => None,
+            },
             since: value["since"].as_u64().unwrap_or_default(),
         })
     }

@@ -125,6 +125,11 @@ struct About {
     from: String,
 }
 
+/// Whether two keys say the same ticket, however they are spelt: `#5` and `5`, `abc-1` and `ABC-1`.
+fn same_ticket(a: &str, b: &str) -> bool {
+    a == b
+}
+
 /// The key of the ticket a subject is about, said in the Workspace section; none for another kind.
 fn ticket_key(subject: &crate::model::Subject) -> Option<SharedString> {
     subject
@@ -11656,10 +11661,23 @@ mod tests {
     }
 
     #[test]
+    fn a_ticket_is_the_same_whatever_its_spelling() {
+        assert!(same_ticket("#5", "#5"));
+        assert!(same_ticket("#5", "5"));
+        assert!(same_ticket(" 5 ", "#5"));
+        assert!(same_ticket("abc-1", "ABC-1"));
+        assert!(same_ticket("#ABC-1", "abc-1"));
+        assert!(!same_ticket("#5", "#6"));
+        assert!(!same_ticket("ABC-1", "ABC-11"));
+        assert!(!same_ticket("#5", "ABC-5"));
+    }
+
+    #[test]
     fn a_wait_says_who_since_when_and_that_it_comes_back_by_itself() {
         let blocked = |by: &[&str]| crate::model::Blocked {
             by: by.iter().map(|name| name.to_string()).collect(),
             why: "ticket ATL-48".into(),
+            on: None,
             since: 0,
         };
         let line = blocked_line(&blocked(&["Maya"]));
