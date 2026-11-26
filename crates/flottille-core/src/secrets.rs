@@ -1653,6 +1653,39 @@ mod tests {
     }
 
     #[test]
+    fn a_token_set_by_code_in_the_middle_of_a_line_is_kept() {
+        let env = BTreeMap::new();
+        // Code read back from a diff, a file or a command's output: an agent that sees
+        // `[masked]` in it may write it back.
+        for text in [
+            "client = Client(url, token=self.token)",
+            "api(url, token=token)",
+            "let token=foo_bar;",
+            "local token=$(gh auth token)",
+            "run --token=$GH_TOKEN now",
+            "set(a, token=cfg.token, b)",
+            "max_token=4096 and max_token=4096",
+            "set token=None here",
+            "see https://example.org/api?token= for it",
+        ] {
+            assert_eq!(mask(text, &env), text, "{text}");
+        }
+        // A real opaque value stays masked.
+        for (text, masked) in [
+            (
+                "then token=AbC123xyz987QwErTy now",
+                "then token=[masked] now",
+            ),
+            (
+                "then token=example-opaque-0000 now",
+                "then token=[masked] now",
+            ),
+        ] {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
     fn a_token_in_the_middle_of_a_line_streams_as_it_reads_whole() {
         let text = "login failed, token=example-opaque-0000 then access_token=example-0000-fake \
                     and ATATT3xExampleOnlyFake-0000_aaaa-bbbb done";
