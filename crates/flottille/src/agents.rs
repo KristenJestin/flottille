@@ -524,6 +524,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_any_child(daemon, &agent, "cancels its turn")?;
+            // The user's Stop: what its turn waits on stops with it (#1548).
+            crate::runs::stop_with_turn(daemon, &agent.id);
             let (answer, answered) = oneshot::channel();
             let task = daemon
                 .agents

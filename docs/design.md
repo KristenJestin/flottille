@@ -771,8 +771,9 @@ with says so. Reading another session says the mode of that session's tree too.
   lose, inline interpreter code, a script the agent wrote), with no request and no judge, but for
   the first message of a session to another it did not start, whose leave only the user gives
   (§7.2), a tracker change that would send the worklog's token to another site or name
-  another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
-  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own, as in
+  another entry for it (`docs/tickets.md`, "Logging time"), a worklog deleted
+  (`docs/tickets.md`, "Correcting a worklog"), and a change of About you (§8, "Instructions"),
+  which every agent started after it reads. **A command it runs is the user's own, as in
   their terminal**: no namespace, no Landlock and the daemon's environment, as a command the user
   typed, so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work there. **Nothing is held
   back from it**: their keys, SSH agent, display, sign-ins and keyring, and Flottille's own
@@ -1100,7 +1101,9 @@ per-session part, then the project layer, frozen per session. The base has three
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
 it for its own discipline. **About the user** is what the user says of themselves (`about.toml` in
 the configuration folder, edited in the window's Settings, "About you"): their name, how to refer
-to them and anything every agent should know, each optional; none set, no block. It comes before
+to them and anything every agent should know, each optional; none set, no block. An agent reads
+it and proposes a change of this machine's with `project {action: about | set_about}`, which only
+the user allows, in every mode (`tools.md`, "The project"). It comes before
 the rules, in the part every project shares, so that every agent and every child has it, and what
 a lead writes for another agent follows it. **How to work** is the user's: a default text, the user's own for all
 projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in

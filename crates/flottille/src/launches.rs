@@ -249,21 +249,20 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     // Kept before the code goes, so that a child counts in the cap here from now on.
     write(daemon, &record).map_err(refused)?;
     drop(_slot);
-    let sent = crate::travel::send(
+    let (sent, snapshots) = crate::travel::send_placing(
         daemon,
         machine,
         &launch,
         &project.name,
         &place,
         crate::travel::Testing::default(),
+        || Placing::new(&remote, &record.machine, &launch, &caller.id),
     )
     .await;
-    while crate::across::playing_slow_call() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let mut placed = match sent {
+    let (mut placed, placing) = match sent {
         Ok(placed) => placed,
         Err(why) => {
+            snapshots.remove().await;
             let _ = daemon.write(|store| {
                 store
                     .forget_launch("out", &record.machine, &launch)
@@ -275,6 +274,12 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         }
     };
     record.agent = placed["session"].as_str().map(str::to_owned);
+    if let Some(session) = &record.agent {
+        placing.named(session);
+    }
+    while crate::across::playing_slow_call() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     record.request = placed["request"].as_u64();
     record.workspace = placed["workspace"].as_str().map(str::to_owned);
     record.asked["there"] = json!({"project": placed["project"], "made": placed["made"],
@@ -283,7 +288,11 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         Some(_) => "held".into(),
         None => "started".into(),
     };
-    write(daemon, &record).map_err(refused)?;
+    let written = write(daemon, &record);
+    drop(placing);
+    // Slow (git), so after the write that ends the wait of the session's first calls.
+    snapshots.remove().await;
+    written.map_err(refused)?;
     // The user there may have answered between the two writes: their answer, come first, was
     // kept (`Store::decide_launch`), and the caller is never told it waits for it. Read before
     // `recorded`, which ends a launch whose caller is gone.
@@ -443,6 +452,86 @@ fn answer_to_caller(
              do not reach it. You hear nothing more of it unless it writes to you; you can write \
              to it with session_send. {back}"
         ),
+    }
+}
+
+/// The launches this machine sent to another whose session there is not recorded here yet: from
+/// the moment their code is there and their workspace is asked to the write that names their
+/// session (`launch`). A session may call here in its first turn within that round trip, before
+/// its launch names it (`across::launches_recorded`).
+#[derive(Default)]
+pub(crate) struct Placings(std::sync::Mutex<Vec<Placed>>);
+
+/// One launch of [`Placings`]: its machine's key, its id, its caller here, and its session there
+/// once that machine answered.
+struct Placed {
+    machine: String,
+    launch: String,
+    caller: String,
+    session: Option<String>,
+}
+
+impl Placings {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Placed>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether a call of the machine of key `machine`, of its agent `caller` aimed at `agent`
+    /// here, may be the first call of a session one of these launches starts: `caller` is that
+    /// session, or, while that machine has not named it yet, `agent` is the launch's caller.
+    pub(crate) fn holds(&self, machine: &str, caller: &str, agent: &str) -> bool {
+        self.lock().iter().any(|placed| {
+            placed.machine == machine
+                && match &placed.session {
+                    Some(session) => session == caller,
+                    None => placed.caller == agent,
+                }
+        })
+    }
+}
+
+/// One launch of [`Placings`], for as long as it lives, however its launch ends.
+struct Placing {
+    remote: Arc<Remote>,
+    launch: String,
+}
+
+impl Placing {
+    fn new(remote: &Arc<Remote>, machine: &str, launch: &str, caller: &str) -> Placing {
+        remote.placing.lock().push(Placed {
+            machine: machine.to_owned(),
+            launch: launch.to_owned(),
+            caller: caller.to_owned(),
+            session: None,
+        });
+        Placing {
+            remote: remote.clone(),
+            launch: launch.to_owned(),
+        }
+    }
+
+    /// Its session there, as that machine answered.
+    fn named(&self, session: &str) {
+        if let Some(placed) = self
+            .remote
+            .placing
+            .lock()
+            .iter_mut()
+            .find(|placed| placed.launch == self.launch)
+        {
+            placed.session = Some(session.to_owned());
+        }
+    }
+}
+
+impl Drop for Placing {
+    fn drop(&mut self) {
+        self.remote
+            .placing
+            .lock()
+            .retain(|placed| placed.launch != self.launch);
     }
 }
 

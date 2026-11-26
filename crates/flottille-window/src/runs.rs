@@ -33,7 +33,7 @@ use gpui_kit::{
 };
 use serde_json::Value;
 
-use crate::conversation::{CommandCard, Ending};
+use crate::conversation::{CommandCard, Ending, Stopper};
 use crate::services::ServicesPage;
 use crate::session::{SessionPage, THE_CONVERSATION, seconds};
 use crate::shell::now_ms;
@@ -157,6 +157,9 @@ pub struct CommandRow {
     pub service: bool,
     /// The services it needs that stopped while it runs.
     pub needs_stopped: Vec<String>,
+    /// Who stopped it, for one stopped or interrupted (`agent`, `user`, `session`, `workspace`,
+    /// `daemon`).
+    pub stopped_by: Option<String>,
 }
 
 /// What the drawer follows: a command, or a step of a workspace's setup.
@@ -210,6 +213,7 @@ impl CommandRow {
                 .flatten()
                 .filter_map(|name| name.as_str().map(str::to_owned))
                 .collect(),
+            stopped_by: value["stopped_by"].as_str().map(str::to_owned),
         }
     }
 
@@ -245,6 +249,7 @@ impl CommandRow {
             url: None,
             service: false,
             needs_stopped: Vec::new(),
+            stopped_by: None,
         }
     }
 
@@ -275,7 +280,7 @@ impl CommandRow {
             ("running", ..) => Ending::Running,
             ("exited", Some(code), _) => Ending::Exited(code),
             ("exited", None, signal) => Ending::Killed(signal.unwrap_or_default()),
-            ("stopped", ..) => Ending::Stopped,
+            ("stopped", ..) => Ending::Stopped(Stopper::of(self.stopped_by.as_deref())),
             _ => Ending::Interrupted,
         }
     }
@@ -336,7 +341,7 @@ pub fn mark_of(ending: Ending, p: &Palette) -> (Icon, Hsla, String) {
         Ending::Running => (Icon::Running, p.run),
         Ending::Exited(0) => (Icon::Check, p.ok),
         Ending::Exited(_) | Ending::Killed(_) => (Icon::Close, p.fail),
-        Ending::Stopped => (Icon::Stopped, p.faint),
+        Ending::Stopped(_) => (Icon::Stopped, p.faint),
         Ending::Interrupted => (Icon::Interrupted, p.faint),
     };
     (mark, ink, ending.said())
@@ -440,7 +445,10 @@ pub fn card(
                 .text_color(color)
                 .aria_label(SharedString::from(said.clone()))
                 .child(icon(mark).size(px(12.)).text_color(color))
-                .child(SharedString::from(said))
+                // From running to how it ended, and who stopped it: the words cross-fade.
+                .child(changing(id("exit-said"), said, |said| {
+                    div().child(said).into_any_element()
+                }))
                 .test_support(),
         )
         .children(card.seconds.map(|seconds_taken| {
@@ -2167,7 +2175,25 @@ mod tests {
             url: None,
             service: false,
             needs_stopped: Vec::new(),
+            stopped_by: None,
         }
+    }
+
+    #[test]
+    fn a_stopped_command_says_who_stopped_it() {
+        for (by, said) in [
+            ("agent", "stopped by the agent"),
+            ("user", "stopped by you"),
+            ("session", "stopped when its session ended"),
+            ("workspace", "stopped when its workspace was removed"),
+        ] {
+            let row = CommandRow::of(&serde_json::json!({"run": "r1", "state": "stopped",
+                "stopped_by": by}));
+            assert_eq!(row.ending().said(), said, "{by}");
+        }
+        let row = CommandRow::of(&serde_json::json!({"run": "r1", "state": "interrupted",
+            "stopped_by": "daemon"}));
+        assert_eq!(row.ending().said(), "interrupted when Flottille stopped");
     }
 
     #[test]

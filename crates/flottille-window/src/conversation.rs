@@ -293,8 +293,33 @@ pub enum Ending {
     Running,
     Exited(i32),
     Killed(i32),
-    Stopped,
+    Stopped(Stopper),
     Interrupted,
+}
+
+/// Who stopped a command, as the daemon says it (`stopped_by`): the line that shows it stopped
+/// says who, never only that it stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopper {
+    /// A run stopped before the daemon kept who stopped it.
+    Unknown,
+    Agent,
+    User,
+    Session,
+    Workspace,
+}
+
+impl Stopper {
+    /// From the daemon's `stopped_by`.
+    pub fn of(by: Option<&str>) -> Stopper {
+        match by {
+            Some("agent") => Stopper::Agent,
+            Some("user") => Stopper::User,
+            Some("session") => Stopper::Session,
+            Some("workspace") => Stopper::Workspace,
+            _ => Stopper::Unknown,
+        }
+    }
 }
 
 impl Ending {
@@ -304,8 +329,12 @@ impl Ending {
             Ending::Running => "running".into(),
             Ending::Exited(code) => format!("exit {code}"),
             Ending::Killed(signal) => format!("signal {signal}"),
-            Ending::Stopped => "stopped".into(),
-            Ending::Interrupted => "interrupted".into(),
+            Ending::Stopped(Stopper::Unknown) => "stopped".into(),
+            Ending::Stopped(Stopper::Agent) => "stopped by the agent".into(),
+            Ending::Stopped(Stopper::User) => "stopped by you".into(),
+            Ending::Stopped(Stopper::Session) => "stopped when its session ended".into(),
+            Ending::Stopped(Stopper::Workspace) => "stopped when its workspace was removed".into(),
+            Ending::Interrupted => "interrupted when Flottille stopped".into(),
         }
     }
 }
@@ -1869,14 +1898,19 @@ pub fn command_card(text: &str) -> Option<CommandCard> {
 fn ending_of(how: &str) -> Option<Ending> {
     Some(match how {
         "is running" => Ending::Running,
-        "was stopped" | "was stopped by the user" => Ending::Stopped,
+        "was stopped" => Ending::Stopped(Stopper::Unknown),
+        "was stopped by the user" => Ending::Stopped(Stopper::User),
+        "was stopped by the agent that started it" => Ending::Stopped(Stopper::Agent),
+        "was stopped because its session ended" => Ending::Stopped(Stopper::Session),
+        "was stopped because its workspace was removed" => Ending::Stopped(Stopper::Workspace),
         how if how.starts_with("was interrupted") => Ending::Interrupted,
         how => match (
             how.strip_prefix("exited with code "),
             how.strip_prefix("was killed by signal "),
         ) {
             (Some(code), _) => Ending::Exited(code.parse().ok()?),
-            (_, Some(signal)) => Ending::Killed(signal.parse().ok()?),
+            // What follows the number says where the signal came from.
+            (_, Some(signal)) => Ending::Killed(signal.split(' ').next()?.parse().ok()?),
             _ => return None,
         },
     })
@@ -3818,7 +3852,65 @@ mod tests {
             json!({"text": ended_delivery("was stopped by the user")}),
         ));
 
-        assert_eq!(cards(&c)[0].ending, Ending::Stopped);
+        assert_eq!(cards(&c)[0].ending, Ending::Stopped(Stopper::User));
+    }
+
+    #[test]
+    fn a_command_s_card_says_who_stopped_it() {
+        for (how, said) in [
+            ("was stopped by the user", "stopped by you"),
+            (
+                "was stopped by the agent that started it",
+                "stopped by the agent",
+            ),
+            (
+                "was stopped because its session ended",
+                "stopped when its session ended",
+            ),
+            (
+                "was stopped because its workspace was removed",
+                "stopped when its workspace was removed",
+            ),
+            ("was stopped", "stopped"),
+        ] {
+            let mut c = root();
+            running_card(&mut c);
+
+            c.apply(&event(
+                20,
+                "agent.prompted",
+                json!({"text": ended_delivery(how)}),
+            ));
+
+            assert_eq!(cards(&c)[0].ending.said(), said, "{how}");
+        }
+    }
+
+    #[test]
+    fn a_command_killed_from_outside_flottille_ends_its_card_killed() {
+        for (how, signal) in [
+            (
+                "was killed by signal 9 (SIGKILL) from outside Flottille: the system's \
+                 out-of-memory killer, or a kill",
+                9,
+            ),
+            (
+                "was killed by signal 15 (SIGTERM) from outside Flottille",
+                15,
+            ),
+            ("was killed by signal 1 from outside Flottille", 1),
+        ] {
+            let mut c = root();
+            running_card(&mut c);
+
+            c.apply(&event(
+                20,
+                "agent.prompted",
+                json!({"text": ended_delivery(how)}),
+            ));
+
+            assert_eq!(cards(&c)[0].ending, Ending::Killed(signal), "{how}");
+        }
     }
 
     #[test]
@@ -4177,6 +4269,7 @@ mod tests {
             url: None,
             service: false,
             needs_stopped: Vec::new(),
+            stopped_by: None,
         }
     }
 

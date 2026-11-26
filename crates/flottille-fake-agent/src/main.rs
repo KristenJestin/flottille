@@ -107,6 +107,7 @@
 //! | `{"mcp": {"tool": "agent_launch", "arguments": {…}, "keep": "w1"}}` | the same, and keeps the first agent id (12 hexadecimal digits) of the answer's text under that name |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}, "quiet": true}}` | the same without its tool call's session updates: an MCP call that lands before the updates around it |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}, "keyed": true}}` | the same, the call carrying its tool call's id as its call key (`_meta`, `claudecode/toolUseId`), as Claude Code's do |
+//! | `{"mcp": {"tool": "run", "arguments": {…}, "cancellable": true}}` | the same, and a cancel of the turn while the call waits gives it up as Claude Code does: its HTTP request is closed, recorded `{"mcp": {"cancelled": true}}`, and the turn ends `cancelled` |
 //!
 //! In the texts of an `mcp` step's arguments, `{kept:w1}` is replaced by the value kept under
 //! `w1`, `{prompt:request}` by the first request number (`#3`) of the turn's prompt (a number
@@ -590,7 +591,9 @@ impl Agent {
                 self.record.write(json!({"permission": answer}));
             } else if let Some(call) = step.get("mcp") {
                 let call = self.filled(call, prompt);
-                self.call_mcp(session, &call);
+                if !self.call_mcp(session, &call, cancelled) {
+                    return "cancelled".into();
+                }
             } else if let Some(ms) = step["wait"].as_u64() {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline {
@@ -744,7 +747,8 @@ impl Agent {
         }
     }
 
-    fn call_mcp(&mut self, session: &str, call: &Value) {
+    /// Calls the tool; `false` when the turn was cancelled meanwhile and the call given up.
+    fn call_mcp(&mut self, session: &str, call: &Value, cancelled: &Mutex<bool>) -> bool {
         let tool = call["tool"].as_str().unwrap_or_default();
         let call_id = format!("mcp-{}", self.next_request);
         self.next_request += 1;
@@ -766,9 +770,23 @@ impl Agent {
             None => Err("the session has no HTTP MCP server".to_owned()),
             Some(server) => {
                 let key = (call["keyed"] == true).then_some(call_id.as_str());
-                mcp_call(server, tool, &call["arguments"], key)
+                let cancellable = (call["cancellable"] == true).then_some(cancelled);
+                mcp_call(server, tool, &call["arguments"], key, cancellable)
             }
         };
+        if matches!(outcome, Ok(None)) {
+            self.record
+                .write(json!({"mcp": {"cancelled": true}, "session": session}));
+            if !quiet {
+                self.notify(
+                    session,
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+                        "status": "failed"}),
+                );
+            }
+            return false;
+        }
+        let outcome = outcome.map(|answered| answered.expect("not given up"));
         let (status, body) = match &outcome {
             Ok((status, body)) => (*status, body.clone()),
             Err(error) => (0, json!({"error": error})),
@@ -793,6 +811,7 @@ impl Agent {
             }
             self.notify(session, update);
         }
+        true
     }
 
     fn say(&self, session: &str, text: &str, message: Option<&str>) {
@@ -957,13 +976,16 @@ fn agent_id(text: &str) -> Option<String> {
 }
 
 /// An MCP tool call over streamable HTTP: `initialize`, `notifications/initialized`, then
-/// `tools/call`; the status and the JSON answer of the last one.
+/// `tools/call`; the status and the JSON answer of the last one. With `cancellable`, a cancel of
+/// the turn while it waits gives the call up, as Claude Code does: its request is closed (the
+/// server keeps no protocol session, so the request is the call), and `None`.
 fn mcp_call(
     server: &Value,
     tool: &str,
     arguments: &Value,
     key: Option<&str>,
-) -> Result<(u16, Value), String> {
+    cancellable: Option<&Mutex<bool>>,
+) -> Result<Option<(u16, Value)>, String> {
     let url = server["url"].as_str().ok_or("the MCP server has no url")?;
     let mut headers: Vec<(String, String)> = server["headers"]
         .as_array()
@@ -995,12 +1017,41 @@ fn mcp_call(
     if let Some(key) = key {
         params["_meta"] = json!({"claudecode/toolUseId": key});
     }
-    let (status, body, _) = post(
-        url,
-        &headers,
-        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
-    )?;
-    Ok((status, body))
+    let request = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params});
+    let Some(cancelled) = cancellable else {
+        let (status, body, _) = post(url, &headers, &request)?;
+        return Ok(Some((status, body)));
+    };
+    let (host, path) = host_and_path(url)?;
+    let stream = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
+    let closing = stream.try_clone().map_err(|e| e.to_string())?;
+    let (sender, answer) = mpsc::channel();
+    let (host, path) = (host.to_owned(), path.to_owned());
+    std::thread::spawn(move || {
+        let _ = sender.send(post_on(stream, &host, &path, &headers, &request));
+    });
+    loop {
+        match answer.recv_timeout(Duration::from_millis(10)) {
+            Ok(posted) => return posted.map(|(status, body, _)| Some((status, body))),
+            Err(RecvTimeoutError::Disconnected) => return Err("the call was lost".into()),
+            Err(RecvTimeoutError::Timeout) if *cancelled.lock().unwrap() => {
+                let _ = closing.shutdown(std::net::Shutdown::Both);
+                return Ok(None);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+/// The host and the path of an `http://` URL.
+fn host_and_path(url: &str) -> Result<(&str, &str), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or("only http:// MCP servers are supported")?;
+    Ok(match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, "/"),
+    })
 }
 
 /// One HTTP/1.1 POST of a JSON body: the status, the JSON answer (from a JSON body or the last
@@ -1010,14 +1061,19 @@ fn post(
     headers: &[(String, String)],
     body: &Value,
 ) -> Result<(u16, Value, HashMap<String, String>), String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or("only http:// MCP servers are supported")?;
-    let (host, path) = match rest.find('/') {
-        Some(at) => (&rest[..at], &rest[at..]),
-        None => (rest, "/"),
-    };
-    let mut stream = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
+    let (host, path) = host_and_path(url)?;
+    let stream = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
+    post_on(stream, host, path, headers, body)
+}
+
+/// [`post`] on a connection already open to `host`.
+fn post_on(
+    mut stream: TcpStream,
+    host: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &Value,
+) -> Result<(u16, Value, HashMap<String, String>), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(600)))
         .map_err(|e| e.to_string())?;

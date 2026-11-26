@@ -185,7 +185,7 @@ fn listed(
     tail: Vec<String>,
 ) -> Value {
     let agent = run.agent.as_deref().and_then(|id| agents.get(id));
-    let mut shown = run_json(run);
+    let mut shown = run_json(daemon, run);
     shown["root"] = run
         .agent
         .as_deref()
@@ -214,7 +214,7 @@ fn output(daemon: &Daemon, asked: Output) -> Answer {
     let view = runs::view(daemon, &asked.run).ok_or_else(|| not_found(&asked.run))?;
     let lines: Vec<&str> = view.output.lines().collect();
     let from = lines.len().saturating_sub(tail);
-    let mut shown = run_json(&view.run);
+    let mut shown = run_json(daemon, &view.run);
     shown["output"] = lines[from..].join("\n").into();
     shown["earlier"] = (from > 0 || view.cut).into();
     Ok(shown)
@@ -228,7 +228,7 @@ async fn stop(daemon: &Arc<Daemon>, id: &str) -> Answer {
         runs::stop_by_user(daemon, id).await;
     }
     let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
-    Ok(json!({"run": run_json(&view.run)}))
+    Ok(json!({"run": run_json(daemon, &view.run)}))
 }
 
 /// Stops the run if it runs and starts its line again in its place; answers with the new run.
@@ -237,7 +237,7 @@ async fn restart(daemon: &Arc<Daemon>, id: &str) -> Answer {
     let (run, notice) = runs::restart_by_user(daemon, &view.run)
         .await
         .map_err(Failure::refused)?;
-    Ok(json!({"run": run_json(&run), "notice": notice}))
+    Ok(json!({"run": run_json(daemon, &run), "notice": notice}))
 }
 
 fn dismiss(daemon: &Daemon, id: &str) -> Answer {
@@ -267,7 +267,7 @@ fn not_found(id: &str) -> Failure {
 }
 
 /// A run as the clients read it, without its output.
-fn run_json(run: &Run) -> Value {
+fn run_json(daemon: &Daemon, run: &Run) -> Value {
     json!({
         "run": run.id,
         "agent": run.agent,
@@ -278,6 +278,7 @@ fn run_json(run: &Run) -> Value {
         "state": run.state.as_str(),
         "exit_code": run.exit_code,
         "signal": run.signal,
+        "stopped_by": runs::stopped_by(daemon, run),
         "started_at": run.started_at,
         "ended_at": run.ended_at,
         "ready": run.ready.map(|ready| ready.as_str()),

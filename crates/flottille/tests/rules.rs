@@ -88,7 +88,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-fn held(answer: Answer) -> u64 {
+pub(crate) fn held(answer: Answer) -> u64 {
     assert!(!answer.error, "an error: {}", answer.text);
     let rest = answer
         .text
@@ -97,7 +97,7 @@ fn held(answer: Answer) -> u64 {
     rest.split('.').next().unwrap().parse().unwrap()
 }
 
-fn done(answer: Answer) -> String {
+pub(crate) fn done(answer: Answer) -> String {
     assert!(!answer.error, "an error: {}", answer.text);
     assert!(
         !answer.text.starts_with("Waiting for"),
@@ -111,7 +111,7 @@ fn store(user: &User) -> Store {
     Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
-fn cli(user: &User, args: &[&str]) {
+pub(crate) fn cli(user: &User, args: &[&str]) {
     let output = user.run(args);
     assert!(
         output.status.success(),
@@ -120,7 +120,7 @@ fn cli(user: &User, args: &[&str]) {
     );
 }
 
-fn settled(user: &User, number: u64) -> Delivery {
+pub(crate) fn settled(user: &User, number: u64) -> Delivery {
     let id = format!("approval-{number}");
     eventually("the answer", || {
         store(user).delivery(&id).unwrap().is_some()
@@ -593,7 +593,7 @@ fn a_child_has_the_rules_in_its_instructions_but_no_tool_to_change_them() {
 }
 
 /// The request a held call made, as `approval.list` gives it.
-fn request(user: &User, answer: Answer) -> Value {
+pub(crate) fn request(user: &User, answer: Answer) -> Value {
     no_escalation(user);
     let number = held(answer);
     user.call("approval.list", json!({})).unwrap()["requests"]
