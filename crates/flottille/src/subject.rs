@@ -37,10 +37,32 @@ const TAKES: &[&str] = &[
 /// The session's subject as last said, which `agent.list` and the tree carry: `null` while it
 /// never held anything. Kept by `refresh`, so that a list derives nothing.
 pub fn said(daemon: &Daemon, agent: &Agent) -> Value {
-    daemon
+    let mut said = daemon
         .read(|store| store.agent_subject(&agent.id))
         .map(|(_, said)| said)
-        .unwrap_or(Value::Null)
+        .unwrap_or(Value::Null);
+    // A subject kept before `url` was said has none: its ticket's page, as the items last read
+    // it, is given when it is read, so that a window always has what its Open button opens.
+    if said["kind"] == "ticket"
+        && said["url"].as_str().is_none()
+        && let Some(key) = said["key"].as_str()
+        && let Ok(Some(item)) = daemon.read(|store| Ok(ticket_item(store, &agent.project, key)))
+    {
+        said["url"] = json!(item.url);
+    }
+    said
+}
+
+/// The ticket `key` (`#5`, `ABC-1`) of `project` as the items last read it.
+fn ticket_item(store: &flottille_core::store::Store, project: &str, key: &str) -> Option<Item> {
+    let stored = match Key::parse(key).ok()? {
+        Key::Issue(number) => number.to_string(),
+        Key::Jira(key) => key,
+    };
+    store
+        .item_by_key(project, "ticket", None, &stored)
+        .ok()
+        .flatten()
 }
 
 /// The session's subject now, derived from what it holds and from the items.
@@ -52,17 +74,7 @@ fn derived(daemon: &Daemon, agent: &Agent) -> Value {
                 Some(name) => store.workspace(&agent.project, name)?,
                 None => None,
             };
-            let ticket = |key: &str| {
-                let key = Key::parse(key).ok()?;
-                let stored = match &key {
-                    Key::Issue(number) => number.to_string(),
-                    Key::Jira(key) => key.clone(),
-                };
-                store
-                    .item_by_key(&agent.project, "ticket", None, &stored)
-                    .ok()
-                    .flatten()
-            };
+            let ticket = |key: &str| ticket_item(store, &agent.project, key);
             let pull = |held: &Value| -> Option<Item> {
                 let branch = held["branch"].as_str()?;
                 let repositories: Vec<String> =

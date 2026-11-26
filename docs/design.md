@@ -1335,11 +1335,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   line's tooltip and the page's header. The ticket's key is never on the first line, where it
   would push the title: it is the mono word of the second line, before the place, in place of the
   model a led session runs on (a session about no ticket keeps its model there). A title the user
-  gave (Rename…) wins the first line the same way. The session's page says, under its
-  header, the chips of its ticket and of its pull request with its checks' mark, then one faint
-  line, `What it is about, from <where it comes from>.` (`the workspace's linked ticket`, `a ticket
-  it changed`, `a pull request it opened`…), so that a wrong guess can be understood; its
-  workspace stays in the header and its runs in the rail. A subject that changes fades in over
+  gave (Rename…) wins the first line the same way. The session's page says it in the **Workspace** section of
+  its right panel, never in its header (title and place only): one line under the workspace's own
+  ticket line, the key (`SHOP-60`, `#12`), its title, and an icon button `Open <key>` that opens
+  its page on the tracker or the forge, its tooltip saying `What it is about, from <where it comes
+  from>.` (`the workspace's linked ticket`, `a ticket it changed`, `a pull request it opened`…),
+  so that a wrong guess can be understood; and, under it, what a free session last held, in faint
+  ink (`#5 done · #12 merged`). A line the section already says is not said twice: the ticket the
+  workspace links (its keys compared whatever their spelling: `#5`, `5`, `abc-1`, `ABC-1`) and a
+  pull request that has its own line there. A page with no workspace says them all the same; its
+  runs stay in the rail. A subject that changes fades in over
   the old one, the key unfolds and fades in on the second line as the model fades out, and back, and
   the row's height never changes, nor does anything on its first line. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a

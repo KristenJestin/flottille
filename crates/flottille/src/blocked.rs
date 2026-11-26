@@ -35,28 +35,29 @@ pub fn of(daemon: &Daemon, agent: &Agent) -> Value {
     crate::subscriptions::of(daemon, &agent.id)
         .iter()
         .find_map(|subscription| {
-            let (by, why) = waits_on(daemon, subscription, &me)?;
+            let (by, why, on) = waits_on(daemon, subscription, &me)?;
             // Since it came to rest with the subscription open.
             let since = agent
                 .exchanged_at
                 .unwrap_or(agent.updated_at)
                 .max(subscription.created_at);
-            Some(json!({"by": by, "why": why, "since": since}))
+            Some(json!({"by": by, "why": why, "on": on, "since": since}))
         })
         .unwrap_or(Value::Null)
 }
 
-/// The people `subscription` waits on and what for (`review of #12`, `ticket ABC-1`); none when
-/// it waits on no one.
+/// The people `subscription` waits on, what for in words (`review of #12`, `ticket ABC-1`) and
+/// what it is as data (`{"kind": "pull_request", "number": 12}`, `{"kind": "ticket", "key":
+/// "ABC-1"}`); none when it waits on no one.
 fn waits_on(
     daemon: &Daemon,
     subscription: &Subscription,
     me: &[String],
-) -> Option<(Vec<String>, String)> {
+) -> Option<(Vec<String>, String, Value)> {
     let target = &subscription.target;
     let project = target["project"].as_str()?;
     let repository = target["repository"].as_str().unwrap_or_default();
-    let (item, why) = match subscription.source.as_str() {
+    let (item, why, on) = match subscription.source.as_str() {
         "forge"
             if subscription
                 .events
@@ -66,13 +67,15 @@ fn waits_on(
             let number = target["number"].as_u64()?;
             let key = number.to_string();
             let item = daemon.read(|store| store.item(project, "pull", repository, &key));
-            (item.ok()??, format!("review of #{number}"))
+            let on = json!({"kind": "pull_request", "number": number});
+            (item.ok()??, format!("review of #{number}"), on)
         }
         TICKETS => {
             let key = target["key"].as_str()?;
             let item = daemon.read(|store| store.item(project, "ticket", repository, key));
-            let why = format!("ticket {}", crate::tickets::reference_of(target));
-            (item.ok()??, why)
+            let reference = crate::tickets::reference_of(target);
+            let on = json!({"kind": "ticket", "key": reference});
+            (item.ok()??, format!("ticket {reference}"), on)
         }
         _ => return None,
     };
@@ -127,7 +130,7 @@ fn waits_on(
         }
         names
     });
-    (!named.is_empty()).then_some((named, why))
+    (!named.is_empty()).then_some((named, why, on))
 }
 
 /// Whether an event may change whether a session is blocked: what its items, its subscriptions,
