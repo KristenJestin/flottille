@@ -572,7 +572,11 @@ impl<C: Clock> Hub<C> {
             .iter()
             .any(|(kept, at)| *kept == name && *at >= sealed.at)
         {
-            return Ok(false);
+            // Refused, not ignored: a machine whose clock is behind the dropped copy's would
+            // otherwise keep its value alone, and the user who set it would never be told.
+            return Err(refused(
+                "a newer copy of this value was dropped: change it again to share it",
+            ));
         }
         let shared = &mut self.stored.shared;
         match shared.iter().position(|kept| kept.name == sealed.name) {

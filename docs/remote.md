@@ -2143,10 +2143,11 @@ then for the settings a machine often overrides (#1462, below); the guidance fil
   next list, and gives them to the hub no more; About you is then as if none were shared, until the
   user changes it again. The first machine that finds the hub's copy void (the device inside
   removed by its list, or a viewer) tells the hub to drop it (`{"ask": {"kind": "unshare", "name",
-  "at"}}`, #1500), so that a value of another device's is given again and a machine paired since
-  gets it; the hub, which cannot open the copy, takes a member's machine at its word, as it takes
-  the copies it seals, and refuses a viewer's. The hub remembers each copy it dropped (its name
-  and time, one per name, in its state file) and keeps that copy, or an older one, no more: a
+  "at"}}`, #1500), so that no machine is given a value of a device it no longer counts; the hub,
+  which cannot open the copy, takes a member's machine at its word, as it takes the copies it
+  seals, and refuses a viewer's. The hub remembers each copy it dropped (its name and time, one per
+  name, in its state file) and refuses that copy, or an older one, saying why (the user whose own
+  change it is sees it, as any refusal of the hub): a
   machine whose list is behind still counts the device inside and gives it again, and the two
   machines would otherwise drop and give it in turn. A newer value is kept as ever, and clears
   it. A hub of before says nothing of it in its welcome
