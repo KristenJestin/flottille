@@ -363,7 +363,7 @@ fn stop_stops_the_command_and_it_stays_listed_greyed_with_its_end(cx: &mut TestA
     assert_eq!(rows[0].state, "stopped");
     assert_eq!(
         label(cx, &format!("command-mark-{run}")).unwrap(),
-        "stopped"
+        "stopped by you"
     );
     assert!(
         cx.update(|window, _| window.try_find(format!("command-stop-{run}")).is_none()),
@@ -752,7 +752,10 @@ fn a_card_whose_command_the_agent_stopped_itself_shows_it_stopped(cx: &mut TestA
 
     let (at, _) = card_of(&page, cx).unwrap();
     unfold(&page, at, cx);
-    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "stopped");
+    assert_eq!(
+        label(cx, &format!("command-exit-{at}")).unwrap(),
+        "stopped by the agent"
+    );
 }
 
 #[gpui_kit::test]
