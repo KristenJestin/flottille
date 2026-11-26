@@ -121,10 +121,18 @@ struct About {
     /// A pull request (`#12`); else a ticket.
     pull: bool,
     key: SharedString,
+    /// The repository of a pull request, its path in the project, when the daemon says it.
+    repository: Option<String>,
     title: Option<String>,
     url: Option<String>,
     /// Where it comes from, in a few words: the line's tooltip.
     from: String,
+}
+
+/// Whether the pull request `number` of `repository` is the one a wait names (`repository` none:
+/// the daemon did not say it, the number alone tells): #12 of another repository is not.
+fn is_that_pull(on: Option<&str>, number: u64, repository: Option<&str>, other: u64) -> bool {
+    number == other && on.is_none_or(|on| repository.is_none_or(|repository| repository == on))
 }
 
 /// Whether two keys say the same ticket, however they are spelt: `#5` and `5`, `abc-1` and `ABC-1`.
@@ -158,6 +166,12 @@ fn about_of(subject: &crate::model::Subject) -> Option<About> {
     Some(About {
         pull,
         key: SharedString::from(key),
+        repository: subject
+            .pull
+            .as_ref()
+            .filter(|_| pull)
+            .map(|pull| pull.repository.clone())
+            .filter(|repository| !repository.is_empty()),
         title: subject.title.clone(),
         url,
         from: subject.from.clone(),
@@ -9021,7 +9035,14 @@ impl Render for SessionRail {
                 self.place
                     .iter()
                     .flat_map(|place| place.pulls.iter())
-                    .any(|pull| pull.number == number)
+                    .any(|pull| {
+                        is_that_pull(
+                            about.repository.as_deref(),
+                            number,
+                            Some(&pull.repository),
+                            pull.number,
+                        )
+                    })
             }),
             false => linked_reference
                 .as_deref()
@@ -9152,12 +9173,9 @@ impl Render for SessionRail {
             .as_ref()
             .or(waited.as_ref())
             .and_then(|blocked| blocked.on.clone());
-        let wait_on_pull = match &wait_on {
-            Some(crate::model::WaitOn::PullRequest { number, .. }) => Some(*number),
-            _ => None,
-        };
-        // Under the line of the ticket it waits on, when the section says that ticket just above.
-        let under_ticket = match &wait_on {
+        // Under the line of the ticket or the pull request it waits on, when the section says it
+        // just above: the workspace's ticket, or the session's subject.
+        let under_subject = match &wait_on {
             Some(crate::model::WaitOn::Ticket(key)) => {
                 linked_reference
                     .as_deref()
@@ -9167,7 +9185,21 @@ impl Render for SessionRail {
                             .as_ref()
                             .is_some_and(|about| !about.pull && same_ticket(&about.key, key)))
             }
-            _ => false,
+            Some(crate::model::WaitOn::PullRequest { repository, number }) => {
+                about_shown
+                    && about_last.as_ref().is_some_and(|about| {
+                        about.pull
+                            && pull_number(&about.key).is_some_and(|said| {
+                                is_that_pull(
+                                    repository.as_deref(),
+                                    *number,
+                                    about.repository.as_deref(),
+                                    said,
+                                )
+                            })
+                    })
+            }
+            None => false,
         };
         // One instance of the line each place it can be in: it folds away where it was and
         // unfolds where it comes, never jumping from one to the other.
@@ -9176,7 +9208,7 @@ impl Render for SessionRail {
             let shown = waiting.clone().or(waited.clone());
             move |window: &mut Window,
                   cx: &mut App,
-                  block: &'static str,
+                  block: ElementId,
                   here: bool,
                   what: bool|
                   -> AnyElement {
@@ -9215,13 +9247,26 @@ impl Render for SessionRail {
                 presence(block, present && here, content).into_any_element()
             }
         };
-        // Under the pull request's line when it waits on a review of one the section shows.
-        let wait_under_pull = wait_on_pull.filter(|number| {
-            self.place
+        // Under the line of the pull request it waits on when the section draws that line (the
+        // first of its repository, the one `pull_of` gives): the repository's path. Else at the
+        // top.
+        let wait_under_pull: Option<String> = match &wait_on {
+            Some(crate::model::WaitOn::PullRequest { repository, number }) => repositories
                 .iter()
-                .flat_map(|place| place.pulls.iter())
-                .any(|pull| pull.number == *number)
-        });
+                .map(|(path, ..)| path)
+                .find(|path| {
+                    pull_of(path).is_some_and(|pull| {
+                        is_that_pull(
+                            repository.as_deref(),
+                            *number,
+                            Some(&pull.repository),
+                            pull.number,
+                        )
+                    })
+                })
+                .cloned(),
+            _ => None,
+        };
         let mut lines: Vec<AnyElement> = Vec::new();
         // The icon before each repository says where the session works, as the sidebar's does.
         let (place_icon, place_said) = match &self.workspace {
@@ -9388,7 +9433,6 @@ impl Render for SessionRail {
                     .test_support()
                     .into_any_element(),
             );
-            let pull_number = pull_of(&path).map(|pull| pull.number);
             let pull_line = pull_of(&path).map(|pull| {
                 let page = self.page.clone();
                 let url = pull.url.clone();
@@ -9431,18 +9475,24 @@ impl Render for SessionRail {
                 ),
                 false => lines.extend(pull_line),
             }
-            if wait_under_pull.is_some() && wait_under_pull == pull_number {
-                lines.push(make_wait(window, cx, "rail-wait-pull-block", true, false));
-            }
+            // Built for each repository on every frame: the line unfolds where the wait comes
+            // and folds away where it was, a block present at its first frame would pop in.
+            lines.push(make_wait(
+                window,
+                cx,
+                ElementId::Name(format!("rail-wait-pull-block-{name}").into()),
+                wait_under_pull.as_deref() == Some(path.as_str()),
+                false,
+            ));
         }
         // On top, under the ticket's line, when it waits on a ticket or on a pull request the
         // section does not show.
         let wait_top = make_wait(
             window,
             cx,
-            "rail-wait-block",
+            ElementId::Name("rail-wait-block".into()),
             wait_under_pull.is_none(),
-            !under_ticket,
+            !under_subject,
         );
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
         // The forge is the project's setting, not a line of the workspace: the section only says
