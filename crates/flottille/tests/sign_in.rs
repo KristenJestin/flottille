@@ -779,6 +779,29 @@ fn a_failed_sign_in_never_repeats_the_code_the_user_pasted() {
 }
 
 #[test]
+fn a_failed_sign_in_masks_an_email_address_as_an_account_is() {
+    let user = User::new().with_sign_in_programs(&["acli"]);
+    user.sign_in_script(
+        "acli",
+        json!({"signed_in": false, "sign_in": {"fail": "Error: no access for someone@example.test, try again"}}),
+    );
+
+    user.call("signin.start", json!({"program": "acli"}))
+        .unwrap();
+
+    eventually("acli's sign-in failed", || {
+        changed_to(&user, "acli", "failed").is_some()
+    });
+    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let why = failed["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("no access for s***@e***, try again"),
+        "{failed}"
+    );
+    assert!(!why.contains("someone"), "{failed}");
+}
+
+#[test]
 fn a_failed_sign_in_says_only_the_last_lines_it_said() {
     let user = User::new().with_sign_in_programs(&["gh"]);
     let lines: Vec<String> = (1..=8).map(|n| format!("line {n} of the error")).collect();
