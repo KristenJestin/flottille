@@ -318,56 +318,6 @@ pub fn runs_agents(members: &Members, machine: &str, method: &str) -> Result<(),
     }
 }
 
-/// How long the user's switch of a tree to Full counts for its launches on other machines, from
-/// when it was signed: one night's work.
-pub const FULL_SWITCH_LASTS: Duration = Duration::from_secs(12 * 60 * 60);
-
-/// The member whose device switched the tree `tree` of the machine `machine` to Full, as `text`
-/// holds the switch: a request that device signed for that machine, `agent.mode {agent: tree,
-/// mode: full}`, by a member that may switch the mode (a runner or a controller). A launch on
-/// another machine starts in Full only with it (`docs/remote.md`, "Starting a session on another
-/// machine"): a machine alone cannot raise a mode. It counts for `FULL_SWITCH_LASTS` from when it
-/// was signed (by `now`), however long the tree stays in Full: a machine that once held it
-/// cannot raise launches with it forever. Its nonce is not checked: it is sent with every launch
-/// of that time.
-pub fn full_switch(
-    text: &str,
-    machine: &str,
-    tree: &str,
-    members: &Members,
-    now: SystemTime,
-) -> Result<Member, RequestError> {
-    let refused = |why: &str| Err(RequestError(format!("the switch to Full {why}")));
-    let Ok(request) = serde_json::from_str::<Request>(text) else {
-        return refused("is not a signed request");
-    };
-    let Some(member) = members
-        .get(&request.signed.device)
-        .filter(|_| request.is_signed())
-    else {
-        return refused("is not signed by a member");
-    };
-    if member.role == Role::Viewer {
-        return refused(&format!("is {}'s, who may only view", member.name));
-    }
-    if request.machine != machine || request.signed.method != "agent.mode" {
-        return refused(&format!("is not one of {}'s", shown(machine)));
-    }
-    let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
-    if params["agent"] != tree || params["mode"] != "full" {
-        return refused("is for another tree or another mode");
-    }
-    let now = milliseconds(now);
-    let at = request.signed.at;
-    if at > now.saturating_add(REQUEST_WINDOW.as_millis() as u64) {
-        return refused("is dated ahead of this machine's clock");
-    }
-    if at < now.saturating_sub(FULL_SWITCH_LASTS.as_millis() as u64) {
-        return refused("is older than twelve hours: the user switches the tree to Full again");
-    }
-    Ok(member.clone())
-}
-
 /// How long a close the user asked of a session of a machine that was off counts for, from when
 /// it was signed: as long as its machine keeps a message for another (`docs/remote.md`,
 /// "Deliveries across machines").

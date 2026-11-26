@@ -743,9 +743,8 @@ session an agent starts, and a child, keep the rules below (a child follows its 
 session an agent starts in another project is in Auto, never above its launcher's tree's; the
 pilot door's `agent_start`, which an outside agent drives, starts in Auto; the session an
 extension starts for the user, a spec's writer or its developer, does not go through
-`agent.start` and stays in Auto; a launch from a tree in Full on another machine goes Auto there
-unless the user's signed switch raises it: **replaced by the rule (#1517)** ([Machines are one](remote.md#machines-are-one)), Full
-follows the tree there with no signed switch, kept until the code follows), so that a default of Full lends nothing to a tree that
+`agent.start` and stays in Auto; a launch from a tree on another machine takes that tree's mode,
+Full included, as on one machine: [Machines are one](remote.md#machines-are-one)), so that a default of Full lends nothing to a tree that
 is not in Full. Choosing Full as the default
 says once, under the choice, what Full lends: a session's commands run as the user's, as in their
 terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its

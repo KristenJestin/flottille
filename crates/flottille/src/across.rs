@@ -2743,7 +2743,7 @@ fn stand_in_cap(name: &str) -> String {
 /// A `call` of the machine of `from` aimed at a session of this machine its agent did not start:
 /// served as the same call of an agent of this machine would be, by the same gate, the same
 /// judge and the same tool, the caller stood in for by an agent of its own (`stand_in`), in its
-/// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
+/// tree's mode. A `viewer` device's agents only read.
 /// `reads`: the session or child of this machine the caller started, which it reads as its
 /// starter (`Grant::reads`). `review`: the call is the review of the session it leads here
 /// (`led_review`), the one call for which it is given the review tool. `removes`: the launch
@@ -2823,17 +2823,7 @@ async fn session_call(
              session of another machine"
         )}));
     }
-    let tree = match call.tree.is_empty() {
-        true => &call.caller,
-        false => &call.tree,
-    };
-    let mode = crate::launches::mode_taken(
-        &call.mode,
-        call.switch.as_deref(),
-        &member.name,
-        tree,
-        &members,
-    );
+    let mode = crate::launches::mode_taken(&call.mode, member.role);
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
     let (grant, key, came) = match removes {
         Some(launch) => {
@@ -3178,7 +3168,7 @@ async fn forward_to(
             ));
         }
     };
-    let (tree, mode, switch) = crate::launches::mode_sent(daemon, &caller);
+    let (tree, mode) = crate::launches::mode_sent(daemon, &caller);
     let title: String = caller
         .title
         .as_deref()
@@ -3201,7 +3191,7 @@ async fn forward_to(
         title,
         tree,
         mode: mode.to_owned(),
-        switch,
+        switch: None,
     };
     // Until what it awaits is recorded, or the call is given up: an answer that comes before is
     // sent again, one that comes after none is refused.

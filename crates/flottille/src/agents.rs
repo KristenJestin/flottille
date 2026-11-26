@@ -422,15 +422,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             }
             let agent = find(daemon, &root)?;
             let was = agent.gate_mode;
-            // A switch to Full the user signed from a device is kept, for a launch on another
-            // machine to start in Full there; any other switch forgets it.
-            let signed = match mode {
-                GateMode::Full => crate::daemon::asked().map(|asked| asked.signed.clone()),
-                _ => None,
-            };
             // Only the user's door reaches this method: no tool of an agent changes a mode.
             daemon.write(|store| {
-                store.set_full_switch(&agent.id, signed.as_deref())?;
                 let (_, event) = store.change_agent(
                     &agent.id,
                     flottille_core::store::AgentChange {

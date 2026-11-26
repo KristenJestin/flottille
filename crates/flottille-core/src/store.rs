@@ -4031,29 +4031,6 @@ impl Store {
         Ok(())
     }
 
-    /// Keeps the user's switch of the tree of `agent` to Full as the device signed it, or forgets
-    /// it (`None`).
-    pub fn set_full_switch(&mut self, agent: &str, signed: Option<&str>) -> Result<()> {
-        self.connection.execute(
-            "UPDATE agents SET full_switch = ?2 WHERE id = ?1",
-            params![agent, signed],
-        )?;
-        Ok(())
-    }
-
-    /// The user's switch of the tree of `agent` to Full, as the device signed it, when kept.
-    pub fn full_switch(&self, agent: &str) -> Result<Option<String>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT full_switch FROM agents WHERE id = ?1",
-                params![agent],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten())
-    }
-
     /// The keys of the drafts the composers hold.
     pub fn draft_keys(&self) -> Result<Vec<String>> {
         let mut statement = self
