@@ -1593,6 +1593,76 @@ mod tests {
         assert_eq!(mask("risk-taking sk-short", &env), "risk-taking sk-short");
     }
 
+    #[test]
+    fn the_opaque_tokens_of_atlassian_are_masked() {
+        let env = BTreeMap::new();
+        // Invented: the shapes of the prefixes of Atlassian's and Bitbucket's tokens, no more.
+        for prefix in ["ATATT", "ATBB", "ATCTT"] {
+            let token = format!("{prefix}3xExampleOnlyFake-0000_aaaa-bbbb-cccc");
+            assert_eq!(
+                mask(&format!("sign-in with {token} failed"), &env),
+                "sign-in with [masked] failed",
+                "{prefix}"
+            );
+        }
+        // A word that only starts alike is kept.
+        assert_eq!(
+            mask("ATBB is short, ATATTENTION", &env),
+            "ATBB is short, ATATTENTION"
+        );
+    }
+
+    #[test]
+    fn a_token_set_in_the_middle_of_a_line_is_masked() {
+        let env = BTreeMap::new();
+        let table = [
+            (
+                "login failed, token=example-opaque-0000 and more",
+                "login failed, token=[masked] and more",
+            ),
+            (
+                "login failed with access_token=example-opaque-0000 and more",
+                "login failed with access_token=[masked] and more",
+            ),
+            (
+                "login failed, token: example-opaque-0000",
+                "login failed, token: [masked]",
+            ),
+            (
+                "run --token=example-opaque-0000 again",
+                "run --token=[masked] again",
+            ),
+            // Prose, a word or a number after a token's name, code: kept.
+            ("an invalid token: expired", "an invalid token: expired"),
+            (
+                "the token: a short-lived credential",
+                "the token: a short-lived credential",
+            ),
+            ("max token: 100", "max token: 100"),
+            ("then token = self.token", "then token = self.token"),
+            ("a token is needed", "a token is needed"),
+        ];
+        for (text, masked) in table {
+            assert_eq!(mask(text, &env), masked, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_token_in_the_middle_of_a_line_streams_as_it_reads_whole() {
+        let text = "login failed, token: example-opaque-0000 then access_token=example-0000-fake \
+                    and ATATT3xExampleOnlyFake-0000_aaaa-bbbb done";
+        let whole = mask(text, &BTreeMap::new());
+        assert!(!whole.contains("example-"), "{whole}");
+        assert!(!whole.contains("ATATT"), "{whole}");
+        for at in (1..text.len()).filter(|&at| text.is_char_boundary(at)) {
+            assert_eq!(
+                streamed(text, &[at], &BTreeMap::new()),
+                whole,
+                "cut at {at}"
+            );
+        }
+    }
+
     /// A Claude login file and a Codex one, their tokens invented and of no known prefix.
     const LOGINS: &str = "{\"claudeAiOauth\":{\"accessToken\":\"fake-access-0123456789abcdef\",\
         \"refreshToken\":\"fake-refresh-0123456789abcdef\",\"expiresAt\":1762700000000}}\n\
