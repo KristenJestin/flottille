@@ -997,3 +997,46 @@ fn the_copies_of_the_git_settings_are_removed_at_the_daemon_s_stop() {
     }
     assert!(!copies.exists(), "{}", copies.display());
 }
+
+#[test]
+fn a_moved_config_with_an_include_changed_since_the_start_is_refused_by_the_daemon() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent();
+    let included = user.path("home/included.gitconfig");
+    std::fs::write(&included, "[user]\n\temail = a@example.invalid\n").unwrap();
+    // The desktop's settings, which include a file of the user's by its place.
+    let text = format!("[include]\n\tpath = {}\n", included.display());
+    let versions = user.path("home/.local/share/desk/versions");
+    let version = |hash: &str| {
+        let file = versions.join(format!("{hash}/config/.config/git/config"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, &text).unwrap();
+        file
+    };
+    let link = user.path("home/.config/git/config");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(version("aaa"), &link).unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap());
+    started(&user);
+    assert!(lent(&user).0, "{}", lent(&user).1);
+
+    // The update: a new version holding the same, the old removed. The push reads the copy.
+    let new = user.path("home/.config/git/config.new");
+    std::os::unix::fs::symlink(version("bbb"), &new).unwrap();
+    std::fs::rename(&new, &link).unwrap();
+    std::fs::remove_dir_all(versions.join("aaa")).unwrap();
+    let (lent_after_the_update, warnings) = lent(&user);
+    assert!(lent_after_the_update, "{warnings}");
+
+    // The file it includes, replaced as a run that could write it would, with what a push must
+    // not be given: the copy holds the include, not what it names.
+    let replacing = user.path("home/included.new");
+    std::fs::write(&replacing, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+    std::fs::rename(&replacing, &included).unwrap();
+
+    let (lent, warnings) = lent(&user);
+    assert!(!lent, "{warnings}");
+    assert!(warnings.contains("included.gitconfig"), "{warnings}");
+}

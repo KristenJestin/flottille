@@ -2311,7 +2311,7 @@ mod tests {
         let link = kept.join("config");
         std::os::unix::fs::symlink(&a, &link).unwrap();
         let mut found = found_settings(&home, &[&link], &[&kept]);
-        let runtime = in_runtime();
+        let runtime = tempfile::tempdir().unwrap();
         let copies = runtime.path().join("git-settings");
         take(&mut found.settings, &copies);
 
@@ -2364,31 +2364,11 @@ mod tests {
                 taken: None,
             });
         }
-        let runtime = in_runtime();
+        let runtime = tempfile::tempdir().unwrap();
         take(&mut found.settings, &runtime.path().join("git-settings"));
 
         let taken: Vec<bool> = found.settings.iter().map(|s| s.taken.is_some()).collect();
         assert_eq!(taken, [false, false, false, true]);
-    }
-
-    /// A folder of the runtime folder, as the daemon's copies are (`daemon.rs`): kept out of the
-    /// commands it confines, the git that reads the settings among them. A temporary one where
-    /// the machine has none.
-    fn in_runtime() -> tempfile::TempDir {
-        // SAFETY: getuid cannot fail.
-        let uid = unsafe { libc::getuid() };
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .into_iter()
-            .chain([PathBuf::from(format!("/run/user/{uid}"))])
-            .filter_map(|folder| folder.canonicalize().ok())
-            .find_map(|folder| {
-                tempfile::Builder::new()
-                    .prefix("flottille-test-")
-                    .tempdir_in(folder)
-                    .ok()
-            })
-            .unwrap_or_else(|| tempfile::tempdir().unwrap())
     }
 
     #[test]
@@ -2409,7 +2389,7 @@ mod tests {
         found
             .read_only
             .push((included.clone(), identity(&included).unwrap()));
-        let runtime = in_runtime();
+        let runtime = tempfile::tempdir().unwrap();
         take(&mut found.settings, &runtime.path().join("git-settings"));
         assert!(found.settings[0].taken.is_some());
         // The update: a new version holding the same, the old removed.
@@ -2443,7 +2423,7 @@ mod tests {
             unkept: None,
             taken: None,
         });
-        let runtime = in_runtime();
+        let runtime = tempfile::tempdir().unwrap();
         take(&mut found.settings, &runtime.path().join("git-settings"));
 
         assert!(found.settings[0].taken.is_none());
