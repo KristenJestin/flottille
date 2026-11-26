@@ -1025,6 +1025,11 @@ fn the_ticket_line_unfolds_in_workspace_as_the_session_takes_a_ticket(cx: &mut T
         label(cx, session_id(&id)).is_some()
     });
     open_page(&shell, &id, cx);
+    // The section is mounted before the ticket comes: a line built with the section would be
+    // there at its first frame, at full size, and nothing would unfold.
+    until(&shell, cx, "its workspace", |cx| {
+        drawn_height(cx, "rail-workspace-read") > 0.
+    });
     settle(cx);
     assert!(label(cx, "rail-about-ticket").is_none(), "about no ticket");
     assert_eq!(drawn_height(cx, "rail-about-block"), 0.);
@@ -1367,6 +1372,17 @@ fn blocked_in_a_workspace(user: &User) -> String {
     id
 }
 
+/// Whether the wait is drawn under the pull request's line of `atlas`. While it moves there, the
+/// block it leaves at the top holds one too, and a plain search for it is ambiguous.
+fn wait_under_pull(cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, _| {
+        window
+            .within("rail-wait-pull-block-atlas")
+            .try_find("rail-wait")
+            .is_some()
+    })
+}
+
 #[gpui_kit::test]
 fn the_wait_goes_under_its_pull_request_line(cx: &mut TestAppContext) {
     let user = user();
@@ -1377,8 +1393,8 @@ fn the_wait_goes_under_its_pull_request_line(cx: &mut TestAppContext) {
         label(cx, session_id(&id)).is_some()
     });
     open_page(&shell, &id, cx);
-    until(&shell, cx, "its pull request and the wait", |cx| {
-        label(cx, "rail-pull-atlas").is_some() && label(cx, "rail-wait").is_some()
+    until(&shell, cx, "its pull request and the wait under it", |cx| {
+        label(cx, "rail-pull-atlas").is_some() && wait_under_pull(cx)
     });
     settle(cx);
 
@@ -1715,7 +1731,7 @@ fn the_window_draws_no_frame_at_rest_on_a_wait_under_its_pull_request_line(
     });
     open_page(&shell, &id, cx);
     until(&shell, cx, "its pull request and the wait under it", |cx| {
-        label(cx, "rail-pull-atlas").is_some() && label(cx, "rail-wait").is_some()
+        label(cx, "rail-pull-atlas").is_some() && wait_under_pull(cx)
     });
     quiet(&shell, cx);
 
