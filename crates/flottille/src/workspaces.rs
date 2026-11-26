@@ -2887,8 +2887,7 @@ async fn as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
 /// approved what it loses, or when what it holds was laid from another machine, still changed to
 /// git, and loses nothing.
 fn forced(approved: bool, laid: &[String], worktree: &str) -> bool {
-    let _ = worktree;
-    approved || !laid.is_empty()
+    approved || laid.iter().any(|path| path == worktree)
 }
 
 async fn remove_held(
