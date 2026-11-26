@@ -1890,7 +1890,7 @@ fn an_ended_child_of_another_machine_under_a_review_pilot_is_in_its_ended(cx: &m
         ]));
         cx.refresh_windows();
     });
-    let row = format!("rail-remote-{key}");
+    let row = "rail-remote-child1".to_owned();
     until(&shell, cx, "its row in the review's group", |cx| {
         present(cx, &row)
     });
