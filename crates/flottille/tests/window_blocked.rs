@@ -1017,7 +1017,7 @@ fn the_ticket_and_its_wait_are_said_in_workspace(cx: &mut TestAppContext) {
     // Under the ticket it waits on: who and since when.
     assert_eq!(label(cx, "rail-wait"), Some(wait_said(&user, &id)));
     let (ticket_top, wait_top) = cx.update(|window, _| {
-        let top = |id: &str| f32::from(window.find(id).bounds().origin.y);
+        let top = |id: &str| f32::from(window.find(id.to_owned()).bounds().origin.y);
         (top("rail-about-ticket"), top("rail-wait"))
     });
     assert!(wait_top > ticket_top, "the wait is under its ticket");
