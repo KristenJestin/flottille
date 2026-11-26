@@ -93,6 +93,17 @@ fn every_method_the_sources_name_is_catalogued() {
         "review.standards_model",
         "review.security_model",
         "review.verifier_model",
+        // And the guidance and the rest (#1525).
+        "judge.guidance",
+        "compaction.guidance",
+        "review.guidance",
+        "review.passes",
+        "tool_results.limit",
+        "tool_results.unchanged",
+        "appearance.shade",
+        "autosubscriptions.created_pull",
+        "autosubscriptions.branch_pull",
+        "autosubscriptions.ticket",
         // The agents' own settings file, beside the `settings.` methods.
         "settings.json",
         // A git setting a push the gate let through keeps of the repository's (`push_folder`).
