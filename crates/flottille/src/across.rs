@@ -284,6 +284,40 @@ pub(crate) fn launcher_here(daemon: &Daemon, stand_in: &str) -> Option<String> {
         .map(|launch| launch.caller)
 }
 
+/// How long a call of another machine waits for a launch sent there to be recorded here: one
+/// round trip, the workspace made there.
+const RECORDING_WAIT: Duration = Duration::from_secs(30);
+
+/// Waits while `call` of the machine of key `machine` (named `name`), stood in for as
+/// `stand_in`, may be the first call of a session a launch of this machine starts there and whose
+/// answer naming it is not recorded here yet (`launches::Placings::holds`): that session may write
+/// to its launcher in its first turn, the answer and the call coming apart, and is then judged as
+/// the session its launcher started (`launcher_here`). Any other call goes on at once. At most
+/// [`RECORDING_WAIT`].
+async fn launches_recorded(
+    daemon: &Daemon,
+    call: &Call,
+    stand_in: &str,
+    machine: &str,
+    name: &str,
+) {
+    let Ok(remote) = crate::link::remote_of(daemon) else {
+        return;
+    };
+    let waits = || {
+        remote.placing.holds(machine, &call.caller, &call.agent)
+            && launcher_here(daemon, stand_in).is_none()
+    };
+    if !waits() {
+        return;
+    }
+    eprintln!("flottille daemon: a call of {name} waits for its launches there to be recorded");
+    let until = std::time::Instant::now() + RECORDING_WAIT;
+    while waits() && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// This machine's name among the user's, as the member list says it.
 pub(crate) fn own_name(daemon: &Daemon) -> Option<String> {
     let remote = crate::link::remote_of(daemon).ok()?;
@@ -2842,6 +2876,7 @@ async fn session_call(
     }
     let mode = crate::launches::mode_taken(&call.mode, member.role);
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
+    launches_recorded(daemon, &call, &agent.id, &machine, &name).await;
     let (grant, key, came) = match removes {
         Some(launch) => {
             let grant =
