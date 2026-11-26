@@ -1241,7 +1241,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `docs/protocol.md`), so it hides nothing on another machine's window, sends nothing to the
   machine that has the project, and leaves the project and its sessions as they are. It works on
   any project of the list, this machine's own included: no rule of its own for another machine
-  ([Machines are one](remote.md#machines-are-one)). A hidden project is no longer offered where
+  ([Machines are one](remote.md#machines-are-one)). If its page is the one in front, the next
+  shown project's page opens (none when none is shown), as after a removal; a machine whose
+  projects are all hidden leaves the sections of Group by machine. A hidden project is no longer offered where
   a project is chosen (the quick switcher's Projects, a vault entry's project, a task's copy),
   but its sessions are still found by the switcher, and **a session of it that needs the user is
   still in the notification centre and rings as it would**: hiding hides the project from view,
