@@ -1052,6 +1052,29 @@ fn a_handed_session_writes_to_its_launcher_before_its_launch_is_recorded() {
     assert_eq!(play.pc.requests().len(), 0, "{:#}", play.pc.log());
 }
 
+/// While a launch to server is in flight on pc (pc records its session once its file `slow-call`
+/// is gone), a session the user started on server reads pc's root: it is answered at once, as on
+/// one machine, never held behind a launch it has nothing to do with.
+#[test]
+fn an_unrelated_call_from_that_machine_does_not_wait_for_a_launch_in_flight() {
+    let play = Play::new(Topology::Across, "auto", json!([]));
+    let (_night, night) = play.server.root("full");
+    let slow = play.pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    std::thread::scope(|scope| {
+        let launching = scope.spawn(|| play.launch("handed", TITLE, BRIEF));
+        play.titled(TITLE);
+        let asked = Instant::now();
+        let answer = night.call("session_read", json!({"session": play.root}));
+        let took = asked.elapsed();
+        std::fs::remove_file(&slow).unwrap();
+        let launched = launching.join().unwrap();
+        assert!(!launched.error, "{}", launched.text);
+        assert!(!answer.error, "{}", answer.text);
+        assert!(took < Duration::from_secs(10), "answered in {took:?}");
+    });
+}
+
 /// A led session whose launcher paused their following (fifty messages without the user, the
 /// last asking it to write back) writes to its launcher with `session_send`: refused as paused,
 /// and nothing reaches the launcher, on one machine as on two.
