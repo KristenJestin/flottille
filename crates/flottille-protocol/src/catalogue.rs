@@ -144,6 +144,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.members", Read),
     ("remote.launches", Read),
     ("remote.sessions", Read),
+    ("remote.ghost", Read),
     ("remote.change", Drive),
     // It points this machine at a hub, with the code its host printed: the machine's user only.
     ("remote.pair", Local),

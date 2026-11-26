@@ -745,6 +745,13 @@ impl Remote {
             // What its led sessions asked the user while it was off, told once.
             crate::across::relinked(&daemon, &machine);
         }
+        // The ghosts of its sessions, kept current while this link is the machine's.
+        tokio::spawn(crate::ghost::follow(
+            self.clone(),
+            link.clone(),
+            name.to_owned(),
+            generation,
+        ));
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
 
@@ -967,8 +974,16 @@ impl Remote {
         Ok(json!({}))
     }
 
+    /// This machine's live root sessions as it lists them to the others, from now on: none
+    /// while its member is no runner.
+    pub(crate) fn listed_sessions(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<flottille_link::SessionList>> {
+        self.sessions.subscribe()
+    }
+
     /// Whether the link of `generation` is the one kept for the machine of `key`.
-    fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
+    pub(crate) fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
         self.seen
             .lock()
             .unwrap()
@@ -1574,6 +1589,16 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     deliver,
                 ));
             }
+            // Served for as long as its stream lasts.
+            Message::Machine(MachineMessage::Ghost(ask)) => {
+                let ask = ask.clone();
+                tokio::spawn(crate::ghost::serve(
+                    remote.clone(),
+                    name.clone(),
+                    received,
+                    ask,
+                ));
+            }
             Message::Machine(MachineMessage::Call(call)) => {
                 let call = call.clone();
                 tokio::spawn(crate::across::serve_call(
@@ -2006,7 +2031,7 @@ impl Remote {
 }
 
 /// A key as the outbox and the copies of the lists name its machine.
-fn hex_of(key: &PublicKey) -> String {
+pub(crate) fn hex_of(key: &PublicKey) -> String {
     key.as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -2890,6 +2915,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
     // Said of this machine, on or off: before a link is needed.
     if matches!(method, "remote.settings" | "remote.configure") {
         return crate::remote_config::call(daemon, method, params).await;
+    }
+    // Read from this machine's store alone: a ghost opens while its machine, or the link, is off.
+    if method == "remote.ghost" {
+        let params = if params.is_null() { json!({}) } else { params };
+        return tokio::task::spawn_blocking(move || crate::ghost::read(&daemon, params))
+            .await
+            .map_err(|_| {
+                Failure::new(
+                    flottille_protocol::code::UNAVAILABLE,
+                    "the ghost could not be read",
+                )
+            })?;
     }
     let remote = remote_of(&daemon)?;
     let params = if params.is_null() { json!({}) } else { params };

@@ -42,6 +42,7 @@ mod findings;
 mod follow;
 mod forge;
 mod gate;
+mod ghost;
 mod git;
 mod hub_session;
 mod import_command;

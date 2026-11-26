@@ -68,6 +68,32 @@ pub struct Launch {
     pub at: u64,
 }
 
+/// What another machine sent of one of its sessions' ghost (`Store::keep_ghost`).
+#[derive(Debug, Clone, Default)]
+pub struct GhostPart<'a> {
+    pub session: &'a str,
+    /// Its events after those kept, oldest first, each as that machine's `agent.show` gives it.
+    pub events: &'a [Value],
+    /// What was kept is dropped first.
+    pub reset: bool,
+    /// Whether it has events earlier than those sent, when that machine says it.
+    pub earlier: Option<bool>,
+    /// Its tree and its waits, as that machine shows them.
+    pub view: Option<&'a Value>,
+    /// It left that machine's list.
+    pub gone: bool,
+}
+
+/// The ghost of a session of another machine, as this machine keeps it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ghost {
+    /// Its last events, oldest first.
+    pub events: Vec<Value>,
+    /// Whether it has events earlier than those.
+    pub earlier: bool,
+    pub view: Option<Value>,
+}
+
 /// A message kept for another machine until it takes it (`outbox`): a delivery for one of its
 /// agents, or a message to a session there (`docs/remote.md`, "Deliveries across machines").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1056,6 +1082,29 @@ const MIGRATIONS: &[&str] = &[
         agent TEXT PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
         held  TEXT NOT NULL,
         shown TEXT
+    ) STRICT;
+",
+    "
+    -- The local ghost of each session another machine lists (`docs/remote.md`, \"Machines are
+    -- one\"): what that machine shows of it, masked there, kept current from its events, so that
+    -- it opens at once and while that machine is off. One row per session, by its machine's key:
+    -- its tree and its waits (`view`, JSON), whether it has events earlier than those kept, and
+    -- when it last moved; its last events beside it. It only reflects: nothing here acts on it.
+    CREATE TABLE ghosts (
+        machine TEXT NOT NULL,
+        session TEXT NOT NULL,
+        view    TEXT,
+        earlier INTEGER NOT NULL DEFAULT 0,
+        at      INTEGER NOT NULL,
+        PRIMARY KEY (machine, session)
+    ) STRICT;
+    CREATE TABLE ghost_events (
+        machine TEXT NOT NULL,
+        session TEXT NOT NULL,
+        seq     INTEGER NOT NULL,
+        event   TEXT NOT NULL,
+        PRIMARY KEY (machine, session, seq),
+        FOREIGN KEY (machine, session) REFERENCES ghosts (machine, session) ON DELETE CASCADE
     ) STRICT;
 ",
 ];
@@ -3921,7 +3970,147 @@ impl Store {
                 params![machine],
             )?;
         }
+        // The ghosts of its sessions go with it, those of a machine that never listed included.
+        transaction.execute(
+            "DELETE FROM ghosts WHERE machine NOT IN (SELECT value FROM json_each(?1))",
+            params![serde_json::to_string(machines)?],
+        )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keeps what the machine of key `machine` sent of its session's ghost (`part`), at `at`:
+    /// its events after those kept (the last `most_events` kept), its view, or its end. A ghost
+    /// it holds no row of yet is made only while that machine has fewer than `most_sessions`:
+    /// whether it was kept.
+    pub fn keep_ghost(
+        &mut self,
+        machine: &str,
+        part: &GhostPart,
+        at: u64,
+        most_sessions: usize,
+        most_events: usize,
+    ) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        if part.gone {
+            transaction.execute(
+                "DELETE FROM ghosts WHERE machine = ?1 AND session = ?2",
+                params![machine, part.session],
+            )?;
+            transaction.commit()?;
+            return Ok(true);
+        }
+        let known: bool = transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ghosts WHERE machine = ?1 AND session = ?2)",
+            params![machine, part.session],
+            |row| row.get(0),
+        )?;
+        if !known {
+            let held: i64 = transaction.query_row(
+                "SELECT count(*) FROM ghosts WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )?;
+            if held as usize >= most_sessions {
+                return Ok(false);
+            }
+        }
+        transaction.execute(
+            "INSERT INTO ghosts (machine, session, view, earlier, at) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT (machine, session) DO UPDATE SET view = coalesce(?3, view), \
+             earlier = coalesce(?6, earlier), at = ?5",
+            params![
+                machine,
+                part.session,
+                part.view.map(Value::to_string),
+                part.earlier.unwrap_or(false),
+                at as i64,
+                part.earlier,
+            ],
+        )?;
+        if part.reset {
+            transaction.execute(
+                "DELETE FROM ghost_events WHERE machine = ?1 AND session = ?2",
+                params![machine, part.session],
+            )?;
+        }
+        for event in part.events {
+            transaction.execute(
+                "INSERT OR IGNORE INTO ghost_events (machine, session, seq, event) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    machine,
+                    part.session,
+                    event["seq"].as_u64().unwrap_or_default() as i64,
+                    event.to_string()
+                ],
+            )?;
+        }
+        let trimmed = transaction.execute(
+            "DELETE FROM ghost_events WHERE machine = ?1 AND session = ?2 AND seq <= \
+             (SELECT seq FROM ghost_events WHERE machine = ?1 AND session = ?2 \
+              ORDER BY seq DESC LIMIT 1 OFFSET ?3)",
+            params![machine, part.session, most_events as i64],
+        )?;
+        if trimmed > 0 {
+            transaction.execute(
+                "UPDATE ghosts SET earlier = 1 WHERE machine = ?1 AND session = ?2",
+                params![machine, part.session],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// The ghost of the session `session` of the machine of key `machine`, if this machine holds
+    /// one.
+    pub fn ghost(&self, machine: &str, session: &str) -> Result<Option<Ghost>> {
+        let row: Option<(Option<String>, bool)> = self
+            .connection
+            .query_row(
+                "SELECT view, earlier FROM ghosts WHERE machine = ?1 AND session = ?2",
+                params![machine, session],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((view, earlier)) = row else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare_cached(
+            "SELECT event FROM ghost_events WHERE machine = ?1 AND session = ?2 ORDER BY seq",
+        )?;
+        let events = statement
+            .query_map(params![machine, session], |row| row.get::<_, String>(0))?
+            .map(|event| Ok(serde_json::from_str(&event?)?))
+            .collect::<Result<Vec<Value>>>()?;
+        Ok(Some(Ghost {
+            events,
+            earlier,
+            view: view.map(|view| serde_json::from_str(&view)).transpose()?,
+        }))
+    }
+
+    /// The last event this machine holds of each ghost of the machine of key `machine`: where
+    /// each catches up from.
+    pub fn ghost_cursors(&self, machine: &str) -> Result<Vec<(String, u64)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT g.session, coalesce(max(e.seq), 0) FROM ghosts g LEFT JOIN ghost_events e \
+             ON e.machine = g.machine AND e.session = g.session WHERE g.machine = ?1 \
+             GROUP BY g.session ORDER BY g.session",
+        )?;
+        let rows = statement.query_map(params![machine], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Forgets each ghost of the machine of key `machine` but those of `sessions`: the others
+    /// left its list.
+    pub fn forget_ghosts_except(&mut self, machine: &str, sessions: &[String]) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM ghosts WHERE machine = ?1 AND session NOT IN (SELECT value FROM json_each(?2))",
+            params![machine, serde_json::to_string(sessions)?],
+        )?;
         Ok(())
     }
 
@@ -10487,5 +10676,91 @@ mod tests {
         assert_eq!(kept(&store), ["bb"]);
         store.forget_machine_sessions_except(&[]).unwrap();
         assert!(kept(&store).is_empty());
+    }
+
+    fn ghost_event(seq: u64) -> Value {
+        json!({"seq": seq, "at": seq, "name": "agent.message", "data": {"agent": "s1"}})
+    }
+
+    #[test]
+    fn a_ghost_keeps_the_last_events_of_its_session_and_goes_with_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let events: Vec<Value> = (1..=5).map(ghost_event).collect();
+        let part = GhostPart {
+            session: "s1",
+            events: &events,
+            earlier: Some(false),
+            view: Some(&json!({"tree": []})),
+            ..GhostPart::default()
+        };
+        assert!(store.keep_ghost("aa", &part, 1, 2, 3).unwrap());
+        let kept = store.ghost("aa", "s1").unwrap().unwrap();
+        // The last three, and it says earlier ones were not kept.
+        assert_eq!(kept.events, (3..=5).map(ghost_event).collect::<Vec<_>>());
+        assert!(kept.earlier);
+        assert_eq!(kept.view, Some(json!({"tree": []})));
+        assert_eq!(store.ghost_cursors("aa").unwrap(), [("s1".to_owned(), 5)]);
+        // An event sent again is kept once; the view stays when none comes.
+        let again = [ghost_event(5), ghost_event(6)];
+        let part = GhostPart {
+            session: "s1",
+            events: &again,
+            ..GhostPart::default()
+        };
+        store.keep_ghost("aa", &part, 2, 2, 3).unwrap();
+        let kept = store.ghost("aa", "s1").unwrap().unwrap();
+        assert_eq!(kept.events, (4..=6).map(ghost_event).collect::<Vec<_>>());
+        assert_eq!(kept.view, Some(json!({"tree": []})));
+        // A reset drops what was kept.
+        let last = [ghost_event(9)];
+        let part = GhostPart {
+            session: "s1",
+            events: &last,
+            reset: true,
+            earlier: Some(true),
+            ..GhostPart::default()
+        };
+        store.keep_ghost("aa", &part, 3, 2, 3).unwrap();
+        assert_eq!(store.ghost("aa", "s1").unwrap().unwrap().events, last);
+
+        // A machine holds as many ghosts as it lists sessions at most.
+        for session in ["s2", "s3"] {
+            let part = GhostPart {
+                session,
+                ..GhostPart::default()
+            };
+            let kept = store.keep_ghost("aa", &part, 4, 2, 3).unwrap();
+            assert_eq!(kept, session == "s2");
+        }
+        // Gone with its session, its list, or its machine.
+        let gone = GhostPart {
+            session: "s2",
+            gone: true,
+            ..GhostPart::default()
+        };
+        store.keep_ghost("aa", &gone, 5, 2, 3).unwrap();
+        assert_eq!(store.ghost("aa", "s2").unwrap(), None);
+        store
+            .keep_ghost(
+                "bb",
+                &GhostPart {
+                    session: "t1",
+                    ..GhostPart::default()
+                },
+                5,
+                2,
+                3,
+            )
+            .unwrap();
+        store.forget_ghosts_except("aa", &[]).unwrap();
+        assert_eq!(store.ghost("aa", "s1").unwrap(), None);
+        let events: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM ghost_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(events, 0, "its events went with it");
+        assert!(store.ghost("bb", "t1").unwrap().is_some());
+        store.forget_machine_sessions_except(&[]).unwrap();
+        assert_eq!(store.ghost("bb", "t1").unwrap(), None);
     }
 }
