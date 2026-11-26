@@ -1416,10 +1416,10 @@ fn the_agents_row_keeps_what_it_waits_for_and_its_mark_cross_fades(cx: &mut Test
     open_page(&shell, &id, cx);
     let waiting = format!("rail-waiting-{id}");
     until(&shell, cx, "what it waits for", |cx| {
-        label(cx, waiting.as_str()).is_some()
+        label(cx, waiting.clone()).is_some()
     });
     settle(cx);
-    let words = label(cx, waiting.as_str()).unwrap();
+    let words = label(cx, waiting.clone()).unwrap();
     assert!(words.contains("ticket"), "{words}");
     let mark_height = |cx: &mut VisualTestContext, shape: &str| {
         let (within, shape) = (format!("rail-mark-{id}"), shape.to_owned());
@@ -1451,7 +1451,7 @@ fn the_agents_row_keeps_what_it_waits_for_and_its_mark_cross_fades(cx: &mut Test
         mark_height(cx, "state-mark-clock").is_none(),
         "the clock left"
     );
-    assert_eq!(label(cx, waiting.as_str()), Some(words), "its words stay");
+    assert_eq!(label(cx, waiting.clone()), Some(words), "its words stay");
 }
 
 /// The session subscribes to ticket #5, which is assigned to no one: it waits, blocked by no one.
