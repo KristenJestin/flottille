@@ -2765,7 +2765,7 @@ impl Render for SessionPage {
                     .child(self.ask_dock.clone())
                     .test_support(),
             )
-            .child(self.section(2, dock))
+            .child(self.section(1, dock))
             .test_support();
         div()
             .id("session-page")
@@ -2795,7 +2795,7 @@ impl Render for SessionPage {
 
 impl SessionPage {
     /// The section `index` of the page: it enters, after those before it, once the page arrived
-    /// by a switch to its machine (the conversation's rows, section 1, enter as their own).
+    /// by a switch to its machine (the conversation's rows enter as their own).
     fn section(&self, index: usize, section: impl IntoElement) -> AnyElement {
         match self.arrived {
             true => enter(
