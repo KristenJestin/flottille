@@ -111,9 +111,19 @@ fn in_step(pc: &Machine, server: &Machine, agent: &str) -> bool {
         .user
         .call("agent.show", json!({"agent": agent, "after": 0}))
         .unwrap();
+    let state = |tree: &Value| {
+        tree.as_array()
+            .and_then(|tree| tree.iter().find(|entry| entry["agent"]["id"] == agent))
+            .map(|entry| entry["agent"]["state"].clone())
+    };
+    let tree = server
+        .user
+        .call("agent.tree", json!({"agent": agent}))
+        .unwrap();
     ghost(pc, agent).is_ok_and(|kept| {
         kept["events"] == there["events"]
             && kept["last"] == there["events"].as_array().unwrap().last().unwrap()["seq"]
+            && state(&kept["view"]["tree"]) == state(&tree["agents"])
     })
 }
 
@@ -157,13 +167,13 @@ fn the_ghost_follows_the_session_as_it_runs() {
 
     // A new message, its tool call and its reply come as the session runs.
     send(&server, &agent, "LOOK at the files");
-    holds(&server, &agent, "I looked at the files.");
+    holds(&server, &agent, "looked at the files.");
     eventually(
         "the ghost holds the message, its tool call and its reply",
         || in_step(&pc, &server, &agent),
     );
     let kept = ghost(&pc, &agent).unwrap()["events"].to_string();
-    for said in ["LOOK at the files", "fs_list", "I looked at the files."] {
+    for said in ["LOOK at the files", "fs_list", "looked at the files."] {
         assert!(kept.contains(said), "{said}: {kept}");
     }
 
@@ -177,8 +187,20 @@ fn the_ghost_follows_the_session_as_it_runs() {
         .user
         .call("agent.tree", json!({"agent": agent}))
         .unwrap();
+    // The same tree, but for the time it says it has waited, which moves.
+    let still = |tree: &Value| -> Vec<Value> {
+        tree.as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry["doing"] = Value::Null;
+                entry
+            })
+            .collect()
+    };
     eventually("the ghost's tree is the server's", || {
-        ghost(&pc, &agent).is_ok_and(|kept| kept["view"]["tree"] == there["agents"])
+        ghost(&pc, &agent).is_ok_and(|kept| still(&kept["view"]["tree"]) == still(&there["agents"]))
     });
 }
 

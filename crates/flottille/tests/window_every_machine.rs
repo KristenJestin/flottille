@@ -1884,10 +1884,19 @@ fn a_connection_request_of_a_removed_machine_closes(cx: &mut TestAppContext) {
     settle(&shell, cx);
     let dialog = shell.read_with(cx, |s, _| s.connection_request().clone());
     assert!(dialog.read_with(cx, |d, _| d.is_open()));
-    assert_eq!(
-        asked_of_the_server(&relay, "7"),
-        vec!["connection.proposed".to_owned()]
-    );
+    // What names the request 7, not an id that holds a 7: the page's own link may still be
+    // reading its session there, its conversation shown from its ghost first.
+    let asked: Vec<String> = relay
+        .take()
+        .into_iter()
+        .filter(|(_, params)| {
+            params
+                .as_object()
+                .is_some_and(|params| params.values().any(|value| *value == json!(7)))
+        })
+        .map(|(method, _)| method)
+        .collect();
+    assert_eq!(asked, vec!["connection.proposed".to_owned()]);
 
     let removed = pc.user.run(&["remote", "remove", "server"]);
     assert!(
