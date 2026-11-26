@@ -2569,9 +2569,9 @@ struct Checked<'a> {
     /// How many of `problems` are commits on no remote; the others are work not committed.
     unpushed: usize,
     ours: Vec<PathBuf>,
-    /// Whether a file of it is the uncommitted work of another machine's agent, laid with its
-    /// launch and still as it was laid: no loss, though git counts it as a change.
-    laid: bool,
+    /// The worktrees (their paths) holding uncommitted work of another machine's agent, laid with
+    /// its launch and still as it was laid: no loss, though git counts it as a change.
+    laid: Vec<String>,
 }
 
 /// What removing the workspace `name` of the project would lose, each as a sentence: nothing when
@@ -2700,7 +2700,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     // and so is the uncommitted work laid with it, as long as it is still as it was laid.
     let returned = crate::travel::returned(daemon, workspace);
     let laid_with = crate::travel::laid(daemon, workspace);
-    let mut laid = false;
+    let mut laid = Vec::new();
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
         let mut sent = Vec::new();
@@ -2750,7 +2750,9 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             if let Some(snapshot) = snapshot
                 && as_laid(&dir, snapshot, path).await
             {
-                laid = true;
+                if !laid.contains(&worktree.path) {
+                    laid.push(worktree.path.clone());
+                }
                 continue;
             }
             let shown = match worktree.path.as_str() {
@@ -2875,6 +2877,14 @@ async fn as_laid(dir: &Path, snapshot: &str, path: &str) -> bool {
     }
 }
 
+/// Whether the copy of the repository at `worktree` is removed with `--force`: when the user
+/// approved what it loses, or when what it holds was laid from another machine, still changed to
+/// git, and loses nothing.
+fn forced(approved: bool, laid: &[String], worktree: &str) -> bool {
+    let _ = worktree;
+    approved || !laid.is_empty()
+}
+
 async fn remove_held(
     daemon: &Arc<Daemon>,
     workspace: &Workspace,
@@ -2936,8 +2946,7 @@ async fn remove_held(
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let dir = workspace.folder_of(&worktree.path);
         let dir = dir.to_string_lossy();
-        // What was laid from another machine is still changed to git, and loses nothing.
-        let force: &[&str] = if approved.is_some() || laid {
+        let force: &[&str] = if forced(approved.is_some(), &laid, &worktree.path) {
             &["--force"]
         } else {
             &[]
@@ -3691,6 +3700,20 @@ mod tests {
         let without = git_ok(repo, &["rev-parse", "HEAD"]).await;
         assert!(as_laid(repo, &without, "a.txt").await);
         assert!(!as_laid(repo, &snapshot, "a.txt").await);
+    }
+
+    #[test]
+    fn only_the_worktree_holding_the_launcher_s_copy_is_forced() {
+        let laid = vec!["api".to_owned()];
+
+        // Its changes are all the launch's snapshot: forced, as git still counts them.
+        assert!(forced(false, &laid, "api"));
+        // Another copy of the workspace laid nothing: what git would refuse to remove stays.
+        assert!(!forced(false, &laid, "web"));
+        assert!(!forced(false, &[], "api"));
+        // What the user approved to lose goes, whatever was laid.
+        assert!(forced(true, &laid, "web"));
+        assert!(forced(true, &[], "web"));
     }
 
     #[test]
