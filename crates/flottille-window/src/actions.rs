@@ -2155,15 +2155,26 @@ fn signed_by_device(
 }
 
 /// [`Command::AllSettingsShare`]: each value in a request of its own, signed by this device, so
-/// that each sealed copy holds its own text alone (a guidance near its limit fills one). The first
-/// refused ends it; the answer is the last one, saying where the values went at the least: a hub
-/// that keeps none, or out of reach, for one of them is said.
+/// that each sealed copy holds its own text alone (a guidance near its limit fills one). All are
+/// checked first (`settings.check`), so that a value refused shares none of the others. The
+/// answer is the last one, saying where the values went at the least: a hub that keeps none, or
+/// out of reach, for one of them is said.
 fn share_each(
     connect: &Connect,
     sign: Option<Sign>,
     values: Vec<(String, String)>,
     bound: Duration,
 ) -> Result<Value, String> {
+    let checked: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(name, text)| (name.clone(), Value::String(text.clone())))
+        .collect();
+    answer(ask_alone(
+        connect,
+        "settings.check",
+        json!({"values": checked}),
+        bound,
+    ))?;
     let order = |hub: &Value| match hub.as_str() {
         Some("old-hub") => 2,
         Some("later") => 1,
