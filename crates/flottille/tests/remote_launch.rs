@@ -832,6 +832,25 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
 }
 
 #[test]
+fn a_controller_s_launch_in_full_starts_nothing() {
+    let (_hub, pc, server) = pc_and_server_as("controller", server_user(allowing()), Some(""));
+    let (root, _mcp) = pc.root("full");
+    let key = pc.stand_in();
+    let mut asked = launch_ask("l1", &root);
+    asked.mode = "full".into();
+
+    let answers = sent_with(&key, &server, vec![MachineMessage::Launch(Box::new(asked))]);
+
+    // A controller runs no agent, so no agent of it launches: in Full no more than in Auto.
+    let refused = answers[0].clone().unwrap_err();
+    assert!(
+        refused.contains("pc is a controller: it runs no agent, so no agent of it launches"),
+        "{refused}"
+    );
+    assert!(server.agents().is_empty(), "{:#?}", server.agents());
+}
+
+#[test]
 fn a_forged_launch_without_a_recorded_caller_is_refused() {
     let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     let workspaces = server.user.call("workspace.list", json!({})).unwrap();

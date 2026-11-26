@@ -1104,6 +1104,26 @@ fn a_call_of_a_tree_in_full_is_taken_in_full_with_no_switch_signed() {
     );
 }
 
+#[test]
+fn a_controller_s_call_in_full_is_taken_in_auto() {
+    let (_hub, pc, server, night) = night_lead("controller");
+    let (root, _mcp) = pc.root("full");
+    let pc_hex = hex_of(&pc);
+    let key = pc.stand_in();
+
+    // A call that says its tree is in Full, as a forged one would.
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![forged_call("forged", &night, &root, "full")],
+    );
+
+    // A controller stays bounded by its role: never taken in Full, judged as Auto is.
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    let stand_in = server.agent(&format!("forged@{pc_hex}"));
+    assert_eq!(stand_in["gate_mode"], "auto", "{stand_in:#}");
+}
+
 /// The answer of request `number` of another machine, for pc's agent `agent`.
 fn answer_of(id: &str, number: u64, agent: &str, body: &str) -> MachineMessage {
     MachineMessage::Deliver(Box::new(Deliver {
