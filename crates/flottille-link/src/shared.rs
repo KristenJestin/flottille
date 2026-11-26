@@ -314,6 +314,22 @@ impl Sealed {
         Ok(())
     }
 
+    /// Whether this copy is void for `machine`: it opens, and the user's change inside is signed by
+    /// a device `members` says was removed, or may only view. A copy that does not open, or of a
+    /// device the list does not know (a list behind the hub's), is not.
+    pub fn is_void(&self, machine: &MachineKey, members: &Members) -> bool {
+        self.open(machine).is_some_and(|plain| {
+            serde_json::from_slice::<Request>(&plain).is_ok_and(|request| {
+                let device = &request.signed.device;
+                request.is_signed()
+                    && match members.get(device) {
+                        Some(member) => member.role == Role::Viewer,
+                        None => members.was_removed(device),
+                    }
+            })
+        })
+    }
+
     /// The value, opened with this machine's key: none when it is not sealed for it, or was
     /// changed on the way.
     pub fn open(&self, machine: &MachineKey) -> Option<Vec<u8>> {
