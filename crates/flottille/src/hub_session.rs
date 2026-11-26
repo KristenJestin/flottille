@@ -23,9 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
-    MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Role, Sealed,
-    Session, Tls,
+    Action, Ask, Asker, Change, ControlError, Device, DeviceKey, Facts, Hello, HubUrl, ListError,
+    MachineKey, MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed,
+    Request, Role, Sealed, Session, Tls,
 };
 use serde_json::{Value, json};
 
@@ -127,14 +127,7 @@ impl Control {
         for (name, kept) in &changes {
             let sealed = crate::shared::seal(name, kept, &self.key, &members)
                 .ok_or_else(|| format!("{name} cannot be sealed"))?;
-            if sealed.size() > flottille_link::SEALED_LIMIT {
-                return Err(format!(
-                    "{name} is too large to share: sealed for every machine it holds {} bytes, \
-                     and the hub keeps {} at most; shorten it",
-                    sealed.size(),
-                    flottille_link::SEALED_LIMIT
-                ));
-            }
+            fits(name, &sealed)?;
         }
         let changed = crate::shared::keep(&self.folder, changes);
         let delivery = match self.asker.borrow().as_ref() {
@@ -144,6 +137,38 @@ impl Control {
         };
         self.give(&members, &changed);
         Ok(delivery)
+    }
+
+    /// Why `share` would refuse the value `name` of `params` for its size, sealed for every
+    /// machine in a request of its own as the user's device would sign it: checked before a
+    /// change of several values shares any. Nothing to check without a hub (`share` refuses).
+    pub(crate) fn fits(&self, name: &str, params: &Value) -> Result<(), String> {
+        let Ok((_, members)) = self.checked() else {
+            return Ok(());
+        };
+        // A key of the check's own, never kept: a signature is as long whoever makes it, and the
+        // names are as long as the longest a window gives.
+        let key = DeviceKey::make().map_err(|error| error.to_string())?;
+        let long = "x".repeat(64);
+        let request = Request::sign(
+            &key,
+            &long,
+            &long,
+            crate::all_settings::SHARE,
+            params,
+            std::time::SystemTime::now(),
+        )
+        .map_err(|error| error.to_string())?;
+        let plain = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let sealed = Sealed::seal(
+            name,
+            request.signed.at,
+            &plain,
+            &crate::shared::machines(&members),
+            &self.key,
+        )
+        .map_err(|error| format!("{name} cannot be sealed: {error}"))?;
+        fits(name, &sealed)
     }
 
     /// The values `names`, sealed for every machine of `members`, given to the hub while a session
@@ -599,6 +624,19 @@ impl Control {
     /// What the hub told of the members' devices: kept for `remote.members`.
     fn told_facts(&self, facts: Vec<Facts>) {
         *self.facts.lock().unwrap() = facts;
+    }
+}
+
+/// Why the hub would not keep `sealed`, the value `name`: larger than it keeps.
+fn fits(name: &str, sealed: &Sealed) -> Result<(), String> {
+    match sealed.size() > flottille_link::SEALED_LIMIT {
+        true => Err(format!(
+            "{name} is too large to share: sealed for every machine it holds {} bytes, and the \
+             hub keeps {} at most; shorten it",
+            sealed.size(),
+            flottille_link::SEALED_LIMIT
+        )),
+        false => Ok(()),
     }
 }
 

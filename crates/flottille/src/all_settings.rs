@@ -369,11 +369,29 @@ struct UseAll {
     names: Vec<String>,
 }
 
-/// Answers a `settings.*` request of the user: `settings.shared`, `settings.share`,
-/// `settings.use_all`. No tool of an agent reaches them.
+/// Answers a `settings.*` request of the user: `settings.shared`, `settings.check`,
+/// `settings.share`, `settings.use_all`. No tool of an agent reaches them.
 pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
         "settings.shared" => shown(daemon),
+        // What `settings.share` would refuse of each value, sent alone as the window sends it:
+        // a change of several values is checked whole before any is shared.
+        "settings.check" => {
+            let Share { values } = serde_json::from_value(params)?;
+            let control = daemon
+                .link()
+                .and_then(Result::ok)
+                .and_then(|link| link.control.get().cloned());
+            for (name, value) in &values {
+                check(name, value).map_err(Failure::refused)?;
+                if let Some(control) = &control {
+                    control
+                        .fits(name, &json!({"values": {name: value}}))
+                        .map_err(Failure::refused)?;
+                }
+            }
+            Ok(json!({}))
+        }
         SHARE => {
             let Share { values } = serde_json::from_value(params)?;
             if values.is_empty() {

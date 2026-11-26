@@ -143,6 +143,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `about.reset` | drive |
 | `about.share` | drive |
 | `settings.shared` | read |
+| `settings.check` | read |
 | `settings.share` | drive |
 | `settings.use_all` | drive |
 | `rules.show` | read |
@@ -776,6 +777,10 @@ name the entry instead"), and a machine that receives one drops it.
   (a provider not ready, a model it does not offer), and Flottille's default of each value of the
   guidance and the rest, as its value says it (what the window's All machines shows while none
   is shared).
+- `settings.check {values: {<name>: <text>}}` answers `{}` when `settings.share` would take each
+  value sent alone, and is `refused` with the first it would refuse, and why (its name, its
+  check, a secret it holds, a size larger than the hub keeps): the window checks a section whole
+  before it shares any of its values, each in a request of its own.
 - `settings.share {values: {<name>: <text>}}` sets values of all machines, an empty text clearing
   one. Only as a request signed by the user's device, as `about.share`; `refused` for a name that
   is none, a value the setting would refuse, a workspaces folder that is not under the home, a
