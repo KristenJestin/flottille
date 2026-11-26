@@ -363,3 +363,38 @@ pub fn listing(said: &Value) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{Definition, tool_of};
+
+    #[test]
+    fn the_findings_offer_adds_no_action_to_a_tool_that_has_none() {
+        // Indexing into the schema would add `"action": {"enum": null}`, a schema Claude Code
+        // drops its tool for (#1509).
+        let schemas: [fn() -> Value; 2] = [
+            || json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            || json!({"type": "object"}),
+        ];
+        for schema in schemas {
+            let mut tool = tool_of(
+                &Definition {
+                    name: "no_action",
+                    title: "No action",
+                    description: "A tool of a test.",
+                    read_only: true,
+                    idempotent: true,
+                    destructive: false,
+                    schema,
+                },
+                true,
+            );
+            offer(&mut tool);
+            let listed = Value::Object((*tool.input_schema).clone());
+            assert_eq!(listed.pointer("/properties/action"), None, "{listed}");
+            // Nor a `"properties": null` to a schema that declares none.
+            assert_ne!(listed.get("properties"), Some(&Value::Null), "{listed}");
+        }
+    }
+}
