@@ -417,6 +417,11 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
                     )
                 })?;
             let delivery = control.share(&asked.signed).map_err(Failure::refused)?;
+            for (name, value) in &values {
+                if !control.keeps(name) {
+                    keep_here(daemon, name, value)?;
+                }
+            }
             applied(daemon, &values.into_keys().collect::<Vec<_>>());
             let mut answer = shown(daemon)?;
             answer["hub"] = json!(delivery);
@@ -442,6 +447,49 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// Writes `value` as this machine's own `name`, through the setting's own method: what a hub
+/// that does not keep the name for all machines (one of a version before it) leaves to this
+/// machine alone. An empty value is no choice, and writes nothing.
+fn keep_here(daemon: &Arc<Daemon>, name: &str, value: &str) -> Result<(), Failure> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let refused = |why: String| Failure::refused(format!("{name}: {why}"));
+    let written = match name {
+        rules::SHARED => rules::call(daemon, "rules.set", json!({"text": value})),
+        judge::SHARED => judge::call(daemon, "judge.set", json!({"text": value})),
+        compaction::SHARED_GUIDANCE => {
+            compaction::call(daemon, "compaction.set_guidance", json!({"text": value}))
+        }
+        results::SHARED_LIMIT => {
+            let limit = match results::shared_limit(value).map_err(refused)? {
+                Some(limit) => json!(limit),
+                None => json!("off"),
+            };
+            results::call(daemon, "tool_results.set", json!({"limit": limit}))
+        }
+        results::SHARED_UNCHANGED => {
+            let unchanged = results::shared_unchanged(value).map_err(refused)?;
+            results::call(daemon, "tool_results.set", json!({"unchanged": unchanged}))
+        }
+        appearance::SHARED_SHADE => {
+            appearance::call(daemon, "appearance.set", json!({"shade": value}))
+        }
+        name if TEXTS.contains(&name) => {
+            let (extension, part) = guidance_of(name).expect("a guidance's name");
+            return extensions::set_guidance(daemon, extension, part, value);
+        }
+        name if EXTENSION_SETTINGS.contains(&name) => {
+            let (extension, key) = name.split_once('.').expect("<extension>.<key>");
+            let value = serde_json::from_str(value).map_err(|error| refused(error.to_string()))?;
+            return extensions::set_setting(daemon, extension, key, value);
+        }
+        // #1514's names, which every hub that keeps a value of all machines keeps.
+        _ => return Ok(()),
+    };
+    written.map(drop)
 }
 
 /// Drops this machine's own choice of `name`: it follows all machines again.

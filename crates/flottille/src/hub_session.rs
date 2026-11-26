@@ -123,7 +123,11 @@ impl Control {
     /// keeps none.
     pub(crate) fn share(&self, text: &str) -> Result<&'static str, String> {
         let (_, members) = self.checked()?;
-        let changes = crate::shared::from_request(text, &members)?;
+        // A value the hub open now does not keep (one of a version before it) is no value of
+        // all machines: it stays this machine's own (`crate::all_settings`), never given.
+        let (changes, lacked): (Vec<_>, Vec<_>) = crate::shared::from_request(text, &members)?
+            .into_iter()
+            .partition(|(name, _)| self.keeps(name));
         for (name, kept) in &changes {
             let sealed = crate::shared::seal(name, kept, &self.key, &members)
                 .ok_or_else(|| format!("{name} cannot be sealed"))?;
@@ -133,6 +137,7 @@ impl Control {
         let delivery = match self.asker.borrow().as_ref() {
             None => "later",
             Some(asker) if !asker.takes_shared() => "old-hub",
+            Some(_) if !lacked.is_empty() => "old-hub",
             Some(_) => "given",
         };
         self.give(&members, &changed);
@@ -171,6 +176,16 @@ impl Control {
         fits(name, &sealed)
     }
 
+    /// Whether the value `name` may be given to the hub: one the hub open now keeps, or any while
+    /// none is open (the next session's hub decides), or while it keeps none at all (said
+    /// `old-hub`, and given once it does).
+    pub(crate) fn keeps(&self, name: &str) -> bool {
+        self.asker
+            .borrow()
+            .as_ref()
+            .is_none_or(|asker| !asker.takes_shared() || asker.keeps(name))
+    }
+
     /// The values `names`, sealed for every machine of `members`, given to the hub while a session
     /// to one that keeps them is open; otherwise the next session gives them (`took_shared`).
     fn give(&self, members: &Members, names: &[String]) {
@@ -181,7 +196,7 @@ impl Control {
             return;
         };
         let values = crate::shared::read(&self.folder);
-        for name in names {
+        for name in names.iter().filter(|name| asker.keeps(name)) {
             let Some(sealed) = values
                 .get(name)
                 .and_then(|kept| crate::shared::seal(name, kept, &self.key, members))

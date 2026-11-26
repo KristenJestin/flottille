@@ -2219,6 +2219,11 @@ by each setting's own loader under the machine's own file:
   machine's, and all machines' value applies over it. What this version writes holds only what
   the user chose there. So a machine that chose Dark, or the 8,000 characters, before it was
   updated follows all machines once one shares another: choosing it again there keeps it.
+- **A hub of before** (#1514's, v0.4.4) keeps About you and the settings a machine often
+  overrides, and none of these: the hub names what it keeps in its welcome, and one that names
+  nothing keeps #1514's. Shared through such a hub, a value is written as the machine's own,
+  given to no hub, and the window says `Saved on this machine only`: updating the hub, then
+  saving it again, shares it.
 - **The rules, and each guidance, say where they come from**: `source: "all"` while the machine
   follows all machines', which a project's own rules still follow or replace as before.
 

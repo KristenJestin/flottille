@@ -787,6 +787,11 @@ name the entry instead"), and a machine that receives one drops it.
   is none, a value the setting would refuse, a workspaces folder that is not under the home, a
   connection that names a vault entry, a program or a plain address. Answers as `settings.shared`,
   with `hub` as `about.share` says it.
+- A hub names the values it keeps in its welcome (`names`); one of before #1525 names none, and
+  keeps only About you and the settings a machine often overrides. A value such a hub does not
+  keep is no value of all machines: `settings.share` writes it as this machine's own (as the
+  setting's own method does: `rules.set`, `judge.set`, `review.set`, `extension.set` and the
+  others), gives it to no hub, and answers `hub: "old-hub"`.
 - `settings.use_all {names}` drops this machine's own value of each name (one of `own`), which
   follows all machines again, and answers as `settings.shared`.
 

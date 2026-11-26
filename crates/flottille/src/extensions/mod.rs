@@ -1369,6 +1369,45 @@ pub(crate) fn forget_setting(daemon: &Daemon, extension: &str, key: &str) -> Res
     .map(drop)
 }
 
+/// Sets this machine's own value of an extension's setting `key`, as `extension.set` does:
+/// what a hub that does not keep it for all machines leaves to this machine.
+pub(crate) fn set_setting(
+    daemon: &Daemon,
+    extension: &str,
+    key: &str,
+    value: Value,
+) -> Result<(), Failure> {
+    set(
+        daemon,
+        Set {
+            name: extension.to_owned(),
+            project: None,
+            enabled: None,
+            settings: Map::from_iter([(key.to_owned(), value)]),
+        },
+    )
+    .map(drop)
+}
+
+/// Writes this machine's own guidance of `extension` (of its check `part`), as `<name>.set`
+/// does.
+pub(crate) fn set_guidance(
+    daemon: &Daemon,
+    extension: &str,
+    part: Option<&str>,
+    text: &str,
+) -> Result<(), Failure> {
+    let extension = find(extension).map_err(|why| Failure::new("not-found", why))?;
+    let method = format!("{}.set", extension.methods.prefix);
+    guidance::call(
+        daemon,
+        extension,
+        &method,
+        json!({"part": part, "text": text}),
+    )
+    .map(drop)
+}
+
 /// Whether the project's value of a setting is all machines': neither the project nor this
 /// machine holds one.
 pub fn from_all(daemon: &Daemon, extension: &Extension, project: &Project, key: &str) -> bool {

@@ -670,8 +670,8 @@ impl AllSettings {
                         "The hub is out of reach: the other machines get it once it answers.",
                     ),
                     Some("old-hub") => Toast::failure("Saved on this machine only").detail(
-                        "The hub is of a version that keeps no settings for all machines: \
-                         update it.",
+                        "The hub is of a version that does not keep this setting for all \
+                         machines: update it.",
                     ),
                     _ => Toast::success("Saved for all machines")
                         .detail("A machine that chose its own keeps it."),
