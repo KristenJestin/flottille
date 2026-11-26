@@ -795,8 +795,8 @@ them.
 `rules.show`, `judge.show`, `review.show` and `compaction.show`'s `guidance` say `source: "all"`
 while this machine follows all machines' text, having none of its own. A machine's own value of
 the rest is what its file says: `tool-results.toml` and `appearance.toml` hold only what the user
-chose there (`tool_results.set` writes what it is given, `appearance.set` a shade other than the
-one followed); in such a file written before (#1525), the default limit and the dark shade are no
+chose there (`tool_results.set` and `appearance.set` write what they are given, even the same as
+all machines', which the window sends only once the user changed it); in such a file written before (#1525), the default limit and the dark shade are no
 choice, and all machines' value applies over them.
 
 ### The judge methods
@@ -1295,8 +1295,8 @@ window and a restart show the same colours.
   theme, followed live) or `flottille` (Flottille's own palette), `shade` is `light` or `dark`
   (Flottille's, also used when Omarchy is chosen and no Omarchy theme can be used). With no file,
   `omarchy` and `dark`. `invalid-config` when the file cannot be read or names another word.
-- `appearance.set {theme, shade}` writes the file and answers as `appearance.show`;
-  `invalid-params` for another word.
+- `appearance.set {theme?, shade?}` writes what it is given, this machine's own choice, and
+  answers as `appearance.show`; `invalid-params` for another word.
 
 `appearance.set` emits `appearance.changed` with what it answers. The user's door alone reaches
 them: no tool of an agent does.

@@ -2318,9 +2318,6 @@ row of a session led from another machine.
   Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
   do), rather than a key of its own for it, which the member list would have to sign and send. The
   use of one key for both is studied (eprint 2021/509) and found sound for this.
-- **A shade chosen on a machine is its own only when it differs from the one it follows** (#1525):
-  the window sends the shade with the theme, so that changing the theme alone would otherwise make
-  the shade the machine's. A file of before is read as said under "The guidance and the rest".
 - **What All machines shows of a value none shared is Flottille's default** (#1525), said as such
   under it; a list (Review's checks, the subscriptions) and a choice among words share what they
   show once it changes, a text or a line emptied shares nothing.

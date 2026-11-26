@@ -158,18 +158,14 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             let asked: Own = serde_json::from_value(params)?;
             let invalid = |e| Failure::new("invalid-config", e);
             // A file that cannot be read is written again from the choice, as nothing chosen.
-            let before = read(paths).unwrap_or_default();
             let mut own = own(paths).unwrap_or_default();
+            // What is given is chosen here, even the same as all machines' (#1462): a client
+            // sends only what the user changed.
             if asked.theme.is_some() {
                 own.theme = asked.theme;
             }
-            // A client sends the shade with the theme: only a shade other than the one followed
-            // now is this machine's choice, so that changing the theme leaves the shade to all
-            // machines.
-            if let Some(shade) = asked.shade
-                && (own.shade.is_some() || shade != before.shade)
-            {
-                own.shade = Some(shade);
+            if asked.shade.is_some() {
+                own.shade = asked.shade;
             }
             write(paths, &own).map_err(|e| Failure::new("unavailable", e))?;
             let appearance = read(paths).map_err(invalid)?;
