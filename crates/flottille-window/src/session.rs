@@ -27,6 +27,7 @@ use std::time::Duration;
 use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
+use gpui_design_system::typography::BODY;
 use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
     Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
@@ -9083,7 +9084,7 @@ impl Render for SessionRail {
                             .flex()
                             .items_center()
                             .gap(space::SM)
-                            .text_size(px(13.))
+                            .text_size(px(REPOSITORY_SIZE))
                             .medium()
                             .child(tipped(
                                 div()
@@ -9143,7 +9144,7 @@ impl Render for SessionRail {
                                     div()
                                         .id(ElementId::Name(format!("rail-status-{name}").into()))
                                         .pl(space::XL)
-                                        .mono(11.5)
+                                        .mono(STATUS_SIZE)
                                         .text_color(p.faint)
                                         .overflow_hidden()
                                         .whitespace_nowrap()
@@ -9373,6 +9374,29 @@ impl Render for SessionRail {
         {
             facts.push(("From", place.bases.join(", ")));
         }
+        // What the window knows of the section before the daemon answers: its repositories and
+        // the base they started from, and whether the session is about a ticket.
+        let (skeleton_repositories, skeleton_ticket, skeleton_from) = match self.page.upgrade() {
+            Some(page) => {
+                let page = page.read(cx);
+                let ticket = page.subject().and_then(ticket_key).is_some();
+                let (repositories, from) = page.shell().upgrade().map_or((0, false), |shell| {
+                    let snapshot = shell.read(cx).snapshot();
+                    match &self.workspace {
+                        Some(name) => snapshot
+                            .workspace(&self.project, name)
+                            .map_or((0, false), |w| (w.repositories.len(), !w.bases.is_empty())),
+                        None => snapshot
+                            .projects
+                            .iter()
+                            .find(|p| p.name == self.project)
+                            .map_or((0, false), |p| (p.repositories.len(), false)),
+                    }
+                });
+                (repositories, ticket, from)
+            }
+            None => (0, false, false),
+        };
         let workspace = div()
             .id("rail-workspace")
             .flex()
@@ -9390,7 +9414,7 @@ impl Render for SessionRail {
             .child(awaiting(
                 "rail-workspace-wait",
                 !self.place_known,
-                workspace_skeleton(),
+                workspace_skeleton(skeleton_repositories, skeleton_ticket, skeleton_from),
                 div()
                     .id("rail-workspace-read")
                     .test_support()
@@ -9590,21 +9614,72 @@ fn skeleton_line(id: String, value: f32) -> impl IntoElement {
                 .w(px(FACT_ICON))
                 .h(px(FACT_ICON)),
         )
-        .child(Skeleton::new(part("label")).w(px(72.)).h(px(10.)))
+        .child(
+            Skeleton::new(part("label"))
+                .w(px(72.))
+                .h(px(FACT_LABEL_SIZE)),
+        )
         .child(div().flex_1())
-        .child(Skeleton::new(part("value")).w(px(value)).h(px(10.)))
+        .child(Skeleton::new(part("value")).w(px(value)).h(px(FACT_SIZE)))
         .test_support()
 }
 
-/// The Workspace section before the daemon first answered: a line for each of its facts.
-fn workspace_skeleton() -> impl IntoElement {
+/// The size of a fact's label.
+const FACT_LABEL_SIZE: f32 = 12.5;
+
+/// The size of a repository's name in the Workspace section, and of its status under it.
+const REPOSITORY_SIZE: f32 = 13.;
+const STATUS_SIZE: f32 = 11.5;
+
+/// The Workspace section before the daemon first answered, shaped as what replaces it: the
+/// ticket's line when the session is about one, then each repository's, its name over its status,
+/// one when the window does not know them yet, then the base they started from when they have
+/// one. Each bar is of its text's size, in a line of its height.
+fn workspace_skeleton(repositories: usize, ticket: bool, from: bool) -> impl IntoElement {
+    let bar = |id: String, width: f32, size: f32| {
+        Skeleton::new(ElementId::Name(id.into()))
+            .w(px(width))
+            .h(px(size))
+    };
     div()
         .id("rail-workspace-skeleton")
         .flex()
         .flex_col()
-        .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
-        .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
-        .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
+        .children(ticket.then(|| skeleton_line("rail-skeleton-ticket".to_owned(), 150.)))
+        .children((0..repositories.max(1)).map(|n| {
+            let id = |part: &str| format!("rail-skeleton-repository-{n}-{part}");
+            div()
+                .id(ElementId::Name(id("line").into()))
+                .flex()
+                .flex_col()
+                .px(space::XS)
+                .py(space::XS)
+                .child(
+                    div()
+                        .h(px(BODY * 1.5))
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(bar(id("icon"), FACT_ICON, FACT_ICON))
+                        .child(bar(id("name"), 96., REPOSITORY_SIZE)),
+                )
+                .child(
+                    div()
+                        .mt(space::XS)
+                        .pl(space::XL)
+                        .h(px((STATUS_SIZE * 1.4).round()))
+                        .flex()
+                        .items_center()
+                        .child(bar(id("status"), 140., STATUS_SIZE)),
+                )
+                .test_support()
+        }))
+        // The facts sit under the lines after a space of their own, whether there is one or not.
+        .child(
+            div()
+                .pt(space::SM)
+                .children(from.then(|| skeleton_line("rail-skeleton-from".to_owned(), 60.))),
+        )
         .test_support()
 }
 
@@ -9634,7 +9709,7 @@ fn fact_line(
         .flex()
         .items_center()
         .gap(space::SM)
-        .text_size(px(12.5))
+        .text_size(px(FACT_LABEL_SIZE))
         .child(slot)
         .child(
             div()
