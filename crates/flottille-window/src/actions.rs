@@ -266,9 +266,11 @@ pub enum Command {
     AppearanceRead {
         seq: u64,
     },
-    /// Keeps the window's appearance (`appearance.set`).
+    /// Keeps the window's appearance (`appearance.set`): only what differs from `before`, which
+    /// the user changed, so that the rest follows all machines still.
     AppearanceSet {
         appearance: gpui_design_system::Appearance,
+        before: Option<gpui_design_system::Appearance>,
         seq: u64,
     },
     /// What the daemon keeps of a composer's draft (`draft.get`).
@@ -2967,9 +2969,13 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
         }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
             let (method, params, written) = match command {
-                Command::AppearanceSet { appearance, .. } => {
-                    ("appearance.set", appearance_json(appearance), true)
-                }
+                Command::AppearanceSet {
+                    appearance, before, ..
+                } => (
+                    "appearance.set",
+                    appearance_changed(appearance, before),
+                    true,
+                ),
                 _ => ("appearance.show", json!({}), false),
             };
             let shown = answer(ask_alone(connect, method, params, bounds.quick))
@@ -4298,6 +4304,19 @@ pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Val
         Shade::Dark => "dark",
     };
     json!({"theme": theme, "shade": shade})
+}
+
+/// The fields of `appearance` that differ from `before`, in the words of `appearance.set`: each is
+/// this machine's own choice once sent. All of them without a `before`.
+fn appearance_changed(
+    appearance: gpui_design_system::Appearance,
+    before: Option<gpui_design_system::Appearance>,
+) -> Value {
+    let mut now = appearance_json(appearance);
+    if let (Some(before), Some(fields)) = (before.map(appearance_json), now.as_object_mut()) {
+        fields.retain(|key, value| before.get(key) != Some(value));
+    }
+    now
 }
 
 /// What `appearance.show` says, or why it says nothing the window knows.

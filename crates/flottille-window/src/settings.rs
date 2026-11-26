@@ -1947,11 +1947,13 @@ impl SettingsPage {
         if !self.appearance_known() || self.appearance.as_ref() == Some(&appearance) {
             return;
         }
-        self.appearance = Some(appearance.clone());
+        let before = self.appearance.replace(appearance.clone());
         appearance::appear(appearance.clone(), cx);
         crate::look::remember(&appearance, cx);
         self.shell
-            .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
+            .update(cx, |shell, _| {
+                shell.ask_appearance(Some((appearance, before)))
+            })
             .ok();
         cx.notify();
     }
