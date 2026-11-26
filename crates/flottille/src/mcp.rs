@@ -537,7 +537,9 @@ const SERVED: [Definition; 33] = [
             tracker, rules how agents are told to work; set_settings and set_rules change them \
             once the judge or the user allows it (the tracker and the rules: the user). \
             set_rules replaces the project's text whole (text, at most 8000 characters): send \
-            every rule, never one alone. A forge is {kind: github | bitbucket-cloud, repository} \
+            every rule, never one alone. about reads About you, what every agent is told of the \
+            user; set_about {name?, pronouns?, notes?} changes it on this machine once the user \
+            allows it, each field given whole. A forge is {kind: github | bitbucket-cloud, repository} \
             or {kind: bitbucket-data-center, host, repository}, a tracker {kind: github, \
             repository} or {kind: jira, site, projects}. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \
             \"base\": [\"develop\", \"main\"], \"depends_on\": [\"lib\"]}]}.",
@@ -546,7 +548,7 @@ const SERVED: [Definition; 33] = [
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["settings", "set_settings", "rules", "set_rules"]},
+                "action": {"type": "string", "enum": ["settings", "set_settings", "rules", "set_rules", "about", "set_about"]},
                 "repositories": {"type": "array", "items": {"type": "object", "properties": {
                     "path": {"type": "string"},
                     "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."},
@@ -555,7 +557,10 @@ const SERVED: [Definition; 33] = [
                 }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
                 "text": {"type": "string", "description": "set_rules: the project's rules, whole, at most 8000 characters; they replace its current ones and come after the global ones."},
-                "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."}
+                "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."},
+                "name": {"type": "string", "description": "set_about: what agents call the user, one line, at most 100 characters; empty clears it."},
+                "pronouns": {"type": "string", "description": "set_about: how to refer to the user, one line, at most 100 characters; empty clears it."},
+                "notes": {"type": "string", "description": "set_about: anything every agent should know, whole, at most 8000 characters; it replaces the current notes, empty clears them."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1004,7 +1009,11 @@ const PROJECT_WHOLE: &str = "This project's settings. settings reads each reposi
     refused change saves nothing. rules reads how agents are told to work (the global \
     rules, then the project's); set_rules replaces the project's text whole \
     (text, at most 8000 characters), so send every rule, never one alone, and sets \
-    rules_alone, for the agents created after. A forge is \
+    rules_alone, for the agents created after. about reads About you, what every agent \
+    is told of the user, as about.show answers it; set_about {name?, pronouns?, notes?} \
+    changes this machine's, each field given whole (empty clears it), for the agents \
+    started after, once the user allows it, in every mode; the values of all machines \
+    change only in the window, on All machines. A forge is \
     {kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, \
     repository}, a tracker {kind: github, repository} or {kind: jira, site, projects}. \
     A change is done once the judge or the \
@@ -2796,8 +2805,8 @@ async fn played_whole(
                             // a session written to for the first time; so are a service stopped
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, a
-                            // worklog deleted, a connection written, and a pull request's code
-                            // run by its review. So is, asked from another machine, a removal
+                            // worklog deleted, a connection written, a pull request's code
+                            // run by its review, and About you changed. So is, asked from another machine, a removal
                             // that would lose what did not go back there.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
@@ -2813,6 +2822,7 @@ async fn played_whole(
                                 && !gate::asks_review(&ask)
                                 && !gate::asks_pull_request_code(&ask)
                                 && !gate::asks_worklog_delete(&ask)
+                                && !gate::asks_about(&ask)
                                 && !crate::actions::sends_a_worklog_token(
                                     daemon, grant, tool, &args,
                                 ) =>
