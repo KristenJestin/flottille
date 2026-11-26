@@ -92,7 +92,7 @@ pub struct LightSession {
 }
 
 /// One id of the sender's: 1 to 64 letters, digits, dashes or underscores.
-fn an_id(id: &str) -> bool {
+pub(crate) fn an_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= NAME_LIMIT
         && id
