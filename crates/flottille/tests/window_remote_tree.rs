@@ -1898,10 +1898,8 @@ fn review_pilot_on(pc: &Machine) -> (String, String, Mcp) {
     pc.user
         .call("agent.mode", json!({"agent": pilot, "mode": "auto"}))
         .unwrap();
-    let mut found = None;
-    eventually("the pilot's session", || {
-        found = pc
-            .user
+    let find = || {
+        pc.user
             .received_requests("session/new")
             .into_iter()
             .rev()
@@ -1910,10 +1908,10 @@ fn review_pilot_on(pc: &Machine) -> (String, String, Mcp) {
                     .as_str()
                     .unwrap_or_default()
                     .contains("You are the pilot of a review")
-            });
-        found.is_some()
-    });
-    let opened = found.unwrap();
+            })
+    };
+    eventually("the pilot's session", || find().is_some());
+    let opened = find().unwrap();
     let server = &opened["params"]["mcpServers"][0];
     let mcp = Mcp::initialize(
         server["url"].as_str().unwrap(),
