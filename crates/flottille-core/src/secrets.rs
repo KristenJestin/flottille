@@ -719,7 +719,7 @@ enum Place {
     Query,
     /// After a connection string's `;` or a `docker run -e` (`--env`), which starts at its byte.
     Pair(usize),
-    /// After a whitespace, in the middle of a line: only as `key=value` with no space, which
+    /// After a whitespace or a `(`, in the middle of a line: only as `key=value` with no space, which
     /// reads as it does at a line's start, so a text cut before it reads the same
     /// (`login failed, token=…`). A password's value, which runs to a line's end there, is the
     /// exception: streamed, it masks more than whole, never less.
@@ -762,7 +762,7 @@ fn place(before: &str) -> Option<Place> {
     line.chars()
         .all(|c| matches!(c, ' ' | '\t'))
         .then_some(Place::Line)
-        .or_else(|| line.ends_with([' ', '\t']).then_some(Place::Word))
+        .or_else(|| line.ends_with([' ', '\t', '(']).then_some(Place::Word))
 }
 
 /// Whether `text` is a name of code: a letter or `_` first, then letters, digits, `_`, `.` or `:`.
@@ -804,11 +804,16 @@ fn expression(value: &str) -> bool {
 }
 
 /// Whether the tight value of a `key=value` in the middle of a line is code, read back from a
-/// diff, a file or a command's output (`Client(url, token=self.token)`, `let token=foo_bar;`,
-/// `local token=$(gh auth token)`, `--token=$GH_TOKEN`): it ends a call or a statement, is a
-/// variable's expansion, or a dotted name. An opaque value is none of these.
+/// diff, a file or a command's output (`Client(url, token=self.token)`, `local token=$(gh auth
+/// token)`, `--token=$GH_TOKEN`): a variable's expansion, a dotted name or a call (`expression`),
+/// with or without the `)`, `,` or `;` that ends it. That end alone makes no code: an opaque
+/// value followed by punctuation (`token=AbC123…,`) is masked, and so is a bare name
+/// (`token=token)`, `let token=foo_bar;`), which no shape tells from one.
 fn in_code(value: &str) -> bool {
-    value.ends_with([')', ',', ';']) || value.starts_with('$') || expression(value)
+    let core = value.strip_suffix([')', ',', ';']).unwrap_or(value);
+    [value, core]
+        .into_iter()
+        .any(|part| part.starts_with('$') || expression(part) || code(part))
 }
 
 /// Whether a value set to a password with spaces around its `=` is plainly code, for an ini
@@ -1005,7 +1010,7 @@ fn settings(text: &str) -> Vec<LoginField> {
                     } else {
                         (!tight && (value.contains([' ', '\t']) || value.ends_with(';')))
                             || (bytes[sign] == b'=' && !tight && expression(value))
-                            || value.ends_with(',')
+                            || (place != Place::Word && value.ends_with(','))
                             || code(value)
                             || value.chars().all(|c| c.is_alphabetic())
                             || value.chars().all(|c| c.is_ascii_digit())
@@ -1669,8 +1674,6 @@ mod tests {
         // `[masked]` in it may write it back.
         for text in [
             "client = Client(url, token=self.token)",
-            "api(url, token=token)",
-            "let token=foo_bar;",
             "local token=$(gh auth token)",
             "run --token=$GH_TOKEN now",
             "set(a, token=cfg.token, b)",
@@ -1690,6 +1693,9 @@ mod tests {
                 "then token=example-opaque-0000 now",
                 "then token=[masked] now",
             ),
+            // A bare name, with or without its end, reads as an opaque value.
+            ("api(url, token=token)", "api(url, token=[masked]"),
+            ("let token=foo_bar;", "let token=[masked]"),
         ] {
             assert_eq!(mask(text, &env), masked, "{text}");
         }
