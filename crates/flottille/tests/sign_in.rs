@@ -780,19 +780,18 @@ fn a_failed_sign_in_never_repeats_the_code_the_user_pasted() {
 
 #[test]
 fn a_failed_sign_in_masks_an_email_address_as_an_account_is() {
-    let user = User::new().with_sign_in_programs(&["acli"]);
+    let user = User::new().with_sign_in_programs(&["gh"]);
     user.sign_in_script(
-        "acli",
+        "gh",
         json!({"signed_in": false, "sign_in": {"fail": "Error: no access for someone@example.test, try again"}}),
     );
 
-    user.call("signin.start", json!({"program": "acli"}))
-        .unwrap();
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
 
-    eventually("acli's sign-in failed", || {
-        changed_to(&user, "acli", "failed").is_some()
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
     });
-    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let failed = changed_to(&user, "gh", "failed").unwrap();
     let why = failed["why"].as_str().unwrap_or_default();
     assert!(
         why.contains("no access for s***@e***, try again"),
@@ -803,23 +802,19 @@ fn a_failed_sign_in_masks_an_email_address_as_an_account_is() {
 
 #[test]
 fn a_failed_sign_in_masks_a_token_said_after_its_name() {
-    let user = User::new().with_sign_in_programs(&["acli"]);
+    let user = User::new().with_sign_in_programs(&["gh"]);
     // Invented, of no known shape: only its place says it is a token.
     let said = "Error: login refused, access_token: example-opaque-0000 and more\n\
                 Error: the server said token=example-other-0000 too\n\
                 Error: an invalid token: expired";
-    user.sign_in_script(
-        "acli",
-        json!({"signed_in": false, "sign_in": {"fail": said}}),
-    );
+    user.sign_in_script("gh", json!({"signed_in": false, "sign_in": {"fail": said}}));
 
-    user.call("signin.start", json!({"program": "acli"}))
-        .unwrap();
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
 
-    eventually("acli's sign-in failed", || {
-        changed_to(&user, "acli", "failed").is_some()
+    eventually("gh's sign-in failed", || {
+        changed_to(&user, "gh", "failed").is_some()
     });
-    let failed = changed_to(&user, "acli", "failed").unwrap();
+    let failed = changed_to(&user, "gh", "failed").unwrap();
     let why = failed["why"].as_str().unwrap_or_default();
     assert!(!why.contains("example-"), "{failed}");
     assert!(why.contains("access_token: [masked] and more"), "{failed}");
