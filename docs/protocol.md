@@ -2863,6 +2863,7 @@ when they name none:
       "ready": true,
       "why": null,
       "warnings": [],
+      "warning_kinds": [],
       "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
                   "version": "2.1.295", "checked": "2.1.295"},
       "login": {"present": true, "path": "/home/user/.claude/.credentials.json", "api_key": null},
@@ -2892,6 +2893,12 @@ sign-in line of the provider (`Codex's login expired: sign in again (run codex l
 agent refused to list its models for no login: it stays while its program, its API keys and its
 sign-in file are those the listing was refused in, and goes once a listing is read (`models`
 stays `null` until then).
+`warning_kinds` is an array as long as `warnings`, in the same order, that tells what each
+warning is about: `version` (a version other than the one Flottille was checked against) or
+`sign_in` (no sign-in it can see, or the sign-in line of a refused listing). The kind is told
+by the daemon, never read from the text; `warnings` stays an array of strings, so a client that
+knows no kinds keeps working. The window says the `sign_in` warnings under the composer's
+pickers, and the others only where the providers are looked at (Settings, `flottille providers`).
 `images` says whether its agents take images in a prompt, as the last of them that started said
 (`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test

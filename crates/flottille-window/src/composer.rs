@@ -545,11 +545,12 @@ impl Composer {
         self.providers.get(self.pick.provider.as_deref()?)
     }
 
-    /// What the daemon says may stop the provider picked, one line under the pickers: a models
-    /// listing it refused for no login says to sign in where its models would be.
+    /// What the daemon says the user can act on here for the provider picked, one line under the
+    /// pickers: a models listing it refused for no login says to sign in where its models would
+    /// be. A version other than the one checked is said in Settings, never here.
     fn provider_warning(&self) -> Option<String> {
         let provider = self.provider().filter(|p| p.offered())?;
-        (!provider.warnings.is_empty()).then(|| provider.warnings.join(" · "))
+        (!provider.sign_in_warnings.is_empty()).then(|| provider.sign_in_warnings.join(" · "))
     }
 
     pub fn error(&self) -> Option<&str> {
