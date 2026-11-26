@@ -444,16 +444,20 @@ fn rules_changed_on_a_machine_are_its_own_until_it_uses_all_machines(cx: &mut Te
     assert_eq!(label(cx, "shared-rules-reset").as_deref(), Some(USE_ALL));
     assert!(!present(cx, "shared-tool-results-set"));
 
+    let tall = height(cx, "shared-rules-block").expect("the mark's block");
     cx.update(|window, cx| window.click("shared-rules-reset".to_owned(), cx));
-    let mut seen = 0;
+    let mut heights = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     while present(cx, "shared-rules-set") {
         assert!(Instant::now() < deadline, "the mark never went");
         step(&shell, cx);
-        seen += 1;
+        heights.extend(height(cx, "shared-rules-block"));
         std::thread::sleep(Duration::from_millis(25));
     }
-    assert!(seen > 1, "the mark went at once");
+    assert!(
+        heights.iter().any(|h| *h > 0.5 && *h < tall - 0.5),
+        "the mark went at once: {tall} then {heights:?}"
+    );
     eventually("the server follows all machines again", || {
         call(&server, "rules.show", json!({}))["text"] == RULES
     });
@@ -482,4 +486,139 @@ fn a_shade_written_before_is_not_marked_as_the_machine_s(cx: &mut TestAppContext
     settle(&shell, cx);
 
     assert!(!present(cx, "shared-appearance-set"));
+}
+
+/// Point 5 of #1525's review: a section whose second value would be refused shares none of its
+/// values, and says why.
+#[gpui_kit::test]
+fn a_section_with_a_refused_value_shares_none_of_them(cx: &mut TestAppContext) {
+    let (hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    shell.update(cx, |s, _| s.sign_with(signing(&pc)));
+    all_machines(&shell, cx);
+    let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+    let judge = text_field(&shell, "judge.guidance", cx);
+    put_text(&judge, "Let a read of the project through.", cx);
+    let compaction = text_field(&shell, "compaction.guidance", cx);
+    put_text(&compaction, &format!("Keep {token} for later."), cx);
+    until(&shell, cx, "the Save unfolds", |cx| {
+        present(cx, "all-guidance-save")
+    });
+    settle(&shell, cx);
+
+    click(&shell, "all-guidance-save", cx);
+
+    until(&shell, cx, "the refusal is said", |cx| {
+        toasts(&shell, cx).contains(&"Not saved".to_owned())
+    });
+    let all = call(&pc, "settings.shared", json!({}))["all"].clone();
+    assert!(all.get("judge.guidance").is_none(), "{all}");
+    let kept = hub.with_hub(|hub| serde_json::to_string(hub.shared()).unwrap());
+    assert!(!kept.contains("judge.guidance"), "{kept}");
+    // What was typed stays, to be corrected.
+    assert_eq!(text_of(&judge, cx), "Let a read of the project through.");
+}
+
+/// Point 3 of #1525's review (#1462): a shade chosen on a machine stays its own, even the same as
+/// all machines', and its page marks it once all machines change theirs.
+#[gpui_kit::test]
+fn a_shade_chosen_on_a_machine_stays_marked_when_all_machines_change(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    share(&pc, json!({"appearance.shade": "light"}));
+    eventually("the server is light", || {
+        call(&server, "appearance.show", json!({}))["shade"] == "light"
+    });
+    call(&server, "appearance.set", json!({"shade": "light"}));
+    share(&pc, json!({"appearance.shade": "dark"}));
+    eventually("all machines are dark", || {
+        call(&server, "settings.shared", json!({}))["all"]["appearance.shade"] == "dark"
+    });
+    let (shell, cx) = window(&pc, cx);
+
+    settings(&shell, "general", cx);
+    choose(&shell, "server", cx);
+
+    until(&shell, cx, "the server's shade is marked", |cx| {
+        present(cx, "shared-appearance-set")
+    });
+    assert_eq!(
+        call(&server, "appearance.show", json!({}))["shade"],
+        "light"
+    );
+}
+
+/// Point 3 of #1525's review: colours chosen in the window leave the shade to all machines: the
+/// window sends only what the user changed.
+#[gpui_kit::test]
+fn colours_chosen_in_the_window_leave_the_shade_to_all_machines(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    share(&pc, json!({"appearance.shade": "light"}));
+    eventually("this machine is light", || {
+        call(&pc, "appearance.show", json!({}))["shade"] == "light"
+    });
+    let (shell, cx) = window(&pc, cx);
+    settings(&shell, "general", cx);
+    until(&shell, cx, "the appearance is read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .settings_page()
+                .is_some_and(|page| page.read(cx).appearance_known())
+        })
+    });
+    settle(&shell, cx);
+
+    click(&shell, "appearance-theme-flottille", cx);
+    eventually("the colours are Flottille's", || {
+        call(&pc, "appearance.show", json!({}))["theme"] == "flottille"
+    });
+    share(&pc, json!({"appearance.shade": "dark"}));
+
+    eventually("this machine follows all machines' dark", || {
+        call(&pc, "appearance.show", json!({}))["shade"] == "dark"
+    });
+    assert_eq!(call(&pc, "settings.shared", json!({}))["own"], json!([]));
+}
+
+/// The colour of the edge of the box `id`, as last painted.
+fn edge(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Hsla> {
+    cx.update(|window, _| {
+        let found = window.try_find(id.to_owned())?;
+        let bounds = found.bounds().scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .find(|quad| {
+                (quad.bounds.origin.x.0 - bounds.origin.x.0).abs() < 1.0
+                    && (quad.bounds.origin.y.0 - bounds.origin.y.0).abs() < 1.0
+                    && (quad.bounds.size.width.0 - bounds.size.width.0).abs() < 1.0
+                    && quad.border_color.a > 0.0
+            })
+            .map(|quad| quad.border_color)
+    })
+}
+
+/// Point 9 of #1525's review: the edge of a guidance's box moves to the focus colour as the field
+/// takes the focus, over several frames.
+#[gpui_kit::test]
+fn the_edge_of_a_guidance_moves_to_the_focus_colour(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    all_machines(&shell, cx);
+    let field = text_field(&shell, "rules", cx);
+    let rest = edge(cx, "all-rules-box").expect("the box's edge");
+
+    field.update_in(cx, |field, window, cx| field.focus(window, cx));
+    let mut edges = Vec::new();
+    for _ in 0..30 {
+        step(&shell, cx);
+        edges.extend(edge(cx, "all-rules-box"));
+    }
+
+    let focused = *edges.last().expect("the box's edge");
+    assert!(focused != rest, "the edge stays at rest: {rest:?}");
+    assert!(
+        edges.iter().any(|edge| *edge != rest && *edge != focused),
+        "the edge moved at once: {rest:?} then {edges:?}"
+    );
 }
