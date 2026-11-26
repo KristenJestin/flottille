@@ -1058,6 +1058,11 @@ const MIGRATIONS: &[&str] = &[
         shown TEXT
     ) STRICT;
 ",
+    "
+    -- Who stopped a run that was stopped (`agent`, `user`, `session`, `daemon`): its result says
+    -- so, never only that it stopped. `NULL` for any other end, and for a run stopped before.
+    ALTER TABLE runs ADD COLUMN stopped_by TEXT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2214,6 +2219,28 @@ impl Store {
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(Some(event))
+    }
+
+    /// Keeps who stopped a running run, before its end is recorded.
+    pub fn set_run_stopped_by(&mut self, id: &str, by: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE runs SET stopped_by = ?2 WHERE id = ?1 AND state = 'running'",
+            params![id, by],
+        )?;
+        Ok(())
+    }
+
+    /// Who stopped the run, when it was stopped.
+    pub fn run_stopped_by(&self, id: &str) -> Result<Option<String>> {
+        let by = self
+            .connection
+            .query_row(
+                "SELECT stopped_by FROM runs WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(by.flatten())
     }
 
     /// Marks a starting run ready, with its event, in one transaction; `None` when it was not

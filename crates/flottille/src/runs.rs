@@ -114,8 +114,8 @@ struct Going {
     output: Mutex<Output>,
     end: watch::Sender<Option<End>>,
     stop: Notify,
-    /// Why it was stopped, when it was.
-    stopped_as: Mutex<Option<RunState>>,
+    /// Who stopped it, when someone did.
+    stopped_as: Mutex<Option<StoppedBy>>,
     /// What its output is masked with: its environment and the place's secret files.
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
@@ -124,8 +124,6 @@ struct Going {
     /// Whether the call that started it still waits for its end, answered with it running, or
     /// is over: only a run that outlived its call wakes the agent when it ends.
     phase: Mutex<Phase>,
-    /// The user stopped it (`run.stop`), which the agent is told.
-    stopped_by_user: AtomicBool,
     /// The user stopped it to start it again (`run.restart`), which tells the agent once, with
     /// the new run's id, and not by its end.
     restarted: AtomicBool,
@@ -189,6 +187,44 @@ struct End {
     state: RunState,
     exit_code: Option<i32>,
     signal: Option<i32>,
+    /// Who stopped it, for a run that was stopped: its result says so, never only "stopped".
+    by: Option<StoppedBy>,
+}
+
+/// Who stops a run: no one else does (#1548). A call given up, its timeout or a turn cancelled
+/// leaves it running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoppedBy {
+    /// The agent that started it (`run_status` with `action: stop`).
+    Agent,
+    /// The user (`run.stop`, a restart, a removal).
+    User,
+    /// Its session ended.
+    Session,
+    /// The daemon stopped: marked interrupted.
+    Daemon,
+}
+
+impl StoppedBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            StoppedBy::Agent => "agent",
+            StoppedBy::User => "user",
+            StoppedBy::Session => "session",
+            StoppedBy::Daemon => "daemon",
+        }
+    }
+
+    fn parse(text: &str) -> Option<StoppedBy> {
+        [
+            StoppedBy::Agent,
+            StoppedBy::User,
+            StoppedBy::Session,
+            StoppedBy::Daemon,
+        ]
+        .into_iter()
+        .find(|by| by.as_str() == text)
+    }
 }
 
 impl Output {
@@ -453,7 +489,7 @@ pub async fn run(
             going.notify.store(true, Ordering::SeqCst);
         }
         crate::mcp::started_run(&going.run.id);
-        return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
+        return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
     }
     // The project's checks of a commit's message, then the commit checks of its repository,
     // before git makes it.
@@ -693,22 +729,18 @@ pub async fn run(
     crate::mcp::started_run(&id);
     if serve {
         detach(daemon, &id);
-        let described = describe(daemon, &id, None, None, true, false);
+        let described = describe(daemon, &id, None, None, true);
         return Outcome::Done(format!("{services_said}{described}"));
     }
-    // Held now: once ended, the run is no longer among those going on.
-    let going = daemon.mcp.runs.runs.lock().unwrap().get(&id).cloned();
     let ended = wait_for_end(daemon, &id);
+    // A call given up (its turn cancelled to take a delivery, the user's Stop on the turn) leaves
+    // its run going, as its timeout does: its end is delivered (#1548).
     tokio::select! {
         () = ended => {}
         () = tokio::time::sleep(Duration::from_secs(wait)) => detach(daemon, &id),
-        () = cancelled.cancelled() => {
-            stop(daemon, &id, RunState::Stopped).await;
-            return Outcome::Failed("the call was stopped before it ended".into());
-        }
+        () = cancelled.cancelled() => detach(daemon, &id),
     }
-    let by_user = going.is_some_and(|going| going.stopped_by_user.load(Ordering::SeqCst));
-    let described = describe(daemon, &id, None, None, true, by_user);
+    let described = describe(daemon, &id, None, None, true);
     Outcome::Done(format!("{services_said}{described}"))
 }
 
@@ -1273,7 +1305,6 @@ fn start(
         secrets,
         pid,
         phase: Mutex::new(phase),
-        stopped_by_user: AtomicBool::new(false),
         restarted: AtomicBool::new(false),
         readiness: Mutex::new(run_ready),
         ready_line: match &readying.probe {
@@ -1589,16 +1620,20 @@ async fn follow(
             state: RunState::Exited,
             exit_code: status.code(),
             signal: status.signal(),
+            by: None,
         },
-        None => End {
-            state: going
-                .stopped_as
-                .lock()
-                .unwrap()
-                .unwrap_or(RunState::Stopped),
-            exit_code: None,
-            signal: None,
-        },
+        None => {
+            let by = *going.stopped_as.lock().unwrap();
+            End {
+                state: match by {
+                    Some(StoppedBy::Daemon) => RunState::Interrupted,
+                    _ => RunState::Stopped,
+                },
+                exit_code: None,
+                signal: None,
+                by,
+            }
+        }
     };
     let output = masked_output(&going);
     let missed = {
@@ -1610,10 +1645,15 @@ async fn follow(
         missed
     };
     let run = &going.run;
+    let stopped_by = end.by.map(StoppedBy::as_str);
     let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
-        "state": end.state.as_str(), "exit_code": end.exit_code, "signal": end.signal});
+        "state": end.state.as_str(), "exit_code": end.exit_code, "signal": end.signal,
+        "stopped_by": stopped_by});
     let store = |store: &mut Store| {
         store.remove_run_process(pid)?;
+        if let Some(by) = stopped_by {
+            store.set_run_stopped_by(&run.id, by)?;
+        }
         let event = store.end_run(
             &run.id,
             end.state,
@@ -1642,7 +1682,8 @@ async fn follow(
     }
     let detached =
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
-    let by_user = going.stopped_by_user.load(Ordering::SeqCst);
+    // The user stopped it (`run.stop`), which the agent is told.
+    let by_user = end.by == Some(StoppedBy::User);
     // Told to the agent only when no call was left to answer, and only for an end that is news
     // to it: not its own stop, nor the daemon's or its own end, nor a restart, which says more.
     let told = match end.state {
@@ -1654,7 +1695,7 @@ async fn follow(
         && told
         && let Some(agent) = &run.agent
     {
-        let body = ended_text(&going, end, &output, by_user, missed);
+        let body = ended_text(&going, end, &output, missed);
         deliveries::deliver(
             &daemon,
             agent,
@@ -1669,8 +1710,8 @@ async fn follow(
 
 /// What the agent is told of a run that ended after its call: how it ended, how long it ran and
 /// the end of its output.
-fn ended_text(going: &Going, end: End, output: &str, by_user: bool, missed: bool) -> String {
-    let state = state_text(Some(end), by_user);
+fn ended_text(going: &Going, end: End, output: &str, missed: bool) -> String {
+    let state = state_text(Some(end));
     let seconds = (now_ms() - going.run.started_at) as f64 / 1000.0;
     let mut text = format!(
         "Your command `{}` (run {}) {state} after {seconds:.1} s.",
@@ -1705,46 +1746,48 @@ fn masked_output(going: &Going) -> String {
     )
 }
 
-/// Asks the run to stop and waits for its end.
-async fn stop(daemon: &Daemon, id: &str, state: RunState) {
+/// Asks the run to stop, as `by` does, and waits for its end.
+async fn stop(daemon: &Daemon, id: &str, by: StoppedBy) {
     let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
     let Some(going) = going else { return };
-    *going.stopped_as.lock().unwrap() = Some(state);
+    *going.stopped_as.lock().unwrap() = Some(by);
     let mut end = going.end.subscribe();
     going.stop.notify_one();
     let _ = end.wait_for(Option::is_some).await;
 }
 
-/// How a run is: running, or how it ended; `by_user` when the user stopped it.
-fn state_text(end: Option<End>, by_user: bool) -> String {
-    match end {
-        None => "is running".to_owned(),
-        Some(End {
-            state: RunState::Exited,
-            exit_code: Some(code),
-            ..
-        }) => format!("exited with code {code}"),
-        Some(End {
-            state: RunState::Exited,
-            signal,
-            ..
-        }) => format!("was killed by signal {}", signal.unwrap_or_default()),
-        Some(End {
-            state: RunState::Stopped,
-            ..
-        }) if by_user => "was stopped by the user".to_owned(),
-        Some(End {
-            state: RunState::Stopped,
-            ..
-        }) => "was stopped".to_owned(),
-        Some(End {
-            state: RunState::Interrupted,
-            ..
-        }) => "was interrupted: Flottille stopped while it ran".to_owned(),
-        Some(End {
-            state: RunState::Running,
-            ..
-        }) => "is running".to_owned(),
+/// How a run is: running, or how it ended, and who stopped it or what killed it.
+fn state_text(end: Option<End>) -> String {
+    let Some(end) = end else {
+        return "is running".to_owned();
+    };
+    match (end.state, end.exit_code, end.signal, end.by) {
+        (RunState::Exited, Some(code), _, _) => format!("exited with code {code}"),
+        // Flottille's own stops are said as stops: a signal came from outside it.
+        (RunState::Exited, None, signal, _) => {
+            let signal = signal.unwrap_or_default();
+            let why = match signal {
+                libc::SIGKILL => {
+                    " (SIGKILL) from outside Flottille: the system's out-of-memory killer, or a kill"
+                }
+                libc::SIGTERM => " (SIGTERM) from outside Flottille",
+                _ => " from outside Flottille",
+            };
+            format!("was killed by signal {signal}{why}")
+        }
+        (RunState::Stopped, _, _, Some(StoppedBy::Agent)) => {
+            "was stopped by the agent that started it".to_owned()
+        }
+        (RunState::Stopped, _, _, Some(StoppedBy::User)) => "was stopped by the user".to_owned(),
+        (RunState::Stopped, _, _, Some(StoppedBy::Session)) => {
+            "was stopped because its session ended".to_owned()
+        }
+        // A run stopped before who stopped it was kept.
+        (RunState::Stopped, _, _, _) => "was stopped".to_owned(),
+        (RunState::Interrupted, _, _, _) => {
+            "was interrupted: Flottille stopped while it ran".to_owned()
+        }
+        (RunState::Running, _, _, _) => "is running".to_owned(),
     }
 }
 
@@ -1812,11 +1855,7 @@ pub fn view(daemon: &Daemon, id: &str) -> Option<View> {
 /// The user stops the run: its whole group, as the agent's own stop does, and the agent is told
 /// it was the user once it ended.
 pub async fn stop_by_user(daemon: &Daemon, id: &str) {
-    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
-    if let Some(going) = going {
-        going.stopped_by_user.store(true, Ordering::SeqCst);
-    }
-    stop(daemon, id, RunState::Stopped).await;
+    stop(daemon, id, StoppedBy::User).await;
 }
 
 /// A run being restarted (`run.restart`), until the guard is dropped.
@@ -2148,7 +2187,7 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             if let Some(going) = going {
                 going.notify.store(true, Ordering::SeqCst);
             }
-            Outcome::Done(describe(daemon, &run.id, Some(1), None, false, false))
+            Outcome::Done(describe(daemon, &run.id, Some(1), None, false))
         }
         "output" => {
             let tail = args.tail.unwrap_or(TAIL_LINES);
@@ -2157,7 +2196,7 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                     "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
                 ));
             }
-            Outcome::Done(describe(daemon, id, Some(tail), args.start, false, false))
+            Outcome::Done(describe(daemon, id, Some(tail), args.start, false))
         }
         "stop" => {
             if args.tail.is_some() || args.start.is_some() {
@@ -2167,8 +2206,8 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                         .into(),
                 );
             }
-            stop(daemon, id, RunState::Stopped).await;
-            Outcome::Done(describe(daemon, id, None, None, false, false))
+            stop(daemon, id, StoppedBy::Agent).await;
+            Outcome::Done(describe(daemon, id, None, None, false))
         }
         other => Outcome::Refused(format!(
             "refused: run_status has no action {other:?}: its actions are output (the default), \
@@ -2210,11 +2249,7 @@ fn list(daemon: &Daemon, agent: &str) -> Outcome {
             continue;
         };
         let run = view.run;
-        let end = (run.state != RunState::Running).then_some(End {
-            state: run.state,
-            exit_code: run.exit_code,
-            signal: run.signal,
-        });
+        let end = (run.state != RunState::Running).then(|| stored_end(daemon, &run));
         let label = match &run.name {
             Some(name) => format!("{name} (`{}`)", run.line),
             None => format!("`{}`", run.line),
@@ -2223,7 +2258,7 @@ fn list(daemon: &Daemon, agent: &str) -> Outcome {
             "\n- run {}: {label} in {} {}, started {} ago",
             run.id,
             run.folder.display(),
-            state_text(end, false),
+            state_text(end),
             crate::tree::ago(now.saturating_sub(run.started_at)),
         ));
         if let Some(said) = needs_said(&needs_stopped(daemon, &run.id)) {
@@ -2257,6 +2292,22 @@ fn own(daemon: &Daemon, agent: &str, id: &str) -> Result<Run, Outcome> {
     }
 }
 
+/// How a stored run ended, and who stopped it.
+fn stored_end(daemon: &Daemon, run: &Run) -> End {
+    let by = daemon
+        .read(|store| store.run_stopped_by(&run.id))
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(StoppedBy::parse);
+    End {
+        state: run.state,
+        exit_code: run.exit_code,
+        signal: run.signal,
+        by,
+    }
+}
+
 /// What an answer says of a run: its state, then lines of its output, the last `tail` or those
 /// from `start`, with how to read the others.
 fn describe(
@@ -2265,7 +2316,6 @@ fn describe(
     tail: Option<usize>,
     start: Option<usize>,
     answer_of_run: bool,
-    by_user: bool,
 ) -> String {
     let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
     let (run, end, output, cut) = match &going {
@@ -2276,11 +2326,7 @@ fn describe(
         }
         None => match daemon.read(|store| store.run(id)) {
             Ok(Some(run)) => {
-                let end = End {
-                    state: run.state,
-                    exit_code: run.exit_code,
-                    signal: run.signal,
-                };
+                let end = stored_end(daemon, &run);
                 let output = run.output.clone();
                 (run, Some(end), output, 0)
             }
@@ -2291,7 +2337,7 @@ fn describe(
         Some(name) => format!("{name} (`{}`)", run.line),
         None => format!("`{}`", run.line),
     };
-    let state = state_text(end, by_user);
+    let state = state_text(end);
     let seconds = (run.ended_at.unwrap_or_else(now_ms) - run.started_at) as f64 / 1000.0;
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
     let told = going
@@ -2867,7 +2913,7 @@ pub async fn stop_runs_of(daemon: &Daemon, agent: &str) {
         .filter(|(_, going)| going.run.agent.as_deref() == Some(agent))
         .map(|(id, _)| id.clone())
         .collect();
-    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, RunState::Stopped))).await;
+    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, StoppedBy::Session))).await;
 }
 
 /// The daemon stopping: every run is stopped, and marked interrupted. All at once: each may take
@@ -2882,7 +2928,7 @@ pub async fn stop_all(daemon: &Daemon) {
         .keys()
         .cloned()
         .collect();
-    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, RunState::Interrupted))).await;
+    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, StoppedBy::Daemon))).await;
 }
 
 #[cfg(test)]

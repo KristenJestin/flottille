@@ -498,9 +498,17 @@ pending requests.
   back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
-  A call stopped by its client stops its run.
+  A call its client gives up (its turn cancelled to take a delivery that was not taken in time,
+  a message sent at once, the user's Stop on the turn) leaves its run going, as the timeout does:
+  its end is delivered. **A run goes on to its end unless someone stops it**: the agent
+  (`run_status` with `action: stop`), the user, its session ending, or the daemon stopping; no
+  one else.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
-  `was killed by signal N`, `was stopped`, `was interrupted…`), then, while it runs, `it keeps
+  `was killed by signal N (SIGKILL) from outside Flottille: the system's out-of-memory killer, or
+  a kill`, `was killed by signal N from outside Flottille`, `was stopped by the agent that started
+  it`, `was stopped by the user`, `was stopped because its session ended`, `was interrupted:
+  Flottille stopped while it ran`): who stopped it, never only that it stopped (`was stopped`
+  alone is a run stopped before who stopped it was kept), then, while it runs, `it keeps
   going: read it with run_status {"run": "<id>"}, stop it with run_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
@@ -708,7 +716,7 @@ pending requests.
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
   nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops
   while its call still waits says so in that answer (`was stopped by the user`); the agent's own
-  stop says `was stopped`. A command the user restarts from the window (`run.restart`) is not
+  stop says `was stopped by the agent that started it`. A command the user restarts from the window (`run.restart`) is not
   delivered as stopped: the agent is told, in a `command-ended` delivery of its own for each
   restart (so also when it was already told the first run's end), that the user restarted it and
   which run it now is (its own, read with `run_status`); if the stop happened and the new run could

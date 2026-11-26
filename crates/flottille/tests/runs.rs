@@ -467,7 +467,10 @@ fn an_agent_lists_its_own_running_commands() {
     }
     // The id it reads there stops the server.
     let stopped = ok(mcp.call("run_status", json!({"run": server, "action": "stop"})));
-    assert!(stopped.contains("was stopped after"), "{stopped}");
+    assert!(
+        stopped.contains("was stopped by the agent that started it after"),
+        "{stopped}"
+    );
 }
 
 #[test]
@@ -511,7 +514,10 @@ fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
     // The agent's own stop says what it is: its own.
     let run = start(&mcp, "server");
     let own = ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
-    assert!(own.contains("was stopped after"), "{own}");
+    assert!(
+        own.contains("was stopped by the agent that started it after"),
+        "{own}"
+    );
 }
 
 #[test]

@@ -1288,9 +1288,10 @@ ended.
 | Field | |
 |---|---|
 | `agent`, `run` | |
-| `state` | `exited` (by itself), `stopped` (`run_status` with `action: stop`, `run.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
+| `state` | `exited` (by itself), `stopped` (`run_status` with `action: stop`, `run.stop`, or its session ending), `interrupted` (the daemon stopped, or the one that ran it is gone). A call given up never stops its run. |
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
-| `signal` | The signal that ended it, `null` otherwise. |
+| `signal` | The signal that ended it, `null` otherwise: one from outside Flottille, whose own stops are `stopped`. |
+| `stopped_by` | Who stopped it: `agent` (the agent that started it), `user`, `session` (its session ended) or `daemon` (the daemon stopped); `null` for any other end. |
 
 A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
 `run.started` for the new one, of the same `agent`, `project` and `name`.
