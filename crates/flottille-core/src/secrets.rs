@@ -721,7 +721,8 @@ enum Place {
     Pair(usize),
     /// After a whitespace, in the middle of a line: only as `key=value` with no space, which
     /// reads as it does at a line's start, so a text cut before it reads the same
-    /// (`login failed, token=…`).
+    /// (`login failed, token=…`). A password's value, which runs to a line's end there, is the
+    /// exception: streamed, it masks more than whole, never less.
     Word,
 }
 
@@ -1707,6 +1708,25 @@ mod tests {
                 whole,
                 "cut at {at}"
             );
+        }
+    }
+
+    #[test]
+    fn a_password_in_the_middle_of_a_line_streams_masking_no_less_than_whole() {
+        // Read whole, its value is one word (`password=a b c` masks `a`); streamed, a cut before
+        // its key leaves the key at the start of the text left, which reads it as a line's and
+        // masks the line to its end. Holding every last word of a text to avoid it would settle
+        // no prose at once: the stream masks more, and never lets a part of the value out.
+        let text = "login failed, password=aaaa bbbb cccc done";
+        let whole = mask(text, &BTreeMap::new());
+        assert_eq!(whole, "login failed, password=[masked] bbbb cccc done");
+        for at in (1..text.len()).filter(|&at| text.is_char_boundary(at)) {
+            let out = streamed(text, &[at], &BTreeMap::new());
+            assert!(
+                out.starts_with("login failed, password=[masked]"),
+                "{at}: {out}"
+            );
+            assert!(!out.contains("aaaa"), "{at}: {out}");
         }
     }
 
