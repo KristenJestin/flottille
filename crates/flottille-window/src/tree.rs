@@ -1569,7 +1569,7 @@ impl ProjectNode {
     }
 
     /// Whether its foot is unfolded.
-    pub fn blocked_open(&self) -> bool {
+    pub fn blocked_open(&self, _cx: &App) -> bool {
         false
     }
 
