@@ -2144,6 +2144,49 @@ mod tests {
         assert!("../.env".parse::<NoticeId>().is_err());
     }
 
+    /// A hub whose welcome did not say `unshare` would close the session on an ask it does not
+    /// know: it is never sent one, and the asker hears why.
+    #[tokio::test]
+    async fn a_hub_of_before_unshare_is_never_asked_to_drop_a_copy() {
+        let asker = |unshare| {
+            let (asks, sent) = mpsc::unbounded_channel();
+            let asker = Asker {
+                authority: "hub.example.net:443".to_owned(),
+                asks,
+                ended: Arc::new(Mutex::new(None)),
+                notices: true,
+                shared: true,
+                unshare,
+            };
+            (asker, sent)
+        };
+        let unshare = || Ask::Unshare {
+            name: "about.name".to_owned(),
+            at: 7,
+        };
+
+        let (old, mut sent) = asker(false);
+        // Bounded: an ask that was sent would wait for an answer no one gives.
+        let wait = Duration::from_secs(5);
+        match tokio::time::timeout(wait, old.ask(unshare()))
+            .await
+            .unwrap()
+        {
+            Err(ControlError::Refused { reason, .. }) => {
+                assert!(reason.contains("drops no copy"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(sent.try_recv().is_err());
+
+        let (new, mut sent) = asker(true);
+        let asked = tokio::spawn(async move { new.ask(unshare()).await });
+        let (ask, answer) = sent.recv().await.unwrap();
+        assert!(matches!(ask, Ask::Unshare { at: 7, .. }));
+        answer.send(Ok(())).unwrap();
+        assert!(asked.await.unwrap().is_ok());
+    }
+
     #[test]
     fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
         // What is stored and reached keeps the port and the path whole; what is shown is how a
