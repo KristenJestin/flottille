@@ -172,13 +172,20 @@ fn limited(about: About) -> (About, Vec<String>) {
     (about, cuts)
 }
 
-/// What is wrong with a field offered: too long, or a name that is not one line.
+/// What is wrong with a field offered: too long, holding a secret, or a name that is not one line.
 fn check(name: &str, text: &str, limit: usize) -> Result<(), String> {
     let count = text.chars().count();
     if count > limit {
         return Err(format!(
             "{name} is {count} characters long and may hold {limit}: it rides in every session's \
              instructions, so keep what matters"
+        ));
+    }
+    // About you is shared with every machine and read into their sessions: a secret in it would
+    // reach machines whose vault cannot mask it, so it is refused on both ends.
+    if flottille_core::secrets::mask(text, &Default::default()) != text {
+        return Err(format!(
+            "{name} holds a secret: keep secrets in the vault and name the entry instead"
         ));
     }
     Ok(())
@@ -397,5 +404,20 @@ mod tests {
         assert_eq!(about.name.chars().count(), SHORT_LIMIT);
         assert_eq!(about.notes.chars().count(), LIMIT);
         assert_eq!(cuts.len(), 1, "{cuts:?}");
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn about_you_holding_a_token_is_refused_and_never_received() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let notes = format!("Push with {token}.");
+        let refused = check("what every agent should know", &notes, LIMIT).unwrap_err();
+        assert!(refused.contains("secret"), "{refused}");
+        assert!(received("notes", &notes).is_none());
+        assert!(received("notes", "I review on Fridays.").is_some());
     }
 }
