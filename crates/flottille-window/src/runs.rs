@@ -1272,11 +1272,14 @@ impl Render for CommandList {
             .border_color(p.line)
             .pt(space::SM)
             .pb(space::MD)
-            .child(div().h(px(32.)).px(px(8.)).flex().items_center().child(bar(
-                "rail-runs-skeleton-title",
-                40.,
-                11.,
-            )))
+            .child(
+                div()
+                    .h(px(32.))
+                    .px(space::SM)
+                    .flex()
+                    .items_center()
+                    .child(bar("rail-runs-skeleton-title", 40., 11.)),
+            )
             .child(
                 div()
                     .id("rail-runs-skeleton-row")

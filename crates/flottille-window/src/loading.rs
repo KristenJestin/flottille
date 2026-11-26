@@ -127,7 +127,10 @@ impl ConversationLoading {
             cx.background_executor().timer(CONVERSATION_AFTER).await;
             this.update(cx, |this, cx| {
                 this.long = true;
-                cx.notify();
+                // Read meanwhile, nothing changes: nothing is drawn at rest.
+                if this.opening == Opening::Waiting {
+                    cx.notify();
+                }
             })
             .ok();
         }));
@@ -141,8 +144,9 @@ impl ConversationLoading {
         if self.opening == opening {
             return;
         }
-        if opening == Opening::Waiting {
-            self.wait(cx);
+        match opening == Opening::Waiting {
+            true => self.wait(cx),
+            false => self.delay = None,
         }
         self.opening = opening;
         cx.notify();
@@ -214,10 +218,10 @@ impl Render for ConversationLoading {
                     .aria_label("Reading the conversation…")
                     .child(
                         column()
-                            .pb(px(20.))
+                            .pb(space::LG)
                             .flex()
                             .flex_col()
-                            .gap(px(18.))
+                            .gap(space::LG)
                             .children(MESSAGES.iter().enumerate().map(|(n, (right, lines))| {
                                 div().w_full().flex().flex_col().children(
                                     lines.iter().enumerate().map(|(at, share)| {
